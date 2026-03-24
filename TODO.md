@@ -35,3 +35,19 @@
 - `cargo test` 通过（17 passed）。
 残余风险：
 - 已覆盖 rmcp duplex 端到端调用；仍未覆盖 Claude Desktop/Cursor 等宿主集成测试。
+
+## T-004 Phase2-MCPAsyncStatusArtifact (Completed 2026-03-24)
+任务：补齐 MCP 异步运行工具与状态/产物读取能力。
+验收标准：
+1. MCP 暴露 `spawn_agent/get_agent_status/cancel_agent/read_agent_artifact` 四个工具。
+2. `spawn_agent` 立即返回 `handle_id`，随后可通过 `get_agent_status` 看到状态推进到终态。
+3. `cancel_agent` 对运行中任务生效，并将状态标记为 `Cancelled`。
+4. `read_agent_artifact` 可读取 UTF-8 文本 artifact（至少覆盖 `summary.json`）。
+5. `cargo test` 通过，并新增 duplex 协议测试覆盖新工具链路。
+完成记录：
+- 已在 MCP server 暴露 4 个新增工具，并保留 `list_agents/run_agent`。
+- 已实现内存态 run registry（运行状态、错误信息、summary、artifact 索引与文本内容）。
+- `spawn_agent` 立即返回 `handle_id`，后台异步执行后可由 `get_agent_status` 轮询终态。
+- `cancel_agent` 可中止运行中任务并写入 `Cancelled` 状态与取消摘要。
+- `read_agent_artifact` 已可读取 `summary.json/stdout.txt/stderr.txt` 等文本 artifact。
+- 已新增 duplex 端到端测试覆盖上述工具链路，`cargo test` 通过（17 passed）。
