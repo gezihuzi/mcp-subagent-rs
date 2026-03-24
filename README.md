@@ -75,7 +75,7 @@ ollama = "0.5"
 Run one command for minimal local acceptance:
 
 ```bash
-./scripts/smoke_v06.sh
+./scripts/smoke_v07_release.sh
 ```
 
 Initialize a local preset workspace:
@@ -96,10 +96,15 @@ mcp-subagent init --preset minimal-single-provider
 This script validates:
 
 1. `doctor`
-2. `validate`
-3. `list-agents`
-4. `run` on `Mock` (and `Codex` if available)
-5. `mcp` boot via short-lived `timeout`
+2. `doctor --json`
+3. `validate`
+4. `list-agents`
+5. `run` on `Mock`
+6. async policy gate (`run` fail + `spawn` pass)
+7. review evidence artifact generation and readback
+8. `run` on `Codex` (optional)
+9. `run` on `Ollama` (optional)
+10. `mcp` boot via short-lived `timeout`
 
 Optional local run with Ollama:
 
