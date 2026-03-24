@@ -34,12 +34,12 @@ pub(crate) async fn run_dispatch(
     request: &RunRequest,
     handle_id: &str,
     state_dir: &Path,
-    lock_key: Option<String>,
+    lock_keys: Vec<String>,
 ) -> std::result::Result<DispatchEnvelope, ErrorData> {
     let prepared_workspace = prepare_workspace(spec, request, state_dir, handle_id)
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     let workspace_cleanup = WorkspaceCleanupGuard::for_workspace(&prepared_workspace);
-    let workspace_record = to_workspace_record(&prepared_workspace, lock_key);
+    let workspace_record = to_workspace_record(&prepared_workspace, lock_keys);
 
     let mut effective_request = request.clone();
     effective_request.working_dir = prepared_workspace.workspace_path;
@@ -74,7 +74,8 @@ fn select_runner(provider: &Provider) -> Box<dyn AgentRunner> {
     }
 }
 
-fn to_workspace_record(prepared: &PreparedWorkspace, lock_key: Option<String>) -> WorkspaceRecord {
+fn to_workspace_record(prepared: &PreparedWorkspace, lock_keys: Vec<String>) -> WorkspaceRecord {
+    let lock_key = lock_keys.first().cloned();
     WorkspaceRecord {
         mode: match prepared.mode {
             WorkspaceMode::InPlace => "InPlace",
@@ -87,6 +88,7 @@ fn to_workspace_record(prepared: &PreparedWorkspace, lock_key: Option<String>) -
         workspace_path: prepared.workspace_path.clone(),
         notes: prepared.notes.clone(),
         lock_key,
+        lock_keys,
     }
 }
 
@@ -172,7 +174,7 @@ mod tests {
         let handle = "run-success-cleanup";
         let state_dir = temp.path().join("state");
 
-        let dispatch = run_dispatch(&spec, &request, handle, &state_dir, None)
+        let dispatch = run_dispatch(&spec, &request, handle, &state_dir, Vec::new())
             .await
             .expect("dispatch succeeds");
         let workspace_path = dispatch.workspace.workspace_path.clone();
@@ -197,7 +199,7 @@ mod tests {
         let handle = "run-error-cleanup";
         let state_dir = temp.path().join("state");
 
-        let err = run_dispatch(&spec, &request, handle, &state_dir, None)
+        let err = run_dispatch(&spec, &request, handle, &state_dir, Vec::new())
             .await
             .expect_err("dispatch should fail at memory resolve");
         assert!(err

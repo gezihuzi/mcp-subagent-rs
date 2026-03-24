@@ -5,6 +5,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use tokio::time::Duration;
 use uuid::Uuid;
 
 use crate::{
@@ -15,7 +16,9 @@ use crate::{
         summary::{SummaryEnvelope, SummaryParseStatus},
     },
     spec::{
-        runtime_policy::ApprovalPolicy, validate::validate_agent_spec, workflow::WorkflowStageKind,
+        runtime_policy::{ApprovalPolicy, SandboxPolicy, WorkingDirPolicy},
+        validate::validate_agent_spec,
+        workflow::WorkflowStageKind,
         Provider,
     },
     types::{ResolvedMemory, RunRequest},
@@ -54,6 +57,14 @@ pub struct RunMetadata {
     pub workspace_path: PathBuf,
     #[serde(default)]
     pub error_message: Option<String>,
+    #[serde(default)]
+    pub attempts_used: u32,
+    #[serde(default)]
+    pub retry_attempts: u32,
+    #[serde(default)]
+    pub max_attempts: u32,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +102,7 @@ where
 
         tracker.transition(RunStatus::Validating);
         validate_agent_spec(spec)?;
+        enforce_readonly_gitworktree_scope(spec, request)?;
         enforce_runtime_depth(spec, request)?;
         enforce_workflow_gate(spec, request)?;
 
@@ -103,47 +115,77 @@ where
         let compiled_context_markdown =
             format!("{}\n\n{}", compiled.system_prefix, compiled.injected_prompt);
 
-        tracker.transition(RunStatus::Launching);
-        tracker.transition(RunStatus::Running);
-        let execution = self.runner.execute(spec, request, &compiled).await?;
+        let retry_policy = &spec.runtime.retry_policy;
+        let configured_max_attempts = retry_policy.max_attempts.max(1);
+        let max_turns = spec.runtime.max_turns;
+        let turn_limit = max_turns.unwrap_or(u32::MAX);
+        let attempt_budget = configured_max_attempts.min(turn_limit).max(1);
+        tracker.set_attempt_budget(configured_max_attempts, max_turns);
 
-        tracker.transition(RunStatus::Collecting);
-        tracker.transition(RunStatus::ParsingSummary);
-        let summary_envelope = self
-            .compiler
-            .parse_summary(&execution.stdout, &execution.stderr)?;
+        let mut final_execution = None;
+        let mut final_summary = None;
+        let mut final_status = RunStatus::Failed;
+        let mut final_error_message = Some("dispatcher terminated unexpectedly".to_string());
 
-        tracker.transition(RunStatus::Finalizing);
-        match execution.terminal_state {
-            RunnerTerminalState::Succeeded => {
-                if matches!(summary_envelope.parse_status, SummaryParseStatus::Validated) {
-                    tracker.finish(RunStatus::Succeeded, None);
-                } else {
-                    tracker.finish(
-                        RunStatus::Failed,
-                        Some(format!(
-                            "structured summary parse status is {:?}",
-                            summary_envelope.parse_status
-                        )),
-                    );
+        for attempt in 1..=attempt_budget {
+            tracker.metadata.attempts_used = attempt;
+            tracker.transition(RunStatus::Launching);
+            tracker.transition(RunStatus::Running);
+            let execution = self.runner.execute(spec, request, &compiled).await?;
+
+            tracker.transition(RunStatus::Collecting);
+            tracker.transition(RunStatus::ParsingSummary);
+            let summary_envelope = self
+                .compiler
+                .parse_summary(&execution.stdout, &execution.stderr)?;
+            let attempt_assessment = assess_attempt_outcome(&execution, &summary_envelope);
+
+            let retry_exhausted = attempt >= attempt_budget;
+            let can_retry = attempt_assessment.retryable && !retry_exhausted;
+
+            final_execution = Some(execution);
+            final_summary = Some(summary_envelope);
+            final_status = attempt_assessment.status;
+            final_error_message = attempt_assessment.error_message;
+
+            if can_retry {
+                if retry_policy.backoff_secs > 0 {
+                    tokio::time::sleep(Duration::from_secs(retry_policy.backoff_secs)).await;
                 }
+                continue;
             }
-            RunnerTerminalState::Failed { message } => {
-                tracker.finish(RunStatus::Failed, Some(message));
+
+            if retry_exhausted && attempt_assessment.retryable {
+                let exhausted_message = if max_turns.is_some_and(|turns| turns <= attempt) {
+                    format!(
+                        "retryable failure exhausted by max_turns={}; attempts_used={attempt}",
+                        max_turns.unwrap_or(attempt)
+                    )
+                } else {
+                    format!("retry attempts exhausted; attempts_used={attempt}")
+                };
+                final_error_message = match final_error_message {
+                    Some(message) => Some(format!("{message}; {exhausted_message}")),
+                    None => Some(exhausted_message),
+                };
             }
-            RunnerTerminalState::TimedOut => {
-                tracker.finish(
-                    RunStatus::TimedOut,
-                    Some("runner exceeded timeout".to_string()),
-                );
-            }
-            RunnerTerminalState::Cancelled => {
-                tracker.finish(
-                    RunStatus::Cancelled,
-                    Some("runner cancelled by request".to_string()),
-                );
-            }
+            break;
         }
+
+        let execution = final_execution.ok_or_else(|| {
+            McpSubagentError::SpecValidation(
+                "dispatcher did not collect runner execution".to_string(),
+            )
+        })?;
+        let summary_envelope = final_summary.ok_or_else(|| {
+            McpSubagentError::SpecValidation(
+                "dispatcher did not collect summary envelope".to_string(),
+            )
+        })?;
+
+        tracker.metadata.retry_attempts = tracker.metadata.attempts_used.saturating_sub(1);
+        tracker.transition(RunStatus::Finalizing);
+        tracker.finish(final_status, final_error_message);
 
         Ok(DispatchResult {
             metadata: tracker.metadata,
@@ -153,6 +195,76 @@ where
             compiled_context_markdown,
         })
     }
+}
+
+#[derive(Debug)]
+struct AttemptAssessment {
+    status: RunStatus,
+    error_message: Option<String>,
+    retryable: bool,
+}
+
+fn assess_attempt_outcome(
+    execution: &crate::runtime::runners::RunnerExecution,
+    summary_envelope: &SummaryEnvelope,
+) -> AttemptAssessment {
+    match &execution.terminal_state {
+        RunnerTerminalState::Succeeded => {
+            if matches!(summary_envelope.parse_status, SummaryParseStatus::Validated) {
+                AttemptAssessment {
+                    status: RunStatus::Succeeded,
+                    error_message: None,
+                    retryable: false,
+                }
+            } else {
+                AttemptAssessment {
+                    status: RunStatus::Failed,
+                    error_message: Some(format!(
+                        "structured summary parse status is {:?}",
+                        summary_envelope.parse_status
+                    )),
+                    retryable: matches!(
+                        summary_envelope.parse_status,
+                        SummaryParseStatus::Invalid | SummaryParseStatus::Degraded
+                    ),
+                }
+            }
+        }
+        RunnerTerminalState::Failed { message } => AttemptAssessment {
+            status: RunStatus::Failed,
+            error_message: Some(message.clone()),
+            retryable: is_retryable_error_message(message),
+        },
+        RunnerTerminalState::TimedOut => AttemptAssessment {
+            status: RunStatus::TimedOut,
+            error_message: Some("runner exceeded timeout".to_string()),
+            retryable: true,
+        },
+        RunnerTerminalState::Cancelled => AttemptAssessment {
+            status: RunStatus::Cancelled,
+            error_message: Some("runner cancelled by request".to_string()),
+            retryable: false,
+        },
+    }
+}
+
+fn is_retryable_error_message(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    [
+        "timeout",
+        "timed out",
+        "temporary",
+        "try again",
+        "429",
+        "rate limit",
+        "network",
+        "connection",
+        "unavailable",
+        "econnreset",
+        "broken pipe",
+    ]
+    .iter()
+    .any(|keyword| lowered.contains(keyword))
 }
 
 fn enforce_workflow_gate(spec: &crate::spec::AgentSpec, request: &RunRequest) -> Result<()> {
@@ -179,6 +291,7 @@ fn enforce_workflow_gate(spec: &crate::spec::AgentSpec, request: &RunRequest) ->
         )));
     }
     enforce_stage_agent_routing(spec, &stage, stage_raw)?;
+    enforce_review_policy(spec, request, &stage, stage_raw)?;
 
     if !matches!(stage, WorkflowStageKind::Build | WorkflowStageKind::Review) {
         return Ok(());
@@ -216,6 +329,34 @@ fn enforce_runtime_depth(spec: &crate::spec::AgentSpec, request: &RunRequest) ->
         )));
     }
     Ok(())
+}
+
+fn enforce_readonly_gitworktree_scope(
+    spec: &crate::spec::AgentSpec,
+    request: &RunRequest,
+) -> Result<()> {
+    if !matches!(spec.runtime.sandbox, SandboxPolicy::ReadOnly)
+        || !matches!(
+            spec.runtime.working_dir_policy,
+            WorkingDirPolicy::GitWorktree
+        )
+    {
+        return Ok(());
+    }
+
+    let Some(stage_raw) = request.stage.as_deref() else {
+        return Err(McpSubagentError::SpecValidation(
+            "ReadOnly + GitWorktree requires explicit stage Research or Plan".to_string(),
+        ));
+    };
+    let stage = parse_stage_kind(stage_raw)?;
+    if matches!(stage, WorkflowStageKind::Research | WorkflowStageKind::Plan) {
+        return Ok(());
+    }
+
+    Err(McpSubagentError::SpecValidation(format!(
+        "ReadOnly + GitWorktree is only allowed for Research/Plan stage; received `{stage_raw}`"
+    )))
 }
 
 fn infer_runtime_depth(request: &RunRequest) -> u8 {
@@ -338,6 +479,106 @@ fn enforce_stage_agent_routing(
         }
         WorkflowStageKind::Build | WorkflowStageKind::Archive => Ok(()),
     }
+}
+
+fn enforce_review_policy(
+    spec: &crate::spec::AgentSpec,
+    request: &RunRequest,
+    stage: &WorkflowStageKind,
+    stage_raw: &str,
+) -> Result<()> {
+    if !matches!(stage, WorkflowStageKind::Review) {
+        return Ok(());
+    }
+    let Some(workflow) = spec.workflow.as_ref() else {
+        return Ok(());
+    };
+    if !workflow.enabled {
+        return Ok(());
+    }
+
+    let policy = &workflow.review_policy;
+    let high_risk =
+        !collect_plan_gate_triggered_reasons(spec, request, &workflow.require_plan_when).is_empty();
+    let required_style = policy.require_style_review || high_risk;
+    let required_correctness = policy.require_correctness_review;
+    if !required_correctness && !required_style {
+        return Ok(());
+    }
+
+    let profile = agent_stage_profile(spec);
+    let current_tracks = detect_review_tracks(&profile);
+    let parent_tracks = detect_parent_summary_review_tracks(request.parent_summary.as_deref());
+    let has_correctness = current_tracks.correctness || parent_tracks.correctness;
+    let has_style = current_tracks.style || parent_tracks.style;
+
+    if required_correctness && !has_correctness {
+        return Err(McpSubagentError::SpecValidation(format!(
+            "workflow review policy requires correctness review on stage `{stage_raw}` (agent=`{}` tags={:?})",
+            spec.core.name, spec.core.tags
+        )));
+    }
+    if required_style && !has_style {
+        return Err(McpSubagentError::SpecValidation(format!(
+            "workflow review policy requires style review on stage `{stage_raw}` (agent=`{}` tags={:?})",
+            spec.core.name, spec.core.tags
+        )));
+    }
+
+    if required_correctness
+        && required_style
+        && !current_tracks.correctness
+        && !current_tracks.style
+    {
+        return Err(McpSubagentError::SpecValidation(format!(
+            "workflow dual review requires reviewer track evidence on stage `{stage_raw}` (agent=`{}`)",
+            spec.core.name
+        )));
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ReviewTrackCoverage {
+    correctness: bool,
+    style: bool,
+}
+
+fn detect_review_tracks(profile: &str) -> ReviewTrackCoverage {
+    let correctness = contains_any_keyword(
+        profile,
+        &[
+            "correctness",
+            "logic",
+            "regression",
+            "bug",
+            "safety",
+            "security",
+            "verify",
+            "validation",
+        ],
+    );
+    let style = contains_any_keyword(
+        profile,
+        &[
+            "style",
+            "maintainability",
+            "readability",
+            "naming",
+            "consistency",
+            "clean code",
+        ],
+    );
+    ReviewTrackCoverage { correctness, style }
+}
+
+fn detect_parent_summary_review_tracks(parent_summary: Option<&str>) -> ReviewTrackCoverage {
+    let Some(parent_summary) = parent_summary else {
+        return ReviewTrackCoverage::default();
+    };
+    let lowered = parent_summary.to_lowercase();
+    detect_review_tracks(&lowered)
 }
 
 fn agent_stage_profile(spec: &crate::spec::AgentSpec) -> String {
@@ -530,6 +771,10 @@ impl RunTracker {
             agent_name: spec.core.name.clone(),
             workspace_path,
             error_message: None,
+            attempts_used: 0,
+            retry_attempts: 0,
+            max_attempts: 1,
+            max_turns: None,
         };
         Self { metadata }
     }
@@ -544,11 +789,19 @@ impl RunTracker {
         self.metadata.error_message = error_message;
         self.transition(status);
     }
+
+    fn set_attempt_budget(&mut self, max_attempts: u32, max_turns: Option<u32>) {
+        self.metadata.max_attempts = max_attempts;
+        self.metadata.max_turns = max_turns;
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
 
     use tempfile::tempdir;
 
@@ -556,8 +809,14 @@ mod tests {
         runtime::{
             context::DefaultContextCompiler,
             dispatcher::{Dispatcher, RunStatus},
-            runners::mock::{MockRunPlan, MockRunner},
-            summary::{StructuredSummary, SummaryParseStatus, VerificationStatus},
+            runners::{
+                mock::{MockRunPlan, MockRunner},
+                AgentRunner, RunnerExecution, RunnerTerminalState,
+            },
+            summary::{
+                StructuredSummary, SummaryParseStatus, VerificationStatus, SUMMARY_END_SENTINEL,
+                SUMMARY_START_SENTINEL,
+            },
         },
         spec::{
             core::{AgentSpecCore, Provider},
@@ -592,6 +851,41 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone)]
+    struct SequenceRunner {
+        executions: Arc<Mutex<Vec<RunnerExecution>>>,
+    }
+
+    impl SequenceRunner {
+        fn new(executions: Vec<RunnerExecution>) -> Self {
+            Self {
+                executions: Arc::new(Mutex::new(executions)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentRunner for SequenceRunner {
+        async fn execute(
+            &self,
+            _spec: &AgentSpec,
+            _request: &RunRequest,
+            _compiled: &crate::types::CompiledContext,
+        ) -> crate::error::Result<RunnerExecution> {
+            let mut executions = self.executions.lock().expect("lock sequence");
+            if executions.is_empty() {
+                return Ok(RunnerExecution {
+                    terminal_state: RunnerTerminalState::Failed {
+                        message: "sequence runner exhausted".to_string(),
+                    },
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            Ok(executions.remove(0))
+        }
+    }
+
     fn sample_request() -> RunRequest {
         RunRequest {
             task: "review parser".to_string(),
@@ -617,6 +911,18 @@ mod tests {
             verification_status: VerificationStatus::Passed,
             touched_files: vec!["src/parser.rs".to_string()],
             plan_refs: vec!["step-1".to_string()],
+        }
+    }
+
+    fn succeeded_execution(summary: StructuredSummary) -> RunnerExecution {
+        let summary_json = serde_json::to_string_pretty(&summary).expect("serialize summary");
+        RunnerExecution {
+            terminal_state: RunnerTerminalState::Succeeded,
+            stdout: format!(
+                "{}\n{}\n{}\n",
+                SUMMARY_START_SENTINEL, summary_json, SUMMARY_END_SENTINEL
+            ),
+            stderr: String::new(),
         }
     }
 
@@ -789,6 +1095,78 @@ mod tests {
 
         assert_eq!(result.metadata.status, RunStatus::Cancelled);
         assert_common_lifecycle(&result.metadata.status_history);
+    }
+
+    #[tokio::test]
+    async fn dispatch_retries_transient_failure_and_succeeds() {
+        let mut spec = sample_spec();
+        spec.runtime.retry_policy.max_attempts = 2;
+        spec.runtime.retry_policy.backoff_secs = 0;
+        spec.runtime.max_turns = Some(2);
+
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            SequenceRunner::new(vec![
+                RunnerExecution {
+                    terminal_state: RunnerTerminalState::Failed {
+                        message: "network timeout from provider".to_string(),
+                    },
+                    stdout: "transient".to_string(),
+                    stderr: String::new(),
+                },
+                succeeded_execution(success_summary()),
+            ]),
+        );
+
+        let result = dispatcher
+            .run(&spec, &sample_request(), ResolvedMemory::default())
+            .await
+            .expect("dispatch run");
+
+        assert_eq!(result.metadata.status, RunStatus::Succeeded);
+        assert_eq!(result.metadata.attempts_used, 2);
+        assert_eq!(result.metadata.retry_attempts, 1);
+        assert_eq!(result.metadata.max_attempts, 2);
+        assert_eq!(result.metadata.max_turns, Some(2));
+        assert_eq!(result.metadata.error_message, None);
+    }
+
+    #[tokio::test]
+    async fn dispatch_stops_retry_when_max_turns_reached() {
+        let mut spec = sample_spec();
+        spec.runtime.retry_policy.max_attempts = 3;
+        spec.runtime.retry_policy.backoff_secs = 0;
+        spec.runtime.max_turns = Some(1);
+
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            SequenceRunner::new(vec![
+                RunnerExecution {
+                    terminal_state: RunnerTerminalState::Failed {
+                        message: "network unavailable".to_string(),
+                    },
+                    stdout: "transient".to_string(),
+                    stderr: String::new(),
+                },
+                succeeded_execution(success_summary()),
+            ]),
+        );
+
+        let result = dispatcher
+            .run(&spec, &sample_request(), ResolvedMemory::default())
+            .await
+            .expect("dispatch run");
+
+        assert_eq!(result.metadata.status, RunStatus::Failed);
+        assert_eq!(result.metadata.attempts_used, 1);
+        assert_eq!(result.metadata.retry_attempts, 0);
+        assert_eq!(result.metadata.max_attempts, 3);
+        assert_eq!(result.metadata.max_turns, Some(1));
+        assert!(result
+            .metadata
+            .error_message
+            .as_deref()
+            .is_some_and(|msg| msg.contains("max_turns=1")));
     }
 
     #[tokio::test]
@@ -1055,6 +1433,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn readonly_gitworktree_allows_research_stage() {
+        let mut spec = sample_spec();
+        spec.runtime.sandbox = SandboxPolicy::ReadOnly;
+        spec.runtime.working_dir_policy = WorkingDirPolicy::GitWorktree;
+
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Succeeded {
+                summary: success_summary(),
+            }),
+        );
+        let mut request = sample_request();
+        request.stage = Some("Research".to_string());
+
+        let result = dispatcher
+            .run(&spec, &request, ResolvedMemory::default())
+            .await
+            .expect("readonly+gitworktree should pass in research stage");
+        assert_eq!(result.metadata.status, RunStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn readonly_gitworktree_rejects_build_stage() {
+        let mut spec = sample_spec();
+        spec.runtime.sandbox = SandboxPolicy::ReadOnly;
+        spec.runtime.working_dir_policy = WorkingDirPolicy::GitWorktree;
+
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Succeeded {
+                summary: success_summary(),
+            }),
+        );
+        let mut request = sample_request();
+        request.stage = Some("Build".to_string());
+
+        let err = dispatcher
+            .run(&spec, &request, ResolvedMemory::default())
+            .await
+            .expect_err("readonly+gitworktree should fail in build stage");
+        assert!(err.to_string().contains("only allowed for Research/Plan"));
+    }
+
+    #[tokio::test]
+    async fn readonly_gitworktree_requires_explicit_stage() {
+        let mut spec = sample_spec();
+        spec.runtime.sandbox = SandboxPolicy::ReadOnly;
+        spec.runtime.working_dir_policy = WorkingDirPolicy::GitWorktree;
+
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Succeeded {
+                summary: success_summary(),
+            }),
+        );
+        let request = sample_request();
+
+        let err = dispatcher
+            .run(&spec, &request, ResolvedMemory::default())
+            .await
+            .expect_err("readonly+gitworktree should require explicit stage");
+        assert!(err
+            .to_string()
+            .contains("requires explicit stage Research or Plan"));
+    }
+
+    #[tokio::test]
     async fn research_stage_rejects_non_planning_agent() {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
@@ -1143,6 +1588,96 @@ mod tests {
             .run(&spec, &request, ResolvedMemory::default())
             .await
             .expect("review stage should allow reviewer agent");
+        assert_eq!(result.metadata.status, RunStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn review_stage_requires_dual_tracks_for_high_risk_without_parent_evidence() {
+        let mut spec = sample_spec_for_stage_routing(
+            "correctness-reviewer",
+            &["review", "correctness"],
+            vec![WorkflowStageKind::Review],
+        );
+        if let Some(workflow) = spec.workflow.as_mut() {
+            workflow.require_plan_when.require_plan_if_touched_files_ge = Some(1);
+            workflow.require_plan_when.require_plan_if_parallel_agents = false;
+            workflow.require_plan_when.require_plan_if_cross_module = false;
+            workflow.require_plan_when.require_plan_if_new_interface = false;
+            workflow.require_plan_when.require_plan_if_migration = false;
+            workflow
+                .require_plan_when
+                .require_plan_if_human_approval_point = false;
+            workflow
+                .require_plan_when
+                .require_plan_if_estimated_runtime_minutes_ge = None;
+            workflow.review_policy.require_correctness_review = true;
+            workflow.review_policy.require_style_review = false;
+        }
+
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Succeeded {
+                summary: success_summary(),
+            }),
+        );
+        let mut request = sample_request();
+        request.stage = Some("Review".to_string());
+        request.selected_files = vec![SelectedFile {
+            path: PathBuf::from("src/a.rs"),
+            rationale: None,
+            content: None,
+        }];
+
+        let err = dispatcher
+            .run(&spec, &request, ResolvedMemory::default())
+            .await
+            .expect_err("high risk review should require style evidence");
+        assert!(err.to_string().contains("requires style review"));
+    }
+
+    #[tokio::test]
+    async fn review_stage_accepts_dual_tracks_with_parent_summary_evidence() {
+        let mut spec = sample_spec_for_stage_routing(
+            "correctness-reviewer",
+            &["review", "correctness"],
+            vec![WorkflowStageKind::Review],
+        );
+        if let Some(workflow) = spec.workflow.as_mut() {
+            workflow.require_plan_when.require_plan_if_touched_files_ge = Some(1);
+            workflow.require_plan_when.require_plan_if_parallel_agents = false;
+            workflow.require_plan_when.require_plan_if_cross_module = false;
+            workflow.require_plan_when.require_plan_if_new_interface = false;
+            workflow.require_plan_when.require_plan_if_migration = false;
+            workflow
+                .require_plan_when
+                .require_plan_if_human_approval_point = false;
+            workflow
+                .require_plan_when
+                .require_plan_if_estimated_runtime_minutes_ge = None;
+            workflow.review_policy.require_correctness_review = true;
+            workflow.review_policy.require_style_review = false;
+        }
+
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Succeeded {
+                summary: success_summary(),
+            }),
+        );
+        let mut request = sample_request();
+        request.stage = Some("Review".to_string());
+        request.selected_files = vec![SelectedFile {
+            path: PathBuf::from("src/a.rs"),
+            rationale: None,
+            content: None,
+        }];
+        request.parent_summary =
+            Some("previous style review confirmed maintainability".to_string());
+
+        let result = dispatcher
+            .run(&spec, &request, ResolvedMemory::default())
+            .await
+            .expect("parent summary style evidence should satisfy dual review");
         assert_eq!(result.metadata.status, RunStatus::Succeeded);
     }
 }

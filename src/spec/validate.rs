@@ -3,11 +3,7 @@ use std::path::{Component, Path};
 
 use crate::{
     error::{McpSubagentError, Result},
-    spec::{
-        runtime_policy::{MemorySource, SandboxPolicy, WorkingDirPolicy},
-        workflow::WorkflowStageKind,
-        AgentSpec, Provider,
-    },
+    spec::{runtime_policy::MemorySource, workflow::WorkflowStageKind, AgentSpec, Provider},
 };
 
 pub fn validate_agent_spec(spec: &AgentSpec) -> Result<()> {
@@ -77,17 +73,6 @@ fn validate_runtime_policy(spec: &AgentSpec) -> Result<()> {
     if spec.runtime.max_turns == Some(0) {
         return Err(McpSubagentError::SpecValidation(
             "max_turns must be greater than 0 when provided".to_string(),
-        ));
-    }
-
-    if matches!(spec.runtime.sandbox, SandboxPolicy::ReadOnly)
-        && matches!(
-            spec.runtime.working_dir_policy,
-            WorkingDirPolicy::GitWorktree
-        )
-    {
-        return Err(McpSubagentError::SpecValidation(
-            "ReadOnly sandbox cannot use working_dir_policy = GitWorktree".to_string(),
         ));
     }
 
@@ -293,15 +278,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_readonly_write_policy_combo() {
+    fn allows_readonly_gitworktree_combo_in_spec_validation() {
         let mut spec = base_spec();
         spec.runtime.working_dir_policy = WorkingDirPolicy::GitWorktree;
-
-        let err = validate_agent_spec(&spec).expect_err("readonly+tempcopy should fail");
-        assert!(
-            err.to_string().contains("ReadOnly sandbox cannot"),
-            "unexpected error: {err}"
-        );
+        validate_agent_spec(&spec).expect("combo should be stage-gated at runtime");
     }
 
     #[test]

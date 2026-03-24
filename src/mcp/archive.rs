@@ -602,6 +602,7 @@ mod tests {
             workspace_path: root.clone(),
             notes: Vec::new(),
             lock_key: None,
+            lock_keys: Vec::new(),
         };
         let summary = sample_summary();
         let mut artifact_index: Vec<ArtifactOutput> = Vec::new();
@@ -668,6 +669,7 @@ mod tests {
             workspace_path: root,
             notes: Vec::new(),
             lock_key: None,
+            lock_keys: Vec::new(),
         };
         let summary = sample_summary();
         let mut artifact_index: Vec<ArtifactOutput> = Vec::new();
@@ -701,6 +703,7 @@ mod tests {
             workspace_path: root,
             notes: Vec::new(),
             lock_key: None,
+            lock_keys: Vec::new(),
         };
         let summary = sample_summary();
         let mut artifact_index: Vec<ArtifactOutput> = Vec::new();

@@ -249,6 +249,7 @@ pub(crate) fn load_run_record_from_disk(
         memory_resolution: persisted.memory_resolution,
         workspace: persisted.workspace,
         compiled_context_markdown: persisted.compiled_context_markdown,
+        execution_policy: persisted.execution_policy,
     }))
 }
 
@@ -319,6 +320,29 @@ fn build_run_events(record: &RunRecord) -> Vec<RunEventRecord> {
                 "project_memory_labels": memory.project_memory_labels,
                 "additional_memory_labels": memory.additional_memory_labels,
                 "native_passthrough_paths": memory.native_passthrough_paths,
+            }),
+        });
+    }
+
+    if let Some(policy) = &record.execution_policy {
+        events.push(RunEventRecord {
+            event: "policy".to_string(),
+            timestamp: timestamp.clone(),
+            detail: json!({
+                "requested_run_mode": policy.requested_run_mode,
+                "effective_run_mode": policy.effective_run_mode,
+                "effective_run_mode_source": policy.effective_run_mode_source,
+                "spawn_policy": policy.spawn_policy,
+                "spawn_policy_source": policy.spawn_policy_source,
+                "background_preference": policy.background_preference,
+                "background_preference_source": policy.background_preference_source,
+                "max_turns": policy.max_turns,
+                "max_turns_source": policy.max_turns_source,
+                "retry_max_attempts": policy.retry_max_attempts,
+                "retry_backoff_secs": policy.retry_backoff_secs,
+                "retry_policy_source": policy.retry_policy_source,
+                "attempts_used": policy.attempts_used,
+                "retries_used": policy.retries_used,
             }),
         });
     }

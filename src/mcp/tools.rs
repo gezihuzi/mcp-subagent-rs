@@ -18,18 +18,21 @@ use crate::{
             ReadAgentArtifactInput, ReadAgentArtifactOutput, RunAgentInput, RunAgentOutput,
             RuntimePolicySummary, SpawnAgentOutput,
         },
-        persistence::persist_run_record,
-        server::{
-            acquire_serialize_lock_from_state, build_capability_notes, cancelled_summary,
-            failed_summary, format_time, map_summary_output, McpSubagentServer,
+        helpers::{
+            build_capability_notes, cancelled_summary, failed_summary, format_time,
+            map_summary_output,
         },
+        persistence::persist_run_record,
+        review::apply_review_evidence_hook,
+        server::{acquire_serialize_locks_from_state, McpSubagentServer},
         service::run_dispatch,
         state::{
-            append_status_if_terminal, build_probe_result_snapshot, build_run_request_snapshot,
-            build_run_spec_snapshot, RunRecord,
+            append_status_if_terminal, apply_execution_policy_outcome, build_probe_result_snapshot,
+            build_run_request_snapshot, build_run_spec_snapshot, RunRecord,
         },
     },
     runtime::dispatcher::RunStatus,
+    types::RunMode,
 };
 
 pub(crate) fn build_tool_router() -> ToolRouter<McpSubagentServer> {
@@ -77,20 +80,21 @@ impl McpSubagentServer {
         &self,
         Parameters(input): Parameters<RunAgentInput>,
     ) -> std::result::Result<Json<RunAgentOutput>, ErrorData> {
-        let (loaded, request, probe_result) = self.prepare_run(input)?;
+        let (loaded, request, probe_result, execution_policy) =
+            self.prepare_run(input, RunMode::Sync)?;
         let request_snapshot = build_run_request_snapshot(&request);
         let spec_snapshot = build_run_spec_snapshot(&loaded.spec);
         let probe_snapshot = build_probe_result_snapshot(&probe_result);
         let run_created_at = OffsetDateTime::now_utc();
         let handle_id = Uuid::now_v7().to_string();
-        let lock_key = self.conflict_lock_key(&loaded.spec, &request)?;
-        let _serialize_guard = self.acquire_serialize_lock(lock_key.clone()).await;
+        let lock_keys = self.conflict_lock_keys(&loaded.spec, &request)?;
+        let _serialize_guards = self.acquire_serialize_locks(lock_keys.clone()).await;
         let dispatch = run_dispatch(
             &loaded.spec,
             &request,
             &handle_id,
             self.state_dir(),
-            lock_key.clone(),
+            lock_keys.clone(),
         )
         .await?;
         let crate::mcp::service::DispatchEnvelope {
@@ -106,8 +110,21 @@ impl McpSubagentServer {
             &result.stderr,
             Some(&workspace.workspace_path),
         );
+        let mut execution_policy = Some(execution_policy);
+        apply_execution_policy_outcome(
+            &mut execution_policy,
+            result.metadata.attempts_used,
+            result.metadata.retry_attempts,
+        );
         let mut artifact_index = artifact_index;
         let mut artifacts = artifacts;
+        apply_review_evidence_hook(
+            &loaded.spec,
+            &request,
+            &result.summary,
+            &mut artifact_index,
+            &mut artifacts,
+        );
         apply_archive_hook(
             &loaded.spec,
             &request,
@@ -141,6 +158,7 @@ impl McpSubagentServer {
             memory_resolution: Some(memory_resolution),
             workspace: Some(workspace),
             compiled_context_markdown: Some(result.compiled_context_markdown),
+            execution_policy,
         };
         drop(workspace_cleanup);
         self.upsert_and_persist_run(&handle_id, record).await?;
@@ -153,15 +171,17 @@ impl McpSubagentServer {
         &self,
         Parameters(input): Parameters<RunAgentInput>,
     ) -> std::result::Result<Json<SpawnAgentOutput>, ErrorData> {
-        let (loaded, request, probe_result) = self.prepare_run(input)?;
+        let (loaded, request, probe_result, execution_policy) =
+            self.prepare_run(input, RunMode::Async)?;
         let handle_id = Uuid::now_v7().to_string();
         let running_record = RunRecord::running(
             request.task.clone(),
             Some(build_run_request_snapshot(&request)),
             Some(build_run_spec_snapshot(&loaded.spec)),
             Some(build_probe_result_snapshot(&probe_result)),
+            Some(execution_policy),
         );
-        let lock_key = self.conflict_lock_key(&loaded.spec, &request)?;
+        let lock_keys = self.conflict_lock_keys(&loaded.spec, &request)?;
 
         self.upsert_and_persist_run(&handle_id, running_record)
             .await?;
@@ -171,14 +191,14 @@ impl McpSubagentServer {
         let task_handle_id = handle_id.clone();
         let task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(120)).await;
-            let _serialize_guard =
-                acquire_serialize_lock_from_state(&state, lock_key.clone()).await;
+            let _serialize_guards =
+                acquire_serialize_locks_from_state(&state, lock_keys.clone()).await;
             let dispatch = run_dispatch(
                 &loaded.spec,
                 &request,
                 &task_handle_id,
                 &state_dir,
-                lock_key.clone(),
+                lock_keys.clone(),
             )
             .await;
 
@@ -208,6 +228,18 @@ impl McpSubagentServer {
                     );
                     let mut artifact_index = artifact_index;
                     let mut artifacts = artifacts;
+                    apply_execution_policy_outcome(
+                        &mut record.execution_policy,
+                        dispatch_result.metadata.attempts_used,
+                        dispatch_result.metadata.retry_attempts,
+                    );
+                    apply_review_evidence_hook(
+                        &loaded.spec,
+                        &request,
+                        &dispatch_result.summary,
+                        &mut artifact_index,
+                        &mut artifacts,
+                    );
                     apply_archive_hook(
                         &loaded.spec,
                         &request,

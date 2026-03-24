@@ -30,6 +30,17 @@ pub struct DoctorReport {
     pub probes: Vec<ProviderProbe>,
     pub workspace_policy_hints: Vec<WorkspacePolicyHint>,
     pub knowledge_layout: KnowledgeLayoutHealth,
+    pub status: String,
+    pub issues: Vec<DoctorIssue>,
+    pub advice: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DoctorIssue {
+    pub level: String,
+    pub code: String,
+    pub message: String,
+    pub suggestion: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +87,7 @@ fn build_doctor_report_for_cwd(
         .into_iter()
         .map(|provider| prober.probe(&provider))
         .collect();
+    let (status, issues, advice) = build_doctor_health(&agents_error, &knowledge_layout, &probes);
 
     DoctorReport {
         cwd,
@@ -86,7 +98,78 @@ fn build_doctor_report_for_cwd(
         probes,
         workspace_policy_hints,
         knowledge_layout,
+        status,
+        issues,
+        advice,
     }
+}
+
+fn build_doctor_health(
+    agents_error: &Option<String>,
+    knowledge_layout: &KnowledgeLayoutHealth,
+    probes: &[ProviderProbe],
+) -> (String, Vec<DoctorIssue>, Vec<String>) {
+    let mut issues = Vec::new();
+    let mut advice = Vec::new();
+
+    if let Some(error) = agents_error {
+        issues.push(DoctorIssue {
+            level: "error".to_string(),
+            code: "agents_load_failed".to_string(),
+            message: error.clone(),
+            suggestion: Some(
+                "Run `mcp-subagent validate --agents-dir <dir>` and fix invalid specs.".to_string(),
+            ),
+        });
+    }
+
+    for warning in &knowledge_layout.warnings {
+        issues.push(DoctorIssue {
+            level: "warning".to_string(),
+            code: "knowledge_layout".to_string(),
+            message: warning.clone(),
+            suggestion: Some(
+                "Create PLAN.md / PROJECT.md and archive plans under docs/plans/.".to_string(),
+            ),
+        });
+    }
+
+    for probe in probes {
+        if probe.is_available() {
+            continue;
+        }
+        let suggestion = probe.notes.first().cloned();
+        issues.push(DoctorIssue {
+            level: "warning".to_string(),
+            code: format!("provider_{}_unavailable", probe.provider.as_str().to_lowercase()),
+            message: format!(
+                "provider {} unavailable ({})",
+                probe.provider.as_str(),
+                probe.status
+            ),
+            suggestion,
+        });
+    }
+
+    if issues.is_empty() {
+        advice.push("Environment looks healthy.".to_string());
+        return ("ok".to_string(), issues, advice);
+    }
+
+    for issue in &issues {
+        if let Some(suggestion) = &issue.suggestion {
+            if !advice.iter().any(|item| item == suggestion) {
+                advice.push(suggestion.clone());
+            }
+        }
+    }
+
+    let status = if issues.iter().any(|issue| issue.level == "error") {
+        "error"
+    } else {
+        "warning"
+    };
+    (status.to_string(), issues, advice)
 }
 
 fn build_workspace_policy_hints(loaded_specs: &[LoadedAgentSpec]) -> Vec<WorkspacePolicyHint> {
@@ -202,6 +285,19 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
     if let Some(error) = &report.agents_error {
         out.push_str(&format!("agents_error: {error}\n"));
     }
+    out.push_str(&format!("status: {}\n", report.status));
+    if !report.issues.is_empty() {
+        out.push_str("issues:\n");
+        for issue in &report.issues {
+            out.push_str(&format!(
+                "- [{}] {}: {}\n",
+                issue.level, issue.code, issue.message
+            ));
+            if let Some(suggestion) = &issue.suggestion {
+                out.push_str(&format!("  suggestion: {}\n", suggestion));
+            }
+        }
+    }
 
     out.push_str("\nprovider_matrix:\n");
     for probe in &report.probes {
@@ -293,6 +389,13 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
         out.push_str("  warnings:\n");
         for warning in &report.knowledge_layout.warnings {
             out.push_str(&format!("    - {warning}\n"));
+        }
+    }
+
+    if !report.advice.is_empty() {
+        out.push_str("\nadvice:\n");
+        for advice in &report.advice {
+            out.push_str(&format!("- {advice}\n"));
         }
     }
 

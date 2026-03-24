@@ -19,7 +19,7 @@ Rust implementation of an MCP subagent runtime aligned to the technical design b
 mcp-subagent mcp [AGENTS_DIR]
 mcp-subagent doctor [AGENTS_DIR]
 mcp-subagent validate [AGENTS_DIR]
-mcp-subagent init [--preset claude-opus-supervisor] [--root-dir ...] [--force] [--json]
+mcp-subagent init [--preset claude-opus-supervisor|codex-primary-builder|gemini-frontend-team|local-ollama-fallback|minimal-single-provider] [--root-dir ...] [--force] [--json]
 mcp-subagent list-agents [--json]
 mcp-subagent run <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
 mcp-subagent spawn <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
@@ -71,6 +71,15 @@ Initialize a local preset workspace:
 
 ```bash
 mcp-subagent init --preset claude-opus-supervisor
+```
+
+Other preset examples:
+
+```bash
+mcp-subagent init --preset codex-primary-builder
+mcp-subagent init --preset gemini-frontend-team
+mcp-subagent init --preset local-ollama-fallback
+mcp-subagent init --preset minimal-single-provider
 ```
 
 This script validates:

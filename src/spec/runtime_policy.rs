@@ -75,7 +75,7 @@ pub struct ArtifactPolicy {
     pub emit_summary_json: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetryPolicy {
     #[serde(default = "default_retry_attempts")]

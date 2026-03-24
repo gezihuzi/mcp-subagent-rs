@@ -10,8 +10,8 @@ use crate::{
     runtime::{dispatcher::RunStatus, summary::SummaryEnvelope},
     spec::{
         runtime_policy::{
-            ApprovalPolicy, ContextMode, FileConflictPolicy, MemorySource, SandboxPolicy,
-            WorkingDirPolicy,
+            ApprovalPolicy, BackgroundPreference, ContextMode, FileConflictPolicy, MemorySource,
+            RetryPolicy, SandboxPolicy, SpawnPolicy, WorkingDirPolicy,
         },
         AgentSpec,
     },
@@ -42,6 +42,7 @@ pub(crate) struct RunRecord {
     pub(crate) memory_resolution: Option<MemoryResolutionRecord>,
     pub(crate) workspace: Option<WorkspaceRecord>,
     pub(crate) compiled_context_markdown: Option<String>,
+    pub(crate) execution_policy: Option<ExecutionPolicyRecord>,
 }
 
 impl RunRecord {
@@ -50,6 +51,7 @@ impl RunRecord {
         request_snapshot: Option<RunRequestSnapshot>,
         spec_snapshot: Option<RunSpecSnapshot>,
         probe_result: Option<ProbeResultRecord>,
+        execution_policy: Option<ExecutionPolicyRecord>,
     ) -> Self {
         let now = OffsetDateTime::now_utc();
         Self {
@@ -73,8 +75,39 @@ impl RunRecord {
             memory_resolution: None,
             workspace: None,
             compiled_context_markdown: None,
+            execution_policy,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PolicyValueSource {
+    Default,
+    Spec,
+    Override,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExecutionPolicyRecord {
+    pub(crate) requested_run_mode: RunMode,
+    pub(crate) effective_run_mode: RunMode,
+    pub(crate) effective_run_mode_source: PolicyValueSource,
+    pub(crate) spawn_policy: String,
+    pub(crate) spawn_policy_source: PolicyValueSource,
+    pub(crate) background_preference: String,
+    pub(crate) background_preference_source: PolicyValueSource,
+    #[serde(default)]
+    pub(crate) max_turns: Option<u32>,
+    pub(crate) max_turns_source: PolicyValueSource,
+    pub(crate) retry_max_attempts: u32,
+    pub(crate) retry_backoff_secs: u64,
+    pub(crate) retry_policy_source: PolicyValueSource,
+    #[serde(default)]
+    pub(crate) attempts_used: Option<u32>,
+    #[serde(default)]
+    pub(crate) retries_used: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +120,8 @@ pub(crate) struct WorkspaceRecord {
     pub(crate) notes: Vec<String>,
     #[serde(default)]
     pub(crate) lock_key: Option<String>,
+    #[serde(default)]
+    pub(crate) lock_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +216,8 @@ pub(crate) struct PersistedRunRecord {
     pub(crate) workspace: Option<WorkspaceRecord>,
     #[serde(default)]
     pub(crate) compiled_context_markdown: Option<String>,
+    #[serde(default)]
+    pub(crate) execution_policy: Option<ExecutionPolicyRecord>,
 }
 
 impl From<&RunRecord> for PersistedRunRecord {
@@ -200,6 +237,7 @@ impl From<&RunRecord> for PersistedRunRecord {
             memory_resolution: value.memory_resolution.clone(),
             workspace: value.workspace.clone(),
             compiled_context_markdown: value.compiled_context_markdown.clone(),
+            execution_policy: value.execution_policy.clone(),
         }
     }
 }
@@ -282,6 +320,68 @@ pub(crate) fn append_status_if_terminal(status_history: &mut Vec<RunStatus>, sta
     status_history.push(status);
 }
 
+pub(crate) fn build_execution_policy_snapshot(
+    spec: &AgentSpec,
+    requested_run_mode: RunMode,
+    effective_run_mode: RunMode,
+    effective_run_mode_source: PolicyValueSource,
+) -> ExecutionPolicyRecord {
+    let default_runtime = crate::spec::runtime_policy::RuntimePolicy::default();
+    let runtime = &spec.runtime;
+    ExecutionPolicyRecord {
+        requested_run_mode,
+        effective_run_mode,
+        effective_run_mode_source,
+        spawn_policy: spawn_policy_to_str(&runtime.spawn_policy),
+        spawn_policy_source: source_from_default(
+            &runtime.spawn_policy,
+            &default_runtime.spawn_policy,
+        ),
+        background_preference: background_preference_to_str(&runtime.background_preference),
+        background_preference_source: source_from_default(
+            &runtime.background_preference,
+            &default_runtime.background_preference,
+        ),
+        max_turns: runtime.max_turns,
+        max_turns_source: if runtime.max_turns.is_some() {
+            PolicyValueSource::Spec
+        } else {
+            PolicyValueSource::Default
+        },
+        retry_max_attempts: runtime.retry_policy.max_attempts,
+        retry_backoff_secs: runtime.retry_policy.backoff_secs,
+        retry_policy_source: retry_policy_source(
+            &runtime.retry_policy,
+            &default_runtime.retry_policy,
+        ),
+        attempts_used: None,
+        retries_used: None,
+    }
+}
+
+pub(crate) fn apply_execution_policy_outcome(
+    policy: &mut Option<ExecutionPolicyRecord>,
+    attempts_used: u32,
+    retries_used: u32,
+) {
+    if let Some(policy) = policy.as_mut() {
+        policy.attempts_used = Some(attempts_used);
+        policy.retries_used = Some(retries_used);
+    }
+}
+
+fn source_from_default<T: PartialEq>(value: &T, default: &T) -> PolicyValueSource {
+    if value == default {
+        PolicyValueSource::Default
+    } else {
+        PolicyValueSource::Spec
+    }
+}
+
+fn retry_policy_source(value: &RetryPolicy, default: &RetryPolicy) -> PolicyValueSource {
+    source_from_default(value, default)
+}
+
 fn context_mode_to_str(mode: &ContextMode) -> String {
     match mode {
         ContextMode::Isolated => "Isolated".to_string(),
@@ -333,5 +433,19 @@ fn memory_source_to_str(source: &MemorySource) -> String {
         MemorySource::File(path) => format!("File({path})"),
         MemorySource::Glob(pattern) => format!("Glob({pattern})"),
         MemorySource::Inline(_) => "Inline(<content>)".to_string(),
+    }
+}
+
+fn spawn_policy_to_str(policy: &SpawnPolicy) -> String {
+    match policy {
+        SpawnPolicy::Sync => "Sync".to_string(),
+        SpawnPolicy::Async => "Async".to_string(),
+    }
+}
+
+fn background_preference_to_str(preference: &BackgroundPreference) -> String {
+    match preference {
+        BackgroundPreference::PreferForeground => "PreferForeground".to_string(),
+        BackgroundPreference::PreferBackground => "PreferBackground".to_string(),
     }
 }

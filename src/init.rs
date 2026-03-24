@@ -8,15 +8,25 @@ use serde::Serialize;
 
 use crate::{error::Result, spec::registry::load_agent_specs_from_dirs};
 
+const PRESET_CATALOG_VERSION: &str = "v0.7.0";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitPreset {
     ClaudeOpusSupervisor,
+    CodexPrimaryBuilder,
+    GeminiFrontendTeam,
+    LocalOllamaFallback,
+    MinimalSingleProvider,
 }
 
 impl InitPreset {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ClaudeOpusSupervisor => "claude-opus-supervisor",
+            Self::CodexPrimaryBuilder => "codex-primary-builder",
+            Self::GeminiFrontendTeam => "gemini-frontend-team",
+            Self::LocalOllamaFallback => "local-ollama-fallback",
+            Self::MinimalSingleProvider => "minimal-single-provider",
         }
     }
 }
@@ -24,6 +34,7 @@ impl InitPreset {
 #[derive(Debug, Clone, Serialize)]
 pub struct InitReport {
     pub preset: String,
+    pub preset_catalog_version: String,
     pub root: PathBuf,
     pub agents_dir: PathBuf,
     pub created_files: Vec<PathBuf>,
@@ -33,29 +44,24 @@ pub struct InitReport {
 }
 
 pub fn init_workspace(root: &Path, preset: InitPreset, force: bool) -> Result<InitReport> {
-    match preset {
-        InitPreset::ClaudeOpusSupervisor => init_claude_opus_supervisor(root, force),
-    }
+    init_with_preset(root, preset, force)
 }
 
-fn init_claude_opus_supervisor(root: &Path, force: bool) -> Result<InitReport> {
+fn init_with_preset(root: &Path, preset: InitPreset, force: bool) -> Result<InitReport> {
     let root = root.to_path_buf();
     let agents_dir = root.join("agents");
     let config_path = root.join(".mcp-subagent/config.toml");
     let readme_path = root.join("README.mcp-subagent.md");
     let plan_path = root.join("PLAN.md");
+    let agent_templates = preset_agent_templates(preset);
 
-    let files = vec![
-        plan_path.clone(),
-        config_path.clone(),
-        readme_path.clone(),
-        agents_dir.join("fast-researcher.agent.toml"),
-        agents_dir.join("backend-coder.agent.toml"),
-        agents_dir.join("frontend-builder.agent.toml"),
-        agents_dir.join("correctness-reviewer.agent.toml"),
-        agents_dir.join("style-reviewer.agent.toml"),
-        agents_dir.join("local-fallback-coder.agent.toml"),
-    ];
+    let mut files = vec![plan_path.clone(), config_path.clone(), readme_path.clone()];
+    files.extend(
+        agent_templates
+            .iter()
+            .map(|(name, _)| agents_dir.join(name))
+            .collect::<Vec<_>>(),
+    );
 
     let mut overwritten_files = Vec::new();
     if !force {
@@ -81,43 +87,23 @@ fn init_claude_opus_supervisor(root: &Path, force: bool) -> Result<InitReport> {
 
     write(&plan_path, &plan_template())?;
     write(&config_path, &config_template())?;
-    write(&readme_path, &readme_template())?;
-
-    write(
-        &agents_dir.join("fast-researcher.agent.toml"),
-        FAST_RESEARCHER_AGENT,
-    )?;
-    write(
-        &agents_dir.join("backend-coder.agent.toml"),
-        BACKEND_CODER_AGENT,
-    )?;
-    write(
-        &agents_dir.join("frontend-builder.agent.toml"),
-        FRONTEND_BUILDER_AGENT,
-    )?;
-    write(
-        &agents_dir.join("correctness-reviewer.agent.toml"),
-        CORRECTNESS_REVIEWER_AGENT,
-    )?;
-    write(
-        &agents_dir.join("style-reviewer.agent.toml"),
-        STYLE_REVIEWER_AGENT,
-    )?;
-    write(
-        &agents_dir.join("local-fallback-coder.agent.toml"),
-        LOCAL_FALLBACK_CODER_AGENT,
-    )?;
+    write(&readme_path, &readme_template(preset))?;
+    for (name, content) in &agent_templates {
+        write(&agents_dir.join(name), content)?;
+    }
 
     let generated = load_agent_specs_from_dirs(std::slice::from_ref(&agents_dir))?;
 
     Ok(InitReport {
-        preset: InitPreset::ClaudeOpusSupervisor.as_str().to_string(),
+        preset: preset.as_str().to_string(),
+        preset_catalog_version: PRESET_CATALOG_VERSION.to_string(),
         root: root.clone(),
         agents_dir,
         created_files: files,
         overwritten_files,
         generated_agent_count: generated.len(),
         notes: vec![
+            format!("Preset catalog version: {PRESET_CATALOG_VERSION}"),
             "Run `mcp-subagent validate --agents-dir ./agents` to verify generated specs."
                 .to_string(),
             "Run `mcp-subagent doctor --agents-dir ./agents` to inspect provider readiness."
@@ -125,6 +111,57 @@ fn init_claude_opus_supervisor(root: &Path, force: bool) -> Result<InitReport> {
             "Use `mcp-subagent mcp` for stdio MCP transport.".to_string(),
         ],
     })
+}
+
+fn preset_agent_templates(preset: InitPreset) -> Vec<(&'static str, &'static str)> {
+    match preset {
+        InitPreset::ClaudeOpusSupervisor => vec![
+            ("fast-researcher.agent.toml", FAST_RESEARCHER_AGENT),
+            ("backend-coder.agent.toml", BACKEND_CODER_AGENT),
+            ("frontend-builder.agent.toml", FRONTEND_BUILDER_AGENT),
+            (
+                "correctness-reviewer.agent.toml",
+                CORRECTNESS_REVIEWER_AGENT,
+            ),
+            ("style-reviewer.agent.toml", STYLE_REVIEWER_AGENT),
+            (
+                "local-fallback-coder.agent.toml",
+                LOCAL_FALLBACK_CODER_AGENT,
+            ),
+        ],
+        InitPreset::CodexPrimaryBuilder => vec![
+            ("backend-coder.agent.toml", BACKEND_CODER_AGENT),
+            (
+                "correctness-reviewer.agent.toml",
+                CORRECTNESS_REVIEWER_AGENT,
+            ),
+            (
+                "codex-style-reviewer.agent.toml",
+                CODEX_STYLE_REVIEWER_AGENT,
+            ),
+        ],
+        InitPreset::GeminiFrontendTeam => vec![
+            ("fast-researcher.agent.toml", FAST_RESEARCHER_AGENT),
+            ("frontend-builder.agent.toml", FRONTEND_BUILDER_AGENT),
+            (
+                "gemini-style-reviewer.agent.toml",
+                GEMINI_STYLE_REVIEWER_AGENT,
+            ),
+        ],
+        InitPreset::LocalOllamaFallback => vec![
+            (
+                "local-fallback-coder.agent.toml",
+                LOCAL_FALLBACK_CODER_AGENT,
+            ),
+            ("fast-researcher.agent.toml", FAST_RESEARCHER_AGENT),
+        ],
+        InitPreset::MinimalSingleProvider => {
+            vec![(
+                "single-provider-coder.agent.toml",
+                SINGLE_PROVIDER_CODER_AGENT,
+            )]
+        }
+    }
 }
 
 fn write(path: &Path, content: &str) -> Result<()> {
@@ -183,14 +220,25 @@ state_dir = ".mcp-subagent/state"
     .to_string()
 }
 
-fn readme_template() -> String {
-    r#"# README.mcp-subagent
+fn readme_template(preset: InitPreset) -> String {
+    format!(
+        r#"# README.mcp-subagent
 
 This workspace was initialized by:
 
 ```bash
-mcp-subagent init --preset claude-opus-supervisor
+mcp-subagent init --preset {}
 ```
+
+Catalog version: `{}`
+
+Available presets:
+
+- `claude-opus-supervisor`
+- `codex-primary-builder`
+- `gemini-frontend-team`
+- `local-ollama-fallback`
+- `minimal-single-provider`
 
 ## Quick Start
 
@@ -231,8 +279,10 @@ gemini mcp add mcp-subagent \
   --state-dir <ABSOLUTE_PATH_TO_REPO>/.mcp-subagent/state \
   mcp
 ```
-"#
-    .to_string()
+"#,
+        preset.as_str(),
+        PRESET_CATALOG_VERSION
+    )
 }
 
 const FAST_RESEARCHER_AGENT: &str = r#"[core]
@@ -364,6 +414,57 @@ stages = ["Review", "Archive"]
 max_runtime_depth = 1
 "#;
 
+const CODEX_STYLE_REVIEWER_AGENT: &str = r#"[core]
+name = "codex-style-reviewer"
+description = "Codex reviewer focused on style and maintainability."
+provider = "Codex"
+model = "gpt-5.3-codex"
+instructions = "Review maintainability, naming, readability, and consistency with concrete evidence."
+tags = ["review", "style", "codex"]
+
+[runtime]
+context_mode = "SummaryOnly"
+memory_sources = ["AutoProjectMemory", "ActivePlan"]
+working_dir_policy = "Auto"
+file_conflict_policy = "Serialize"
+sandbox = "ReadOnly"
+approval = "DenyByDefault"
+timeout_secs = 900
+spawn_policy = "Sync"
+
+[provider_overrides.codex]
+model_reasoning_effort = "high"
+
+[workflow]
+enabled = true
+stages = ["Review"]
+max_runtime_depth = 1
+"#;
+
+const GEMINI_STYLE_REVIEWER_AGENT: &str = r#"[core]
+name = "gemini-style-reviewer"
+description = "Gemini reviewer for frontend style and maintainability checks."
+provider = "Gemini"
+model = "pro"
+instructions = "Review style, readability, and maintainability with short actionable findings."
+tags = ["review", "style", "gemini"]
+
+[runtime]
+context_mode = "SummaryOnly"
+memory_sources = ["AutoProjectMemory", "ActivePlan"]
+working_dir_policy = "Auto"
+file_conflict_policy = "Serialize"
+sandbox = "ReadOnly"
+approval = "ProviderDefault"
+timeout_secs = 900
+spawn_policy = "Sync"
+
+[workflow]
+enabled = true
+stages = ["Review"]
+max_runtime_depth = 1
+"#;
+
 const LOCAL_FALLBACK_CODER_AGENT: &str = r#"[core]
 name = "local-fallback-coder"
 description = "Optional local fallback coding agent backed by Ollama."
@@ -388,6 +489,30 @@ stages = ["Build"]
 max_runtime_depth = 1
 "#;
 
+const SINGLE_PROVIDER_CODER_AGENT: &str = r#"[core]
+name = "single-provider-coder"
+description = "Minimal single-provider coder for small workflows."
+provider = "Codex"
+model = "gpt-5.3-codex"
+instructions = "Implement scoped changes and return concise structured summary."
+tags = ["build", "codex", "minimal"]
+
+[runtime]
+context_mode = { SelectedFiles = ["src/**", "PLAN.md"] }
+memory_sources = ["AutoProjectMemory", "ActivePlan"]
+working_dir_policy = "Auto"
+file_conflict_policy = "Serialize"
+sandbox = "WorkspaceWrite"
+approval = "DenyByDefault"
+timeout_secs = 900
+spawn_policy = "Sync"
+
+[workflow]
+enabled = true
+stages = ["Build", "Review"]
+max_runtime_depth = 1
+"#;
+
 #[cfg(test)]
 mod tests {
     use std::{fs, io::ErrorKind};
@@ -403,10 +528,32 @@ mod tests {
             .expect("init succeeds");
 
         assert_eq!(report.generated_agent_count, 6);
+        assert_eq!(report.preset_catalog_version, "v0.7.0");
         assert!(dir.path().join("agents").exists());
         assert!(dir.path().join("PLAN.md").exists());
         assert!(dir.path().join(".mcp-subagent/config.toml").exists());
         assert!(dir.path().join("README.mcp-subagent.md").exists());
+    }
+
+    #[test]
+    fn init_supports_all_presets_and_validates() {
+        for preset in [
+            InitPreset::ClaudeOpusSupervisor,
+            InitPreset::CodexPrimaryBuilder,
+            InitPreset::GeminiFrontendTeam,
+            InitPreset::LocalOllamaFallback,
+            InitPreset::MinimalSingleProvider,
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let report = init_workspace(dir.path(), preset, false).expect("init preset");
+            assert!(
+                report.generated_agent_count >= 1,
+                "preset {} should generate at least one agent",
+                preset.as_str()
+            );
+            assert_eq!(report.preset_catalog_version, "v0.7.0");
+            assert!(dir.path().join("README.mcp-subagent.md").exists());
+        }
     }
 
     #[test]

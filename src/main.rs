@@ -143,12 +143,20 @@ enum ArtifactKindArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum InitPresetArg {
     ClaudeOpusSupervisor,
+    CodexPrimaryBuilder,
+    GeminiFrontendTeam,
+    LocalOllamaFallback,
+    MinimalSingleProvider,
 }
 
 impl From<InitPresetArg> for InitPreset {
     fn from(value: InitPresetArg) -> Self {
         match value {
             InitPresetArg::ClaudeOpusSupervisor => InitPreset::ClaudeOpusSupervisor,
+            InitPresetArg::CodexPrimaryBuilder => InitPreset::CodexPrimaryBuilder,
+            InitPresetArg::GeminiFrontendTeam => InitPreset::GeminiFrontendTeam,
+            InitPresetArg::LocalOllamaFallback => InitPreset::LocalOllamaFallback,
+            InitPresetArg::MinimalSingleProvider => InitPreset::MinimalSingleProvider,
         }
     }
 }
@@ -841,6 +849,7 @@ fn print_json<T: Serialize>(value: &T) {
 
 fn print_init_report(report: &InitReport) {
     println!("preset: {}", report.preset);
+    println!("preset_catalog_version: {}", report.preset_catalog_version);
     println!("root: {}", report.root.display());
     println!("agents_dir: {}", report.agents_dir.display());
     println!("generated_agents: {}", report.generated_agent_count);

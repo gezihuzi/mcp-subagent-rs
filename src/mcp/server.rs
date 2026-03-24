@@ -1,5 +1,5 @@
 use std::{
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -8,22 +8,16 @@ use rmcp::{
     model::{ServerCapabilities, ServerInfo},
     tool_handler, ErrorData, ServerHandler, ServiceExt,
 };
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::{
     error::McpSubagentError,
+    mcp::helpers::{resolve_effective_run_mode, resolve_preferred_run_mode, run_mode_label},
     mcp::persistence::{load_run_record_from_disk, persist_run_record},
-    mcp::state::{RunRecord, RuntimeState},
+    mcp::state::{build_execution_policy_snapshot, ExecutionPolicyRecord, RunRecord, RuntimeState},
     mcp::tools::build_tool_router,
-    probe::{ProbeStatus, ProviderProbe, ProviderProber, SystemProviderProber},
-    runtime::{
-        summary::{
-            StructuredSummary, SummaryEnvelope, SummaryParseStatus, VerificationStatus,
-            SUMMARY_CONTRACT_VERSION,
-        },
-        workspace::resolve_source_path,
-    },
+    probe::{ProviderProbe, ProviderProber, SystemProviderProber},
+    runtime::workspace::resolve_source_path,
     spec::{
         registry::{load_agent_specs_from_dirs, LoadedAgentSpec},
         runtime_policy::{FileConflictPolicy, SandboxPolicy},
@@ -103,7 +97,16 @@ impl McpSubagentServer {
     pub(crate) fn prepare_run(
         &self,
         input: RunAgentInput,
-    ) -> std::result::Result<(LoadedAgentSpec, RunRequest, ProviderProbe), ErrorData> {
+        requested_run_mode: RunMode,
+    ) -> std::result::Result<
+        (
+            LoadedAgentSpec,
+            RunRequest,
+            ProviderProbe,
+            ExecutionPolicyRecord,
+        ),
+        ErrorData,
+    > {
         let specs = self.load_specs()?;
         let loaded = specs
             .into_iter()
@@ -114,6 +117,35 @@ impl McpSubagentServer {
                     None,
                 )
             })?;
+        let (preferred_run_mode, preferred_run_mode_source) =
+            resolve_preferred_run_mode(&loaded.spec);
+        let (effective_run_mode, run_mode_source, should_reject_mode_mismatch) =
+            resolve_effective_run_mode(
+                requested_run_mode.clone(),
+                preferred_run_mode.clone(),
+                preferred_run_mode_source,
+            );
+        let execution_policy = build_execution_policy_snapshot(
+            &loaded.spec,
+            requested_run_mode.clone(),
+            effective_run_mode.clone(),
+            run_mode_source,
+        );
+        if should_reject_mode_mismatch {
+            let tool_hint = match effective_run_mode {
+                RunMode::Sync => "run_agent",
+                RunMode::Async => "spawn_agent",
+            };
+            return Err(ErrorData::invalid_params(
+                format!(
+                    "agent `{}` execution mode resolved to `{}` by runtime policy; use `{tool_hint}` instead",
+                    loaded.spec.core.name,
+                    run_mode_label(&effective_run_mode),
+                ),
+                None,
+            ));
+        }
+
         let probe_result = self.ensure_provider_ready(&loaded.spec.core.provider)?;
 
         let request = RunRequest {
@@ -135,14 +167,14 @@ impl McpSubagentServer {
                 .working_dir
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(".")),
-            run_mode: RunMode::Sync,
+            run_mode: effective_run_mode,
             acceptance_criteria: vec![
                 "Return sentinel-wrapped SummaryEnvelope JSON.".to_string(),
                 "Keep findings concise and actionable.".to_string(),
             ],
         };
 
-        Ok((loaded, request, probe_result))
+        Ok((loaded, request, probe_result, execution_policy))
     }
 
     pub(crate) fn probe_provider(&self, provider: &Provider) -> ProviderProbe {
@@ -211,28 +243,54 @@ impl McpSubagentServer {
         persist_run_record(&self.state_dir, handle_id, &record)
     }
 
-    pub(crate) fn conflict_lock_key(
+    pub(crate) fn conflict_lock_keys(
         &self,
         spec: &crate::spec::AgentSpec,
         request: &RunRequest,
-    ) -> std::result::Result<Option<String>, ErrorData> {
+    ) -> std::result::Result<Vec<String>, ErrorData> {
         if !matches!(
             spec.runtime.file_conflict_policy,
             FileConflictPolicy::Serialize
         ) || matches!(spec.runtime.sandbox, SandboxPolicy::ReadOnly)
         {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let source = resolve_source_path(&request.working_dir)
             .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
-        Ok(Some(source.display().to_string()))
+        let source_key = source.display().to_string();
+        if request.selected_files.is_empty() {
+            return Ok(vec![format!("{source_key}::__workspace__")]);
+        }
+
+        let mut keys = request
+            .selected_files
+            .iter()
+            .map(|selected| {
+                let scoped_path = if selected.path.is_absolute() {
+                    selected.path.strip_prefix(&source).unwrap_or(&selected.path)
+                } else {
+                    selected.path.as_path()
+                };
+                let scope = scoped_path
+                    .components()
+                    .find_map(|component| match component {
+                        Component::Normal(segment) => Some(segment.to_string_lossy().to_string()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "__workspace__".to_string());
+                format!("{source_key}::{scope}")
+            })
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
     }
 
-    pub(crate) async fn acquire_serialize_lock(
+    pub(crate) async fn acquire_serialize_locks(
         &self,
-        lock_key: Option<String>,
-    ) -> Option<OwnedMutexGuard<()>> {
-        acquire_serialize_lock_from_state(&self.runtime_state, lock_key).await
+        lock_keys: Vec<String>,
+    ) -> Vec<OwnedMutexGuard<()>> {
+        acquire_serialize_locks_from_state(&self.runtime_state, lock_keys).await
     }
 
     pub(crate) fn state_dir(&self) -> &Path {
@@ -244,112 +302,33 @@ impl McpSubagentServer {
     }
 }
 
-pub(crate) async fn acquire_serialize_lock_from_state(
+pub(crate) async fn acquire_serialize_locks_from_state(
     state: &Arc<Mutex<RuntimeState>>,
-    lock_key: Option<String>,
-) -> Option<OwnedMutexGuard<()>> {
-    let key = lock_key?;
-    let lock = {
-        let mut guard = state.lock().await;
-        guard
-            .serialize_locks
-            .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    };
-    Some(lock.lock_owned().await)
+    mut lock_keys: Vec<String>,
+) -> Vec<OwnedMutexGuard<()>> {
+    if lock_keys.is_empty() {
+        return Vec::new();
+    }
+    lock_keys.sort();
+    lock_keys.dedup();
+
+    let mut guards = Vec::with_capacity(lock_keys.len());
+    for key in lock_keys {
+        let lock = {
+            let mut guard = state.lock().await;
+            guard
+                .serialize_locks
+                .entry(key)
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        guards.push(lock.lock_owned().await);
+    }
+    guards
 }
 
 fn default_state_dir() -> PathBuf {
     PathBuf::from(".mcp-subagent/state")
-}
-
-pub(crate) fn provider_tier_note(provider: &Provider) -> &'static str {
-    match provider {
-        Provider::Mock => "provider_tier: mock (stable local debug path)",
-        Provider::Claude => "provider_tier: beta",
-        Provider::Codex => "provider_tier: primary",
-        Provider::Gemini => "provider_tier: experimental",
-        Provider::Ollama => "provider_tier: local (community runner path)",
-    }
-}
-
-pub(crate) fn build_capability_notes(probe: &ProviderProbe) -> Vec<String> {
-    let mut notes = Vec::new();
-    notes.push(provider_tier_note(&probe.provider).to_string());
-    notes.push(format!("probe_status: {}", probe.status));
-    if let Some(version) = &probe.version {
-        notes.push(format!("detected_version: {version}"));
-    }
-    if matches!(probe.status, ProbeStatus::MissingBinary) {
-        notes.push(format!(
-            "install `{}` and ensure it is in PATH",
-            probe.executable.display()
-        ));
-    }
-    for note in &probe.notes {
-        if !notes.iter().any(|existing| existing == note) {
-            notes.push(note.clone());
-        }
-    }
-    notes
-}
-
-pub(crate) fn map_summary_output(summary: &SummaryEnvelope) -> SummaryOutput {
-    SummaryOutput {
-        contract_version: summary.contract_version.clone(),
-        parse_status: format!("{:?}", summary.parse_status),
-        summary: summary.summary.summary.clone(),
-        key_findings: summary.summary.key_findings.clone(),
-        open_questions: summary.summary.open_questions.clone(),
-        next_steps: summary.summary.next_steps.clone(),
-        exit_code: summary.summary.exit_code,
-        verification_status: format!("{:?}", summary.summary.verification_status),
-        touched_files: summary.summary.touched_files.clone(),
-        plan_refs: summary.summary.plan_refs.clone(),
-    }
-}
-
-pub(crate) fn failed_summary(message: String) -> SummaryEnvelope {
-    SummaryEnvelope {
-        contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
-        parse_status: SummaryParseStatus::Invalid,
-        summary: StructuredSummary {
-            summary: "Run failed before structured output was collected.".to_string(),
-            key_findings: vec![message.clone()],
-            artifacts: Vec::new(),
-            open_questions: vec!["Inspect server logs for failure details.".to_string()],
-            next_steps: vec!["Retry the run with corrected configuration.".to_string()],
-            exit_code: 1,
-            verification_status: VerificationStatus::NotRun,
-            touched_files: Vec::new(),
-            plan_refs: Vec::new(),
-        },
-        raw_fallback_text: Some(message),
-    }
-}
-
-pub(crate) fn cancelled_summary(task: String) -> SummaryEnvelope {
-    SummaryEnvelope {
-        contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
-        parse_status: SummaryParseStatus::Degraded,
-        summary: StructuredSummary {
-            summary: format!("Run cancelled before completion for task: {task}"),
-            key_findings: vec!["User requested cancellation".to_string()],
-            artifacts: Vec::new(),
-            open_questions: Vec::new(),
-            next_steps: vec!["Re-run the task if cancellation was accidental.".to_string()],
-            exit_code: 130,
-            verification_status: VerificationStatus::NotRun,
-            touched_files: Vec::new(),
-            plan_refs: Vec::new(),
-        },
-        raw_fallback_text: None,
-    }
-}
-
-pub(crate) fn format_time(value: OffsetDateTime) -> String {
-    value.format(&Rfc3339).unwrap_or_else(|_| value.to_string())
 }
 
 #[cfg(test)]
@@ -380,24 +359,28 @@ mod tests {
     };
 
     use super::{
-        acquire_serialize_lock_from_state, HandleInput, McpSubagentServer, ReadAgentArtifactInput,
-        RunAgentInput, RunAgentSelectedFileInput,
+        acquire_serialize_locks_from_state, HandleInput, McpSubagentServer,
+        ReadAgentArtifactInput, RunAgentInput, RunAgentSelectedFileInput,
     };
     use crate::{mcp::artifacts::build_runtime_artifacts, mcp::state::RuntimeState};
 
     fn write_agent_spec(dir: &Path) {
-        write_agent_spec_with_provider(dir, "Mock");
+        write_agent_spec_with_provider_and_runtime(dir, "Mock", "");
     }
 
     fn write_codex_agent_spec(dir: &Path) {
-        write_agent_spec_with_provider(dir, "Codex");
+        write_agent_spec_with_provider_and_runtime(dir, "Codex", "");
     }
 
     fn write_gemini_agent_spec(dir: &Path) {
-        write_agent_spec_with_provider(dir, "Gemini");
+        write_agent_spec_with_provider_and_runtime(dir, "Gemini", "");
     }
 
     fn write_agent_spec_with_provider(dir: &Path, provider: &str) {
+        write_agent_spec_with_provider_and_runtime(dir, provider, "");
+    }
+
+    fn write_agent_spec_with_provider_and_runtime(dir: &Path, provider: &str, runtime_extra: &str) {
         let agent = format!(
             r#"
 [core]
@@ -409,6 +392,7 @@ instructions = "review"
 [runtime]
 working_dir_policy = "InPlace"
 sandbox = "ReadOnly"
+{runtime_extra}
 "#
         );
         fs::write(dir.join("reviewer.agent.toml"), agent).expect("write agent");
@@ -670,6 +654,80 @@ sandbox = "ReadOnly"
             .message
             .as_ref()
             .contains("provider `Codex` is unavailable"));
+    }
+
+    #[tokio::test]
+    async fn run_agent_rejects_when_spawn_policy_requires_async() {
+        let temp = tempdir().expect("temp");
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        write_agent_spec_with_provider_and_runtime(
+            &agents_dir,
+            "Mock",
+            r#"spawn_policy = "Async""#,
+        );
+        let server = make_server(agents_dir, state_dir);
+
+        let err = match server
+            .run_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
+                agent_name: "reviewer".to_string(),
+                task: "review parser".to_string(),
+                task_brief: None,
+                parent_summary: None,
+                selected_files: Vec::new(),
+                stage: None,
+                plan_ref: None,
+                working_dir: None,
+            }))
+            .await
+        {
+            Ok(_) => panic!("run should fail for async-only policy"),
+            Err(err) => err,
+        };
+
+        assert!(err
+            .message
+            .as_ref()
+            .contains("execution mode resolved to `async`"));
+        assert!(err.message.as_ref().contains("use `spawn_agent`"));
+    }
+
+    #[tokio::test]
+    async fn run_agent_rejects_when_background_prefers_async() {
+        let temp = tempdir().expect("temp");
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        write_agent_spec_with_provider_and_runtime(
+            &agents_dir,
+            "Mock",
+            r#"background_preference = "PreferBackground""#,
+        );
+        let server = make_server(agents_dir, state_dir);
+
+        let err = match server
+            .run_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
+                agent_name: "reviewer".to_string(),
+                task: "review parser".to_string(),
+                task_brief: None,
+                parent_summary: None,
+                selected_files: Vec::new(),
+                stage: None,
+                plan_ref: None,
+                working_dir: None,
+            }))
+            .await
+        {
+            Ok(_) => panic!("run should fail for background async preference"),
+            Err(err) => err,
+        };
+
+        assert!(err
+            .message
+            .as_ref()
+            .contains("execution mode resolved to `async`"));
+        assert!(err.message.as_ref().contains("use `spawn_agent`"));
     }
 
     #[tokio::test]
@@ -1028,6 +1086,17 @@ sandbox = "WorkspaceWrite"
         assert_eq!(run_obj["probe_result"]["provider"], "Mock");
         assert!(!run_obj["memory_resolution"].is_null());
         assert_eq!(run_obj["workspace"]["mode"], "TempCopy");
+        assert!(!run_obj["execution_policy"].is_null());
+        assert_eq!(run_obj["execution_policy"]["requested_run_mode"], "sync");
+        assert_eq!(run_obj["execution_policy"]["effective_run_mode"], "sync");
+        assert_eq!(
+            run_obj["execution_policy"]["effective_run_mode_source"],
+            "spec"
+        );
+        assert_eq!(run_obj["execution_policy"]["retry_max_attempts"], 1);
+        assert_eq!(run_obj["execution_policy"]["retry_backoff_secs"], 1);
+        assert_eq!(run_obj["execution_policy"]["attempts_used"], 1);
+        assert_eq!(run_obj["execution_policy"]["retries_used"], 0);
         let workspace_path = run_obj["workspace"]["workspace_path"]
             .as_str()
             .expect("workspace path");
@@ -1039,6 +1108,12 @@ sandbox = "WorkspaceWrite"
             .as_str()
             .expect("lock key")
             .contains("project"));
+        assert!(run_obj["workspace"]["lock_keys"].is_array());
+        assert!(
+            run_obj["workspace"]["lock_keys"]
+                .as_array()
+                .is_some_and(|keys| !keys.is_empty())
+        );
         assert!(run_obj["compiled_context_markdown"]
             .as_str()
             .unwrap_or_default()
@@ -1081,7 +1156,15 @@ sandbox = "WorkspaceWrite"
                     .map(str::to_string)
             })
             .collect::<Vec<_>>();
-        for required in ["probe", "gate", "workspace", "memory", "parse", "cleanup"] {
+        for required in [
+            "probe",
+            "gate",
+            "workspace",
+            "memory",
+            "policy",
+            "parse",
+            "cleanup",
+        ] {
             assert!(
                 event_names.iter().any(|event| event == required),
                 "missing event `{required}` in {event_names:?}"
@@ -1096,17 +1179,21 @@ sandbox = "WorkspaceWrite"
     #[tokio::test]
     async fn serialize_lock_blocks_until_guard_released() {
         let state = Arc::new(Mutex::new(RuntimeState::default()));
-        let first_guard = acquire_serialize_lock_from_state(&state, Some("repo-key".to_string()))
-            .await
-            .expect("first guard");
+        let first_guard = acquire_serialize_locks_from_state(
+            &state,
+            vec!["repo-key::src".to_string()],
+        )
+        .await;
+        assert_eq!(first_guard.len(), 1, "first guard");
 
         let state_clone = Arc::clone(&state);
         let waiter = tokio::spawn(async move {
             let start = Instant::now();
-            let guard =
-                acquire_serialize_lock_from_state(&state_clone, Some("repo-key".to_string()))
-                    .await
-                    .expect("second guard");
+            let guard = acquire_serialize_locks_from_state(
+                &state_clone,
+                vec!["repo-key::src".to_string()],
+            )
+            .await;
             let elapsed = start.elapsed();
             drop(guard);
             elapsed
@@ -1124,5 +1211,36 @@ sandbox = "WorkspaceWrite"
             elapsed >= Duration::from_millis(80),
             "lock wait should be observable, elapsed={elapsed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn serialize_lock_allows_non_conflicting_scopes() {
+        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        let first_guard = acquire_serialize_locks_from_state(
+            &state,
+            vec!["repo-key::src".to_string()],
+        )
+        .await;
+        assert_eq!(first_guard.len(), 1);
+
+        let state_clone = Arc::clone(&state);
+        let waiter = tokio::spawn(async move {
+            let start = Instant::now();
+            let guard = acquire_serialize_locks_from_state(
+                &state_clone,
+                vec!["repo-key::web".to_string()],
+            )
+            .await;
+            let elapsed = start.elapsed();
+            drop(guard);
+            elapsed
+        });
+
+        let elapsed = waiter.await.expect("waiter join");
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "non-conflicting lock should not block, elapsed={elapsed:?}"
+        );
+        drop(first_guard);
     }
 }

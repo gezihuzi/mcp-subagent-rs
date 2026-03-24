@@ -1151,7 +1151,7 @@
   - `cargo run -- --agents-dir examples/agents validate`
   - `./scripts/smoke_v06.sh`
 
-## T-049 V0.7-P1-WorkflowPolicyExecutionClosure (Pending)
+## T-049 V0.7-P1-WorkflowPolicyExecutionClosure (Completed 2026-03-24)
 
 任务：把 `spawn_policy/background_preference/max_turns/retry_policy` 从 schema 层推进到真实执行策略，补齐运行时可观测闭环。  
 验收标准：
@@ -1161,8 +1161,35 @@
 3. `retry_policy` 对可重试失败生效（次数、间隔、终态）。
 4. run 快照记录“生效策略 + 来源（default/spec/override）”。
 5. 回归链路（`cargo test`、`validate`、`smoke`）通过。
+完成记录：
 
-## T-050 V0.7-P1-ReviewPolicyEnforcement (Pending)
+- 已将 `spawn_policy/background_preference` 落地为真实 MCP 执行路径约束：
+  - `src/mcp/server.rs` 新增策略解析与执行模式决策；
+  - 当策略解析为 async 且调用 `run_agent` 时直接拒绝并提示使用 `spawn_agent`；
+  - 当策略解析为 sync 且调用 `spawn_agent` 时允许调用侧 override（记录 source=override）。
+- 已将 `max_turns/retry_policy` 下沉到运行时执行主链：
+  - `src/runtime/dispatcher.rs` 新增 attempt loop；
+  - 支持 `retry_policy.max_attempts/backoff_secs`；
+  - 支持 `max_turns` 对 retry 预算硬上限；
+  - 增加可重试错误识别与“重试耗尽/被 max_turns 截断”终态语义。
+- 已新增执行策略可观测快照并持久化：
+  - `src/mcp/state.rs` 新增 `ExecutionPolicyRecord` 与 `PolicyValueSource`；
+  - `run.json` 增加 `execution_policy`；
+  - `events.ndjson` 新增 `policy` 事件。
+- 已补充测试覆盖：
+  - `src/mcp/server.rs`：
+    - `run_agent_rejects_when_spawn_policy_requires_async`
+    - `run_agent_rejects_when_background_prefers_async`
+    - `run_agent_tempcopy_persists_workspace_metadata` 增加 execution_policy 与 policy event 断言
+  - `src/runtime/dispatcher.rs`：
+    - `dispatch_retries_transient_failure_and_succeeds`
+    - `dispatch_stops_retry_when_max_turns_reached`
+- 已通过：
+  - `cargo test -q`（119 passed + 7 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`
+
+## T-050 V0.7-P1-ReviewPolicyEnforcement (Completed 2026-03-24)
 
 任务：让 `ReviewPolicy` 从声明式字段变成真实约束执行，支持高风险默认双审。  
 验收标准：
@@ -1172,6 +1199,27 @@
 3. Build 与 Review 的角色隔离可观测且可测试。
 4. summary/artifact 中补齐 review 证据字段或结构化记录。
 5. 回归链路（`cargo test`、`validate`、`smoke`）通过。
+完成记录：
+
+- 已在 `src/runtime/dispatcher.rs` 落地 ReviewPolicy 执行约束：
+  - `enforce_workflow_gate()` 新增 `enforce_review_policy()`；
+  - Review 阶段会基于 `review_policy + 风险判定` 计算必须覆盖的 review track（correctness/style）；
+  - 高风险任务自动提升为 dual-track 要求（correctness + style），并支持通过 `parent_summary` 继承上一次 review 证据；
+  - 不满足策略时直接拒绝执行并给出可观测错误。
+- 已补充 review 证据工件：
+  - 新增 `src/mcp/review.rs`，在 Review 成功路径自动生成 `review/evidence.json`；
+  - 证据包含：required/current/parent tracks、high_risk、dual_review_satisfied、policy 参数、summary 核验字段。
+  - `src/mcp/tools.rs` 已在 `run_agent/spawn_agent` 成功路径接入 `apply_review_evidence_hook()`。
+- 已新增测试覆盖：
+  - `runtime::dispatcher`：
+    - `review_stage_requires_dual_tracks_for_high_risk_without_parent_evidence`
+    - `review_stage_accepts_dual_tracks_with_parent_summary_evidence`
+  - `mcp::review`：
+    - `review_stage_emits_review_evidence_artifact`
+- 已通过：
+  - `cargo test -q`（122 passed + 7 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`
 
 ## T-051 V0.7-P1-ArchiveKnowledgeCaptureHook (Completed 2026-03-24)
 
@@ -1208,7 +1256,7 @@
   - `cargo run -- --agents-dir examples/agents validate`
   - `./scripts/smoke_v06.sh`
 
-## T-052 V0.7-P1-McpServerDecompositionFinalPass (Pending)
+## T-052 V0.7-P1-McpServerDecompositionFinalPass (Completed 2026-03-24)
 
 任务：继续拆分 `src/mcp/server.rs` 职责，降低耦合与复杂度，同时保持协议兼容。  
 验收标准：
@@ -1217,8 +1265,26 @@
 2. MCP tool 对外输入输出协议保持兼容。
 3. `server.rs` 复杂度可见下降（行数/职责分离）。
 4. 回归链路（`cargo test`、`validate`、`smoke`）通过。
+完成记录：
 
-## T-053 V0.7-P1-ReadonlyGitWorktreeScopedAllow (Pending)
+- 已新增 `src/mcp/helpers.rs`，下沉 `server.rs` 中的通用职责：
+  - provider capability notes 组装
+  - summary/output 映射
+  - failed/cancelled summary 构造
+  - RFC3339 时间格式化
+  - run 模式策略解析（preferred/effective/label）
+- 已更新模块 wiring：
+  - `src/mcp/mod.rs` 新增 `helpers` 模块导出；
+  - `src/mcp/server.rs` 改为聚焦服务生命周期、spec 加载、request 准备、state 管理；
+  - `src/mcp/tools.rs` 改为从 `mcp::helpers` 引用通用 helper。
+- 对外 MCP 协议未改动：
+  - `list_agents/run_agent/spawn_agent/get_agent_status/cancel_agent/read_agent_artifact` 的入参与输出结构保持兼容。
+- 已通过：
+  - `cargo test -q`（122 passed + 7 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`
+
+## T-053 V0.7-P1-ReadonlyGitWorktreeScopedAllow (Completed 2026-03-24)
 
 任务：放宽 `ReadOnly + GitWorktree` 的阶段限制，仅允许在 `Research/Plan` 使用。  
 验收标准：
@@ -1227,8 +1293,26 @@
 2. `Build/Review` 阶段继续拒绝该组合。
 3. 校验与运行错误信息清晰可观测。
 4. 回归链路（`cargo test`、`validate`、`smoke`）通过。
+完成记录：
 
-## T-054 V0.7-P2-PresetPackAndPresetCatalog (Pending)
+- 已把 `ReadOnly + GitWorktree` 的限制从“静态 spec 禁止”改为“运行时按阶段 gate”：
+  - `src/spec/validate.rs` 移除全局硬拒绝；
+  - `src/runtime/dispatcher.rs` 新增 `enforce_readonly_gitworktree_scope()`。
+- 新 gate 语义：
+  - `Research/Plan` 阶段允许 `ReadOnly + GitWorktree`；
+  - `Build/Review` 阶段拒绝；
+  - 缺失 stage 时拒绝并提示必须显式指定 `Research` 或 `Plan`。
+- 已补测试覆盖：
+  - `allows_readonly_gitworktree_combo_in_spec_validation`（spec 层放行）
+  - `readonly_gitworktree_allows_research_stage`
+  - `readonly_gitworktree_rejects_build_stage`
+  - `readonly_gitworktree_requires_explicit_stage`
+- 已通过：
+  - `cargo test -q`（125 passed + 7 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`
+
+## T-054 V0.7-P2-PresetPackAndPresetCatalog (Completed 2026-03-24)
 
 任务：扩展 preset 体系，补齐项目级团队模板与目录化注册。  
 验收标准：
@@ -1237,8 +1321,37 @@
 2. preset 具备统一注册与版本标识。
 3. 每个 preset 生成后可直接 `validate`。
 4. README/docs 提供初始化示例。
+完成记录：
 
-## T-055 V0.7-P2-FinerGrainedConflictLock (Pending)
+- 已扩展 `init` preset 体系：
+  - `claude-opus-supervisor`（原有）
+  - `codex-primary-builder`
+  - `gemini-frontend-team`
+  - `local-ollama-fallback`
+  - `minimal-single-provider`
+- 已在 `src/init.rs` 引入统一 preset 注册与版本标识：
+  - `PRESET_CATALOG_VERSION = "v0.7.0"`
+  - `preset_agent_templates()` 统一管理 preset -> agent templates 映射
+  - `InitReport` 新增 `preset_catalog_version`
+- 已补充新 preset 所需 agent 模板：
+  - `CODEX_STYLE_REVIEWER_AGENT`
+  - `GEMINI_STYLE_REVIEWER_AGENT`
+  - `SINGLE_PROVIDER_CODER_AGENT`
+- 已更新 CLI preset 枚举与映射（`src/main.rs`）：
+  - `InitPresetArg` 新增四个 preset 选项
+  - `print_init_report` 输出 `preset_catalog_version`
+- 已更新文档初始化示例：
+  - `README.md` 命令面与 preset 示例补齐。
+- 已新增测试：
+  - `init_supports_all_presets_and_validates`
+  - 既有 `init_creates_preset_files_and_valid_specs` 增加 catalog version 断言
+- 已通过：
+  - `cargo fmt`
+  - `cargo test -q`（126 passed + 7 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`
+
+## T-055 V0.7-P2-FinerGrainedConflictLock (Completed 2026-03-24)
 
 任务：将并发冲突控制从仓库级串行收敛到更细粒度路径级。  
 验收标准：
@@ -1247,6 +1360,25 @@
 2. 锁粒度至少可表达到目录或文件集合。
 3. 异常退出可安全释放锁。
 4. 并发测试覆盖冲突与非冲突路径。
+完成记录：
+
+- 已将串行锁从单 key 升级为多 key（路径粒度）：
+  - `src/mcp/server.rs`：
+    - `conflict_lock_key` -> `conflict_lock_keys`
+    - 依据 `selected_files` 生成 `repo::top_scope` 级别 lock keys（排序去重）
+  - `acquire_serialize_lock_from_state` -> `acquire_serialize_locks_from_state`
+    - 支持一次性获取多把锁并按稳定顺序加锁，避免死锁。
+- 已打通运行主链：
+  - `src/mcp/tools.rs` 同步/异步路径均改为多锁获取；
+  - `src/mcp/service.rs` `run_dispatch` 接收 `lock_keys`，`workspace` 元信息写入 `lock_keys`。
+  - `src/mcp/state.rs` `WorkspaceRecord` 新增 `lock_keys`（保留 `lock_key` 兼容字段）。
+- 已补并发测试：
+  - `serialize_lock_blocks_until_guard_released`（冲突 scope 阻塞）
+  - `serialize_lock_allows_non_conflicting_scopes`（非冲突 scope 并行）
+- 已通过：
+  - `cargo test -q`（127 passed + 7 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`
 
 ## T-056 V0.7-P2-DoctorJsonIdeOutput (Pending)
 
