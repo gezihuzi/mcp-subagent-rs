@@ -333,3 +333,20 @@
 - `src/mcp/mod.rs` 已注册 `pub(crate) mod artifacts;`。
 - `src/mcp/server.rs` 已删除本地重复函数，改为统一引用 `mcp::artifacts`。
 - 已通过 `cargo test`（61 passed）与 `cargo run -- validate`（summary contract template: ok）。
+
+## T-022 V0.6-P0-2c-McpServerStateModelSplit (Completed 2026-03-24)
+任务：推进 v0.6 P0-2 的第三步，将 MCP server 的状态模型与快照构建逻辑从 `mcp/server.rs` 抽离到独立模块，降低 server 结构耦合。
+验收标准：
+1. 新增 `src/mcp/state.rs`，承载 runtime state、run record、persisted record 与 snapshot 相关结构。
+2. `src/mcp/server.rs` 不再定义重复状态模型与快照转换函数，改为复用 `mcp::state`。
+3. `spawn/run/status/cancel` 行为不回退，持久化字段与加载逻辑保持兼容。
+4. 现有 MCP 单测行为不变（尤其是重启读取历史 run 与串行锁场景）。
+5. `cargo test` 与 `cargo run -- validate` 通过。
+完成记录：
+- 已新增 `src/mcp/state.rs`，迁移：
+  - `RuntimeState`、`RunRecord`、`WorkspaceRecord`、`PersistedRunRecord`
+  - `RunRequestSnapshot`/`RunSpecSnapshot`/`ProbeResultRecord`
+  - `build_run_*_snapshot`、`append_status_if_terminal`
+- `src/mcp/mod.rs` 已注册 `pub(crate) mod state;`。
+- `src/mcp/server.rs` 已改为引用 `mcp::state`，并移除本地重复定义与转换函数。
+- 已通过 `cargo test`（61 passed）与 `cargo run -- validate`（summary contract template: ok）。

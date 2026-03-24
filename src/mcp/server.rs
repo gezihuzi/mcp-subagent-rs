@@ -11,12 +11,8 @@ use rmcp::{
     model::{ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router, ErrorData, Json, ServerHandler, ServiceExt,
 };
-use serde::{Deserialize, Serialize};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-use tokio::{
-    sync::{Mutex, OwnedMutexGuard},
-    task::JoinHandle,
-};
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use uuid::Uuid;
 
 use crate::{
@@ -24,6 +20,10 @@ use crate::{
     mcp::artifacts::{
         build_runtime_artifacts, read_artifact_from_disk, run_artifacts_dir, run_dir,
         sanitize_relative_artifact_path,
+    },
+    mcp::state::{
+        append_status_if_terminal, build_probe_result_snapshot, build_run_request_snapshot,
+        build_run_spec_snapshot, PersistedRunRecord, RunRecord, RuntimeState, WorkspaceRecord,
     },
     probe::{ProbeStatus, ProviderProbe, ProviderProber, SystemProviderProber},
     runtime::{
@@ -39,12 +39,9 @@ use crate::{
     },
     spec::{
         registry::{load_agent_specs_from_dirs, LoadedAgentSpec},
-        runtime_policy::{
-            ApprovalPolicy, ContextMode, FileConflictPolicy, MemorySource, SandboxPolicy,
-            WorkingDirPolicy,
-        },
+        runtime_policy::{FileConflictPolicy, SandboxPolicy},
         validate::validate_agent_spec,
-        AgentSpec, Provider,
+        Provider,
     },
     types::{ResolvedMemory, RunMode, RunRequest, SelectedFile},
 };
@@ -55,164 +52,6 @@ pub use crate::mcp::dto::{
     RunAgentOutput, RunAgentSelectedFileInput, RuntimePolicySummary, SpawnAgentOutput,
     SummaryOutput,
 };
-
-#[derive(Debug, Default)]
-struct RuntimeState {
-    runs: HashMap<String, RunRecord>,
-    tasks: HashMap<String, JoinHandle<()>>,
-    serialize_locks: HashMap<String, Arc<Mutex<()>>>,
-}
-
-#[derive(Debug, Clone)]
-struct RunRecord {
-    status: RunStatus,
-    created_at: OffsetDateTime,
-    updated_at: OffsetDateTime,
-    status_history: Vec<RunStatus>,
-    summary: Option<StructuredSummary>,
-    artifact_index: Vec<ArtifactOutput>,
-    artifacts: HashMap<String, String>,
-    error_message: Option<String>,
-    task: String,
-    request_snapshot: Option<RunRequestSnapshot>,
-    spec_snapshot: Option<RunSpecSnapshot>,
-    probe_result: Option<ProbeResultRecord>,
-    workspace: Option<WorkspaceRecord>,
-}
-
-impl RunRecord {
-    fn running(
-        task: String,
-        request_snapshot: Option<RunRequestSnapshot>,
-        spec_snapshot: Option<RunSpecSnapshot>,
-        probe_result: Option<ProbeResultRecord>,
-    ) -> Self {
-        let now = OffsetDateTime::now_utc();
-        Self {
-            status: RunStatus::Running,
-            created_at: now,
-            updated_at: now,
-            status_history: vec![
-                RunStatus::Received,
-                RunStatus::Validating,
-                RunStatus::ProbingProvider,
-                RunStatus::Running,
-            ],
-            summary: None,
-            artifact_index: Vec::new(),
-            artifacts: HashMap::new(),
-            error_message: None,
-            task,
-            request_snapshot,
-            spec_snapshot,
-            probe_result,
-            workspace: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WorkspaceRecord {
-    mode: String,
-    source_path: PathBuf,
-    workspace_path: PathBuf,
-    #[serde(default)]
-    notes: Vec<String>,
-    #[serde(default)]
-    lock_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SelectedFileSnapshot {
-    path: PathBuf,
-    #[serde(default)]
-    rationale: Option<String>,
-    has_inlined_content: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RunRequestSnapshot {
-    task: String,
-    #[serde(default)]
-    task_brief: Option<String>,
-    parent_summary_present: bool,
-    selected_files: Vec<SelectedFileSnapshot>,
-    working_dir: PathBuf,
-    run_mode: RunMode,
-    acceptance_criteria: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RunSpecSnapshot {
-    name: String,
-    provider: String,
-    #[serde(default)]
-    model: Option<String>,
-    context_mode: String,
-    working_dir_policy: String,
-    file_conflict_policy: String,
-    sandbox: String,
-    approval: String,
-    timeout_secs: u64,
-    memory_sources: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProbeResultRecord {
-    provider: String,
-    executable: PathBuf,
-    #[serde(default)]
-    version: Option<String>,
-    status: String,
-    notes: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedRunRecord {
-    status: RunStatus,
-    #[serde(default)]
-    created_at: Option<OffsetDateTime>,
-    updated_at: OffsetDateTime,
-    #[serde(default)]
-    status_history: Vec<RunStatus>,
-    summary: Option<StructuredSummary>,
-    artifact_index: Vec<ArtifactOutput>,
-    error_message: Option<String>,
-    task: String,
-    #[serde(default)]
-    request_snapshot: Option<RunRequestSnapshot>,
-    #[serde(default)]
-    spec_snapshot: Option<RunSpecSnapshot>,
-    #[serde(default)]
-    probe_result: Option<ProbeResultRecord>,
-    #[serde(default)]
-    workspace: Option<WorkspaceRecord>,
-}
-
-impl From<&RunRecord> for PersistedRunRecord {
-    fn from(value: &RunRecord) -> Self {
-        Self {
-            status: value.status.clone(),
-            created_at: Some(value.created_at),
-            updated_at: value.updated_at,
-            status_history: value.status_history.clone(),
-            summary: value.summary.clone(),
-            artifact_index: value.artifact_index.clone(),
-            error_message: value.error_message.clone(),
-            task: value.task.clone(),
-            request_snapshot: value.request_snapshot.clone(),
-            spec_snapshot: value.spec_snapshot.clone(),
-            probe_result: value.probe_result.clone(),
-            workspace: value.workspace.clone(),
-        }
-    }
-}
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpSubagentServer {
@@ -900,114 +739,6 @@ fn build_capability_notes(probe: &ProviderProbe) -> Vec<String> {
     notes
 }
 
-fn build_run_request_snapshot(request: &RunRequest) -> RunRequestSnapshot {
-    RunRequestSnapshot {
-        task: request.task.clone(),
-        task_brief: request.task_brief.clone(),
-        parent_summary_present: request.parent_summary.is_some(),
-        selected_files: request
-            .selected_files
-            .iter()
-            .map(|selected| SelectedFileSnapshot {
-                path: selected.path.clone(),
-                rationale: selected.rationale.clone(),
-                has_inlined_content: selected.content.is_some(),
-            })
-            .collect(),
-        working_dir: request.working_dir.clone(),
-        run_mode: request.run_mode.clone(),
-        acceptance_criteria: request.acceptance_criteria.clone(),
-    }
-}
-
-fn build_run_spec_snapshot(spec: &AgentSpec) -> RunSpecSnapshot {
-    RunSpecSnapshot {
-        name: spec.core.name.clone(),
-        provider: spec.core.provider.as_str().to_string(),
-        model: spec.core.model.clone(),
-        context_mode: context_mode_to_str(&spec.runtime.context_mode),
-        working_dir_policy: working_dir_policy_to_str(&spec.runtime.working_dir_policy),
-        file_conflict_policy: file_conflict_policy_to_str(&spec.runtime.file_conflict_policy),
-        sandbox: sandbox_policy_to_str(&spec.runtime.sandbox),
-        approval: approval_policy_to_str(&spec.runtime.approval),
-        timeout_secs: spec.runtime.timeout_secs,
-        memory_sources: spec
-            .runtime
-            .memory_sources
-            .iter()
-            .map(memory_source_to_str)
-            .collect(),
-    }
-}
-
-fn build_probe_result_snapshot(probe: &ProviderProbe) -> ProbeResultRecord {
-    ProbeResultRecord {
-        provider: probe.provider.as_str().to_string(),
-        executable: probe.executable.clone(),
-        version: probe.version.clone(),
-        status: probe.status.to_string(),
-        notes: probe.notes.clone(),
-    }
-}
-
-fn append_status_if_terminal(status_history: &mut Vec<RunStatus>, status: RunStatus) {
-    if status_history.last().is_some_and(|last| *last == status) {
-        return;
-    }
-    status_history.push(status);
-}
-
-fn context_mode_to_str(mode: &ContextMode) -> String {
-    match mode {
-        ContextMode::Isolated => "Isolated".to_string(),
-        ContextMode::SummaryOnly => "SummaryOnly".to_string(),
-        ContextMode::SelectedFiles(paths) => format!("SelectedFiles({})", paths.join(",")),
-        ContextMode::ExpandedBrief => "ExpandedBrief".to_string(),
-    }
-}
-
-fn working_dir_policy_to_str(policy: &WorkingDirPolicy) -> String {
-    match policy {
-        WorkingDirPolicy::InPlace => "InPlace".to_string(),
-        WorkingDirPolicy::TempCopy => "TempCopy".to_string(),
-        WorkingDirPolicy::GitWorktree => "GitWorktree".to_string(),
-    }
-}
-
-fn file_conflict_policy_to_str(policy: &FileConflictPolicy) -> String {
-    match policy {
-        FileConflictPolicy::Deny => "Deny".to_string(),
-        FileConflictPolicy::Serialize => "Serialize".to_string(),
-        FileConflictPolicy::AllowWithMergeReview => "AllowWithMergeReview".to_string(),
-    }
-}
-
-fn sandbox_policy_to_str(policy: &SandboxPolicy) -> String {
-    match policy {
-        SandboxPolicy::ReadOnly => "ReadOnly".to_string(),
-        SandboxPolicy::WorkspaceWrite => "WorkspaceWrite".to_string(),
-        SandboxPolicy::FullAccess => "FullAccess".to_string(),
-    }
-}
-
-fn approval_policy_to_str(policy: &ApprovalPolicy) -> String {
-    match policy {
-        ApprovalPolicy::ProviderDefault => "ProviderDefault".to_string(),
-        ApprovalPolicy::Ask => "Ask".to_string(),
-        ApprovalPolicy::AutoAcceptEdits => "AutoAcceptEdits".to_string(),
-        ApprovalPolicy::DenyByDefault => "DenyByDefault".to_string(),
-    }
-}
-
-fn memory_source_to_str(source: &MemorySource) -> String {
-    match source {
-        MemorySource::AutoProjectMemory => "AutoProjectMemory".to_string(),
-        MemorySource::File(path) => format!("File({path})"),
-        MemorySource::Glob(pattern) => format!("Glob({pattern})"),
-        MemorySource::Inline(_) => "Inline(<content>)".to_string(),
-    }
-}
-
 fn map_summary_output(summary: &StructuredSummary) -> SummaryOutput {
     SummaryOutput {
         summary: summary.summary.clone(),
@@ -1336,8 +1067,9 @@ mod tests {
 
     use super::{
         acquire_serialize_lock_from_state, build_runtime_artifacts, HandleInput, McpSubagentServer,
-        ReadAgentArtifactInput, RunAgentInput, RunAgentSelectedFileInput, RuntimeState,
+        ReadAgentArtifactInput, RunAgentInput, RunAgentSelectedFileInput,
     };
+    use crate::mcp::state::RuntimeState;
 
     fn write_agent_spec(dir: &Path) {
         write_agent_spec_with_provider(dir, "Ollama");
