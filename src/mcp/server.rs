@@ -1,4 +1,10 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Component, Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -53,6 +59,30 @@ impl RunRecord {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedRunRecord {
+    status: RunStatus,
+    updated_at: OffsetDateTime,
+    summary: Option<StructuredSummary>,
+    artifact_index: Vec<ArtifactOutput>,
+    error_message: Option<String>,
+    task: String,
+}
+
+impl From<&RunRecord> for PersistedRunRecord {
+    fn from(value: &RunRecord) -> Self {
+        Self {
+            status: value.status.clone(),
+            updated_at: value.updated_at,
+            summary: value.summary.clone(),
+            artifact_index: value.artifact_index.clone(),
+            error_message: value.error_message.clone(),
+            task: value.task.clone(),
+        }
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpSubagentServer {
     fn get_info(&self) -> ServerInfo {
@@ -65,14 +95,20 @@ impl ServerHandler for McpSubagentServer {
 pub struct McpSubagentServer {
     tool_router: ToolRouter<Self>,
     agents_dirs: Vec<PathBuf>,
+    state_dir: PathBuf,
     runtime_state: Arc<Mutex<RuntimeState>>,
 }
 
 impl McpSubagentServer {
     pub fn new(agents_dirs: Vec<PathBuf>) -> Self {
+        Self::new_with_state_dir(agents_dirs, default_state_dir())
+    }
+
+    pub fn new_with_state_dir(agents_dirs: Vec<PathBuf>, state_dir: PathBuf) -> Self {
         Self {
             tool_router: Self::tool_router(),
             agents_dirs,
+            state_dir,
             runtime_state: Arc::new(Mutex::new(RuntimeState::default())),
         }
     }
@@ -134,6 +170,42 @@ impl McpSubagentServer {
         };
 
         Ok((loaded, request))
+    }
+
+    async fn get_or_load_run_record(
+        &self,
+        handle_id: &str,
+    ) -> std::result::Result<RunRecord, ErrorData> {
+        {
+            let state = self.runtime_state.lock().await;
+            if let Some(record) = state.runs.get(handle_id) {
+                return Ok(record.clone());
+            }
+        }
+
+        let loaded = load_run_record_from_disk(&self.state_dir, handle_id)?;
+        let Some(record) = loaded else {
+            return Err(ErrorData::resource_not_found(
+                format!("handle not found: {handle_id}"),
+                None,
+            ));
+        };
+
+        let mut state = self.runtime_state.lock().await;
+        state.runs.insert(handle_id.to_string(), record.clone());
+        Ok(record)
+    }
+
+    async fn upsert_and_persist_run(
+        &self,
+        handle_id: &str,
+        record: RunRecord,
+    ) -> std::result::Result<(), ErrorData> {
+        {
+            let mut state = self.runtime_state.lock().await;
+            state.runs.insert(handle_id.to_string(), record.clone());
+        }
+        persist_run_record(&self.state_dir, handle_id, &record)
     }
 }
 
@@ -283,26 +355,24 @@ impl McpSubagentServer {
 
         let (artifact_index, artifacts) =
             build_runtime_artifacts(&result.summary, &result.stdout, &result.stderr);
+        let handle_id = result.metadata.handle_id.to_string();
         let output = RunAgentOutput {
-            handle_id: result.metadata.handle_id.to_string(),
+            handle_id: handle_id.clone(),
             status: format!("{:?}", result.metadata.status),
             structured_summary: map_summary_output(&result.summary),
             artifact_index: artifact_index.clone(),
         };
 
-        let mut state = self.runtime_state.lock().await;
-        state.runs.insert(
-            output.handle_id.clone(),
-            RunRecord {
-                status: result.metadata.status,
-                updated_at: OffsetDateTime::now_utc(),
-                summary: Some(result.summary),
-                artifact_index,
-                artifacts,
-                error_message: result.metadata.error_message,
-                task: request.task,
-            },
-        );
+        let record = RunRecord {
+            status: result.metadata.status,
+            updated_at: OffsetDateTime::now_utc(),
+            summary: Some(result.summary),
+            artifact_index,
+            artifacts,
+            error_message: result.metadata.error_message,
+            task: request.task,
+        };
+        self.upsert_and_persist_run(&handle_id, record).await?;
 
         Ok(Json(output))
     }
@@ -314,15 +384,13 @@ impl McpSubagentServer {
     ) -> std::result::Result<Json<SpawnAgentOutput>, ErrorData> {
         let (loaded, request) = self.prepare_run(input)?;
         let handle_id = Uuid::now_v7().to_string();
+        let running_record = RunRecord::running(request.task.clone());
 
-        {
-            let mut state = self.runtime_state.lock().await;
-            state
-                .runs
-                .insert(handle_id.clone(), RunRecord::running(request.task.clone()));
-        }
+        self.upsert_and_persist_run(&handle_id, running_record)
+            .await?;
 
         let state = Arc::clone(&self.runtime_state);
+        let state_dir = self.state_dir.clone();
         let task_handle_id = handle_id.clone();
         let task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(120)).await;
@@ -360,6 +428,10 @@ impl McpSubagentServer {
                     record.artifacts = artifacts;
                 }
             }
+
+            if let Err(err) = persist_run_record(&state_dir, &task_handle_id, record) {
+                record.error_message = Some(format!("failed to persist run state: {err}"));
+            }
         });
 
         {
@@ -378,18 +450,16 @@ impl McpSubagentServer {
         &self,
         Parameters(input): Parameters<HandleInput>,
     ) -> std::result::Result<Json<AgentStatusOutput>, ErrorData> {
-        let state = self.runtime_state.lock().await;
-        let record = state.runs.get(&input.handle_id).ok_or_else(|| {
-            ErrorData::resource_not_found(format!("handle not found: {}", input.handle_id), None)
-        })?;
+        let record = self.get_or_load_run_record(&input.handle_id).await?;
+        let structured_summary = record.summary.as_ref().map(map_summary_output);
 
         Ok(Json(AgentStatusOutput {
             handle_id: input.handle_id,
             status: format!("{:?}", record.status),
             updated_at: format_time(record.updated_at),
-            error_message: record.error_message.clone(),
-            structured_summary: record.summary.as_ref().map(map_summary_output),
-            artifact_index: record.artifact_index.clone(),
+            error_message: record.error_message,
+            structured_summary,
+            artifact_index: record.artifact_index,
         }))
     }
 
@@ -436,6 +506,7 @@ impl McpSubagentServer {
                 record.artifact_index = artifact_index;
                 record.artifacts = artifacts;
             }
+            persist_run_record(&self.state_dir, &input.handle_id, record)?;
         }
 
         Ok(Json(CancelAgentOutput {
@@ -449,27 +520,211 @@ impl McpSubagentServer {
         &self,
         Parameters(input): Parameters<ReadAgentArtifactInput>,
     ) -> std::result::Result<Json<ReadAgentArtifactOutput>, ErrorData> {
-        let state = self.runtime_state.lock().await;
-        let run = state.runs.get(&input.handle_id).ok_or_else(|| {
-            ErrorData::resource_not_found(format!("handle not found: {}", input.handle_id), None)
-        })?;
-
-        let content = run.artifacts.get(&input.path).ok_or_else(|| {
-            ErrorData::resource_not_found(
-                format!(
-                    "artifact not found for handle {}: {}",
-                    input.handle_id, input.path
-                ),
+        if sanitize_relative_artifact_path(&input.path).is_none() {
+            return Err(ErrorData::invalid_params(
+                format!("invalid artifact path: {}", input.path),
                 None,
-            )
-        })?;
+            ));
+        }
+
+        let mut run = self.get_or_load_run_record(&input.handle_id).await?;
+        let content = if let Some(content) = run.artifacts.get(&input.path) {
+            content.clone()
+        } else {
+            let content = read_artifact_from_disk(&self.state_dir, &input.handle_id, &input.path)?
+                .ok_or_else(|| {
+                    ErrorData::resource_not_found(
+                        format!(
+                            "artifact not found for handle {}: {}",
+                            input.handle_id, input.path
+                        ),
+                        None,
+                    )
+                })?;
+            run.artifacts.insert(input.path.clone(), content.clone());
+            let mut state = self.runtime_state.lock().await;
+            if let Some(existing) = state.runs.get_mut(&input.handle_id) {
+                existing
+                    .artifacts
+                    .insert(input.path.clone(), content.clone());
+            }
+            content
+        };
 
         Ok(Json(ReadAgentArtifactOutput {
             handle_id: input.handle_id,
             path: input.path,
-            content: content.clone(),
+            content,
         }))
     }
+}
+
+fn default_state_dir() -> PathBuf {
+    PathBuf::from(".mcp-subagent/state")
+}
+
+fn run_root_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join("runs")
+}
+
+fn run_dir(state_dir: &Path, handle_id: &str) -> PathBuf {
+    run_root_dir(state_dir).join(handle_id)
+}
+
+fn run_meta_path(state_dir: &Path, handle_id: &str) -> PathBuf {
+    run_dir(state_dir, handle_id).join("run.json")
+}
+
+fn run_artifacts_dir(state_dir: &Path, handle_id: &str) -> PathBuf {
+    run_dir(state_dir, handle_id).join("artifacts")
+}
+
+fn sanitize_relative_artifact_path(path: &str) -> Option<PathBuf> {
+    let original = Path::new(path);
+    if path.is_empty() || original.is_absolute() {
+        return None;
+    }
+
+    let mut sanitized = PathBuf::new();
+    for component in original.components() {
+        match component {
+            Component::Normal(segment) => sanitized.push(segment),
+            _ => return None,
+        }
+    }
+    if sanitized.as_os_str().is_empty() {
+        return None;
+    }
+    Some(sanitized)
+}
+
+fn persist_run_record(
+    state_dir: &Path,
+    handle_id: &str,
+    record: &RunRecord,
+) -> std::result::Result<(), ErrorData> {
+    let run_dir = run_dir(state_dir, handle_id);
+    let artifacts_dir = run_artifacts_dir(state_dir, handle_id);
+    fs::create_dir_all(&artifacts_dir).map_err(|err| {
+        ErrorData::internal_error(
+            format!(
+                "failed to create run directory {}: {err}",
+                run_dir.display()
+            ),
+            None,
+        )
+    })?;
+
+    let persisted = PersistedRunRecord::from(record);
+    let meta_json = serde_json::to_string_pretty(&persisted)
+        .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+    fs::write(run_meta_path(state_dir, handle_id), meta_json)
+        .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+
+    for (artifact_path, content) in &record.artifacts {
+        let rel_path = sanitize_relative_artifact_path(artifact_path).ok_or_else(|| {
+            ErrorData::invalid_params(
+                format!("invalid artifact path for persistence: {artifact_path}"),
+                None,
+            )
+        })?;
+        let full_path = artifacts_dir.join(rel_path);
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                ErrorData::internal_error(
+                    format!(
+                        "failed to create artifact parent directory {}: {err}",
+                        parent.display()
+                    ),
+                    None,
+                )
+            })?;
+        }
+        fs::write(&full_path, content).map_err(|err| {
+            ErrorData::internal_error(
+                format!("failed to write artifact {}: {err}", full_path.display()),
+                None,
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn load_run_record_from_disk(
+    state_dir: &Path,
+    handle_id: &str,
+) -> std::result::Result<Option<RunRecord>, ErrorData> {
+    let meta_path = run_meta_path(state_dir, handle_id);
+    if !meta_path.exists() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(&meta_path).map_err(|err| {
+        ErrorData::internal_error(
+            format!("failed to read run metadata {}: {err}", meta_path.display()),
+            None,
+        )
+    })?;
+    let persisted: PersistedRunRecord = serde_json::from_str(&raw)
+        .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+
+    let mut artifacts = HashMap::new();
+    for artifact in &persisted.artifact_index {
+        let Some(rel_path) = sanitize_relative_artifact_path(&artifact.path) else {
+            return Err(ErrorData::invalid_params(
+                format!(
+                    "invalid artifact path in persisted metadata for {handle_id}: {}",
+                    artifact.path
+                ),
+                None,
+            ));
+        };
+
+        let path = run_artifacts_dir(state_dir, handle_id).join(rel_path);
+        if !path.exists() {
+            continue;
+        }
+        let content = fs::read_to_string(&path).map_err(|err| {
+            ErrorData::internal_error(
+                format!("failed to read artifact {}: {err}", path.display()),
+                None,
+            )
+        })?;
+        artifacts.insert(artifact.path.clone(), content);
+    }
+
+    Ok(Some(RunRecord {
+        status: persisted.status,
+        updated_at: persisted.updated_at,
+        summary: persisted.summary,
+        artifact_index: persisted.artifact_index,
+        artifacts,
+        error_message: persisted.error_message,
+        task: persisted.task,
+    }))
+}
+
+fn read_artifact_from_disk(
+    state_dir: &Path,
+    handle_id: &str,
+    artifact_path: &str,
+) -> std::result::Result<Option<String>, ErrorData> {
+    let rel_path = sanitize_relative_artifact_path(artifact_path).ok_or_else(|| {
+        ErrorData::invalid_params(format!("invalid artifact path: {artifact_path}"), None)
+    })?;
+    let full_path = run_artifacts_dir(state_dir, handle_id).join(rel_path);
+    if !full_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&full_path).map_err(|err| {
+        ErrorData::internal_error(
+            format!("failed to read artifact {}: {err}", full_path.display()),
+            None,
+        )
+    })?;
+    Ok(Some(content))
 }
 
 fn map_summary_output(summary: &StructuredSummary) -> SummaryOutput {
@@ -620,7 +875,10 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{McpSubagentServer, RunAgentInput, RunAgentSelectedFileInput};
+    use super::{
+        HandleInput, McpSubagentServer, ReadAgentArtifactInput, RunAgentInput,
+        RunAgentSelectedFileInput,
+    };
 
     fn write_agent_spec(dir: &Path) {
         let agent = r#"
@@ -640,9 +898,11 @@ sandbox = "ReadOnly"
     #[tokio::test]
     async fn list_agents_tool_returns_agent() {
         let temp = tempdir().expect("temp");
-        let path = temp.path().to_path_buf();
-        write_agent_spec(&path);
-        let server = McpSubagentServer::new(vec![path]);
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        write_agent_spec(&agents_dir);
+        let server = McpSubagentServer::new_with_state_dir(vec![agents_dir], state_dir);
 
         let out = server.list_agents().await.expect("list").0;
         assert_eq!(out.agents.len(), 1);
@@ -652,9 +912,11 @@ sandbox = "ReadOnly"
     #[tokio::test]
     async fn run_agent_tool_returns_structured_summary() {
         let temp = tempdir().expect("temp");
-        let path = temp.path().to_path_buf();
-        write_agent_spec(&path);
-        let server = McpSubagentServer::new(vec![path]);
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        write_agent_spec(&agents_dir);
+        let server = McpSubagentServer::new_with_state_dir(vec![agents_dir], state_dir);
 
         let input = RunAgentInput {
             agent_name: "reviewer".to_string(),
@@ -701,11 +963,13 @@ sandbox = "ReadOnly"
     #[tokio::test]
     async fn mcp_transport_roundtrip_for_all_tools() {
         let temp = tempdir().expect("temp");
-        let path = temp.path().to_path_buf();
-        write_agent_spec(&path);
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        write_agent_spec(&agents_dir);
 
         let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
-        let server = McpSubagentServer::new(vec![path]);
+        let server = McpSubagentServer::new_with_state_dir(vec![agents_dir], state_dir);
         let server_handle = tokio::spawn(async move {
             let running = server.serve(server_transport).await.expect("server init");
             let _ = running.waiting().await.expect("server wait");
@@ -834,5 +1098,71 @@ sandbox = "ReadOnly"
 
         client.cancel().await.expect("cancel client");
         server_handle.await.expect("server join");
+    }
+
+    #[tokio::test]
+    async fn restart_can_query_persisted_runs_and_reject_invalid_path() {
+        let temp = tempdir().expect("temp");
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        write_agent_spec(&agents_dir);
+
+        let server =
+            McpSubagentServer::new_with_state_dir(vec![agents_dir.clone()], state_dir.clone());
+        let run_out = server
+            .run_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
+                agent_name: "reviewer".to_string(),
+                task: "persist me".to_string(),
+                task_brief: None,
+                parent_summary: None,
+                selected_files: vec![RunAgentSelectedFileInput {
+                    path: "src/lib.rs".to_string(),
+                    rationale: None,
+                    content: None,
+                }],
+                working_dir: None,
+            }))
+            .await
+            .expect("run")
+            .0;
+        let handle_id = run_out.handle_id;
+        drop(server);
+
+        let restarted = McpSubagentServer::new_with_state_dir(vec![agents_dir], state_dir);
+        let status = restarted
+            .get_agent_status(rmcp::handler::server::wrapper::Parameters(HandleInput {
+                handle_id: handle_id.clone(),
+            }))
+            .await
+            .expect("status")
+            .0;
+        assert_eq!(status.status, "Succeeded");
+
+        let artifact = restarted
+            .read_agent_artifact(rmcp::handler::server::wrapper::Parameters(
+                ReadAgentArtifactInput {
+                    handle_id: handle_id.clone(),
+                    path: "summary.json".to_string(),
+                },
+            ))
+            .await
+            .expect("read summary")
+            .0;
+        assert!(artifact.content.contains("Mock run completed"));
+
+        let invalid = match restarted
+            .read_agent_artifact(rmcp::handler::server::wrapper::Parameters(
+                ReadAgentArtifactInput {
+                    handle_id,
+                    path: "../escape.txt".to_string(),
+                },
+            ))
+            .await
+        {
+            Ok(_) => panic!("invalid path should fail"),
+            Err(err) => err,
+        };
+        assert!(invalid.message.as_ref().contains("invalid artifact path"));
     }
 }

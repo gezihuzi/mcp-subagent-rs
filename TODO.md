@@ -51,3 +51,18 @@
 - `cancel_agent` 可中止运行中任务并写入 `Cancelled` 状态与取消摘要。
 - `read_agent_artifact` 已可读取 `summary.json/stdout.txt/stderr.txt` 等文本 artifact。
 - 已新增 duplex 端到端测试覆盖上述工具链路，`cargo test` 通过（17 passed）。
+
+## T-005 Phase3-StatePersistence (Completed 2026-03-24)
+任务：将 run 状态和文本 artifact 落盘，支持服务重启后继续查询。
+验收标准：
+1. 每次 run 的状态与摘要持久化到 state 目录（按 handle_id 分目录）。
+2. `summary.json/stdout.txt/stderr.txt` 等文本 artifact 持久化到磁盘。
+3. 服务进程重启后，`get_agent_status` 与 `read_agent_artifact` 仍可读取历史 run。
+4. 对非法 artifact 路径（绝对路径/目录穿越）做拒绝处理。
+5. `cargo test` 通过，并新增覆盖“重启后查询历史 run”场景。
+完成记录：
+- 已新增 state 目录持久化：`state/runs/<handle_id>/run.json` 与 `state/runs/<handle_id>/artifacts/*`。
+- `run_agent/spawn_agent/cancel_agent` 均会更新内存态并落盘；异步任务完成后自动持久化终态。
+- `get_agent_status/read_agent_artifact` 支持按 handle_id 从磁盘懒加载历史 run，实现重启后可查。
+- 已实现 artifact 路径安全校验，拒绝绝对路径与目录穿越。
+- 已新增测试 `restart_can_query_persisted_runs_and_reject_invalid_path`，全量 `cargo test` 通过（18 passed）。
