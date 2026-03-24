@@ -1,13 +1,16 @@
+use std::path::{Component, Path};
+
 use crate::{
     error::{McpSubagentError, Result},
     spec::{
-        runtime_policy::{SandboxPolicy, WorkingDirPolicy},
+        runtime_policy::{MemorySource, SandboxPolicy, WorkingDirPolicy},
         AgentSpec, Provider,
     },
 };
 
 pub fn validate_agent_spec(spec: &AgentSpec) -> Result<()> {
     validate_provider_overrides(spec)?;
+    validate_memory_sources(spec)?;
     validate_runtime_policy(spec)?;
     Ok(())
 }
@@ -78,12 +81,80 @@ fn validate_runtime_policy(spec: &AgentSpec) -> Result<()> {
     Ok(())
 }
 
+fn validate_memory_sources(spec: &AgentSpec) -> Result<()> {
+    for source in &spec.runtime.memory_sources {
+        match source {
+            MemorySource::AutoProjectMemory => {}
+            MemorySource::Inline(content) => {
+                if content.trim().is_empty() {
+                    return Err(McpSubagentError::SpecValidation(
+                        "Inline memory source must not be empty".to_string(),
+                    ));
+                }
+            }
+            MemorySource::File(path) => {
+                validate_relative_memory_path("File", path, false)?;
+            }
+            MemorySource::Glob(pattern) => {
+                validate_relative_memory_path("Glob", pattern, true)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_relative_memory_path(kind: &str, raw: &str, allow_glob: bool) -> Result<()> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(McpSubagentError::SpecValidation(format!(
+            "{kind} memory source path must not be empty"
+        )));
+    }
+
+    if !allow_glob && contains_glob_meta(value) {
+        return Err(McpSubagentError::SpecValidation(format!(
+            "{kind} memory source path must not contain glob pattern: {value}"
+        )));
+    }
+
+    let path = Path::new(value);
+    if path.is_absolute() {
+        return Err(McpSubagentError::SpecValidation(format!(
+            "{kind} memory source path must be relative: {value}"
+        )));
+    }
+
+    for component in path.components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(McpSubagentError::SpecValidation(format!(
+                    "{kind} memory source path cannot traverse parent directory: {value}"
+                )));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(McpSubagentError::SpecValidation(format!(
+                    "{kind} memory source path must be relative: {value}"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn contains_glob_meta(value: &str) -> bool {
+    value
+        .chars()
+        .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::spec::{
         core::{AgentSpecCore, Provider},
         provider_overrides::{CodexOverrides, ProviderOverrides},
-        runtime_policy::{RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
+        runtime_policy::{MemorySource, RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
         AgentSpec,
     };
 
@@ -142,5 +213,66 @@ mod tests {
             err.to_string().contains("ReadOnly sandbox cannot"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn rejects_absolute_file_memory_source_path() {
+        let mut spec = base_spec();
+        spec.runtime.memory_sources = vec![MemorySource::File("/tmp/PROJECT.md".to_string())];
+
+        let err = validate_agent_spec(&spec).expect_err("absolute memory source must fail");
+        assert!(
+            err.to_string().contains("must be relative"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_parent_dir_glob_memory_source_path() {
+        let mut spec = base_spec();
+        spec.runtime.memory_sources = vec![MemorySource::Glob("../secrets/*.md".to_string())];
+
+        let err = validate_agent_spec(&spec).expect_err("parent traversal must fail");
+        assert!(
+            err.to_string().contains("cannot traverse parent directory"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_glob_pattern_in_file_memory_source_path() {
+        let mut spec = base_spec();
+        spec.runtime.memory_sources = vec![MemorySource::File("docs/*.md".to_string())];
+
+        let err = validate_agent_spec(&spec).expect_err("file path glob must fail");
+        assert!(
+            err.to_string().contains("must not contain glob pattern"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_inline_memory_source() {
+        let mut spec = base_spec();
+        spec.runtime.memory_sources = vec![MemorySource::Inline("   ".to_string())];
+
+        let err = validate_agent_spec(&spec).expect_err("empty inline content must fail");
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_safe_memory_sources() {
+        let mut spec = base_spec();
+        spec.runtime.memory_sources = vec![
+            MemorySource::AutoProjectMemory,
+            MemorySource::File("PROJECT.md".to_string()),
+            MemorySource::Glob("docs/**/*.md".to_string()),
+            MemorySource::Inline("stable project memory".to_string()),
+        ];
+
+        validate_agent_spec(&spec).expect("safe memory source paths should pass");
     }
 }

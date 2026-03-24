@@ -6,6 +6,7 @@ use mcp_subagent::{
     doctor::{build_doctor_report, render_doctor_report},
     mcp::server::McpSubagentServer,
     probe::SystemProviderProber,
+    runtime::context::validate_default_summary_contract_template,
     spec::registry::load_agent_specs_from_dirs,
 };
 
@@ -122,7 +123,12 @@ async fn run_mcp_server(cfg: RuntimeConfig) -> ExitCode {
 fn validate_specs(cfg: RuntimeConfig) -> ExitCode {
     match load_agent_specs_from_dirs(&cfg.agents_dirs) {
         Ok(loaded) => {
+            if let Err(err) = validate_default_summary_contract_template() {
+                eprintln!("validation failed: {err}");
+                return ExitCode::from(1);
+            }
             println!("validated {} agent specs", loaded.len());
+            println!("summary contract template: ok");
             for agent in loaded {
                 println!(
                     "- {} ({}) [{}]",

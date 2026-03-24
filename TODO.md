@@ -192,3 +192,20 @@
   - `mcp::server::run_agent_tempcopy_persists_workspace_metadata`
   - `mcp::server::serialize_lock_blocks_until_guard_released`
 - 已通过 `cargo fmt && cargo test`（41 passed），并验证 `cargo run -- doctor` 与 `cargo run -- validate`。
+
+## T-014 Phase2-ValidateMemoryPathAndSummaryContract (Completed 2026-03-24)
+任务：增强 `validate` 子命令覆盖设计文档要求的 memory/source 路径与 summary contract 模板完整性校验。
+验收标准：
+1. `validate` 能拒绝非法 `memory_sources` 路径（空值、绝对路径、`..` 目录穿越、`File(...)` 误用 glob）。
+2. `validate` 会校验 ContextCompiler 模板仍包含 8 个固定段落与 summary 哨兵。
+3. `load_agent_specs_from_dirs` 路径上的 spec 校验自动包含上述 memory/source 规则。
+4. 新增单测覆盖 memory/source 校验失败与模板校验失败路径。
+5. `cargo test` 全量通过。
+完成记录：
+- 已扩展 `spec::validate`：新增 `memory_sources` 校验逻辑，覆盖 `AutoProjectMemory/File/Glob/Inline` 的路径与内容规则。
+- 已新增 `runtime::context::validate_default_summary_contract_template` 与 `validate_compiled_prompt_template`，确保模板完整性与哨兵约束。
+- `validate` 子命令已接入模板校验；若模板破坏会直接失败返回。
+- 已新增单测：
+  - `spec::validate::*`（absolute/parent traversal/glob misuse/empty inline/valid paths）
+  - `runtime::context::validates_default_summary_contract_template`
+  - `runtime::context::rejects_template_missing_required_sections`

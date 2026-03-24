@@ -1,15 +1,31 @@
 use std::fmt::Write;
 
 use crate::{
-    error::Result,
+    error::{McpSubagentError, Result},
     runtime::summary::{
         parse_structured_summary, StructuredSummary, SUMMARY_END_SENTINEL, SUMMARY_START_SENTINEL,
     },
-    spec::AgentSpec,
+    spec::{
+        core::{AgentSpecCore, Provider},
+        runtime_policy::RuntimePolicy,
+        AgentSpec,
+    },
     types::{
-        CompiledContext, ContextSourceRef, InjectionMode, MemorySnippet, ResolvedMemory, RunRequest,
+        CompiledContext, ContextSourceRef, InjectionMode, MemorySnippet, ResolvedMemory, RunMode,
+        RunRequest,
     },
 };
+
+const REQUIRED_TEMPLATE_SECTIONS: [&str; 8] = [
+    "ROLE",
+    "TASK",
+    "OBJECTIVE",
+    "CONSTRAINTS",
+    "ACCEPTANCE CRITERIA",
+    "SELECTED CONTEXT",
+    "RESPONSE CONTRACT",
+    "OUTPUT SENTINELS",
+];
 
 pub trait ContextCompiler: Send + Sync {
     fn compile(
@@ -142,6 +158,67 @@ impl ContextCompiler for DefaultContextCompiler {
     }
 }
 
+pub fn validate_compiled_prompt_template(injected_prompt: &str) -> Result<()> {
+    for section in REQUIRED_TEMPLATE_SECTIONS {
+        if !injected_prompt.contains(section) {
+            return Err(McpSubagentError::SpecValidation(format!(
+                "summary contract template missing section: {section}"
+            )));
+        }
+    }
+
+    if !injected_prompt.contains(SUMMARY_START_SENTINEL)
+        || !injected_prompt.contains(SUMMARY_END_SENTINEL)
+    {
+        return Err(McpSubagentError::SpecValidation(
+            "summary contract template missing summary sentinels".to_string(),
+        ));
+    }
+
+    if !injected_prompt.contains("StructuredSummary") {
+        return Err(McpSubagentError::SpecValidation(
+            "summary contract template must reference StructuredSummary JSON contract".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn validate_default_summary_contract_template() -> Result<()> {
+    let compiler = DefaultContextCompiler;
+    let sample_spec = AgentSpec {
+        core: AgentSpecCore {
+            name: "contract-validator".to_string(),
+            description: "validate summary contract template".to_string(),
+            provider: Provider::Codex,
+            model: None,
+            instructions: "Emit structured summary JSON in sentinels.".to_string(),
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+            skills: Vec::new(),
+            tags: Vec::new(),
+            metadata: Default::default(),
+        },
+        runtime: RuntimePolicy::default(),
+        provider_overrides: Default::default(),
+    };
+    let sample_request = RunRequest {
+        task: "Validate context compiler output contract".to_string(),
+        task_brief: Some("Validate summary contract".to_string()),
+        parent_summary: None,
+        selected_files: Vec::new(),
+        working_dir: ".".into(),
+        run_mode: RunMode::Sync,
+        acceptance_criteria: vec![
+            "Keep fixed sections in compiled template".to_string(),
+            "Keep sentinel-wrapped StructuredSummary JSON contract".to_string(),
+        ],
+    };
+
+    let compiled = compiler.compile(&sample_spec, &sample_request, ResolvedMemory::default())?;
+    validate_compiled_prompt_template(&compiled.injected_prompt)
+}
+
 fn inject_memory_sources(
     section: &str,
     snippets: &[MemorySnippet],
@@ -184,7 +261,10 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::{
-        runtime::context::{ContextCompiler, DefaultContextCompiler},
+        runtime::context::{
+            validate_compiled_prompt_template, validate_default_summary_contract_template,
+            ContextCompiler, DefaultContextCompiler,
+        },
         spec::{
             core::{AgentSpecCore, Provider},
             runtime_policy::RuntimePolicy,
@@ -256,5 +336,22 @@ mod tests {
             );
         }
         assert_eq!(compiled.source_manifest.len(), 3);
+    }
+
+    #[test]
+    fn validates_default_summary_contract_template() {
+        validate_default_summary_contract_template().expect("default template should be valid");
+    }
+
+    #[test]
+    fn rejects_template_missing_required_sections() {
+        let err = validate_compiled_prompt_template(
+            "ROLE\nonly role and no sentinels or required sections",
+        )
+        .expect_err("missing sections should fail");
+        assert!(
+            err.to_string().contains("missing section"),
+            "unexpected error: {err}"
+        );
     }
 }
