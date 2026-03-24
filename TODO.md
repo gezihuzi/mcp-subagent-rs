@@ -1447,3 +1447,37 @@
   - `cargo test -q`（130 passed + 9 passed + 3 integration passed）
   - `cargo run -- --agents-dir examples/agents validate`
   - `./scripts/smoke_v06.sh`
+
+## T-058 V0.7-ReleaseCutpointAndCI (Completed 2026-03-24)
+
+任务：完成 v0.7 发布切点收口（版本、文档、CI 与 smoke 基线统一）。  
+验收标准：
+
+1. 新增并纳入 `v0.7` 发布 smoke 脚本，覆盖 v0.7 新增能力的最小回归。
+2. CI 默认 smoke 脚本切换到 v0.7 发布脚本。
+3. 版本号与变更日志对齐到 `0.7.0`。
+4. 发布文档新增 `release_v0.7.0` 与对应 smoke 清单。
+5. 回归链路（`cargo test`、`validate`、`smoke`）通过。
+完成记录：
+
+- 已新增 `scripts/smoke_v07_release.sh` 并覆盖以下关键链路：
+  - `doctor` / `doctor --json`
+  - `validate` / `list-agents`
+  - `run` on `Mock`
+  - async gate（`run` fail + `spawn` pass）
+  - review evidence artifact（生成 + `artifact` 读取）
+  - `Codex`/`Ollama` 可选执行
+  - `mcp` stdio 启动检查
+- CI 已切换：
+  - `.github/workflows/ci.yml` 从 `smoke_v06.sh` 改为 `smoke_v07_release.sh`。
+- 发布与文档已对齐：
+  - `Cargo.toml` 版本更新为 `0.7.0`
+  - `CHANGELOG.md` 新增 `0.7.0` 章节
+  - 新增 `docs/mvp_smoke_v07.md`
+  - 新增 `docs/release_v0.7.0.md`
+  - `README.md` 本地 smoke 命令更新为 `./scripts/smoke_v07_release.sh`
+- 已通过：
+  - `cargo fmt`
+  - `cargo test -q`
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v07_release.sh`
