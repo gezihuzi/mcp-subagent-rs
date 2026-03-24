@@ -232,3 +232,35 @@
   - `runtime::memory::glob_memory_source_inlines_all_matches`
   - `runtime::memory::glob_memory_source_requires_at_least_one_match`
 - 已通过 `cargo fmt && cargo test`（52 passed）与 `cargo run -- validate`。
+
+## T-016 Phase3-RunJsonSnapshotsAndRunLogs (Completed 2026-03-24)
+任务：按技术设计补齐 run 状态持久化内容，落地 request/spec/probe 快照与 run 级日志文件。
+验收标准：
+1. `run.json` 增加 request snapshot、spec snapshot、probe result、created_at、status_history。
+2. `run.json` 对旧版本数据保持兼容读取（新增字段缺失时可加载）。
+3. 每个 run 目录固定落盘 `stdout.log`、`stderr.log` 与 `temp/` 目录。
+4. 运行中/取消/失败路径都会维护 `status_history` 终态。
+5. 新增测试覆盖 run metadata 扩展字段与日志文件落盘。
+6. `cargo test` 全量通过。
+完成记录：
+- 已扩展 `RunRecord/PersistedRunRecord`，新增 `created_at/status_history/request_snapshot/spec_snapshot/probe_result`。
+- `prepare_run` 现在返回探测结果，`run_agent/spawn_agent` 在持久化前写入 probe 快照。
+- 已新增快照构建函数（request/spec/probe），并为取消/失败路径补齐状态历史更新。
+- `persist_run_record` 已固定写入 `<run>/stdout.log`、`<run>/stderr.log`，并确保 `<run>/temp/` 存在。
+- 已增强测试 `run_agent_tempcopy_persists_workspace_metadata`，校验新字段和日志文件。
+- 已通过 `cargo fmt && cargo test`（52 passed）与 `cargo run -- validate`。
+
+## T-017 Phase3-ArtifactPolicyWorkspaceMaterialization (Completed 2026-03-24)
+任务：补齐 artifact policy，使 `summary.artifacts` 中声明的文本产物可被读取与持久化，而不是只在索引中展示。
+验收标准：
+1. `build_runtime_artifacts` 能从 workspace 解析并读取 `summary.artifacts` 声明的文本文件内容。
+2. 仅允许 workspace 内部路径，拒绝目录穿越或越界路径。
+3. `run_agent/spawn_agent` 成功路径都接入 artifact materialization。
+4. 新增测试覆盖“声明 artifact 被落盘并可读”路径。
+5. `cargo test` 全量通过。
+完成记录：
+- 已扩展 `build_runtime_artifacts(summary, stdout, stderr, workspace_root)`，支持从 workspace 采集 `summary.artifacts` 文本内容并写入 artifact payload。
+- 已新增 `resolve_artifact_path_in_workspace`，通过 canonical path 限制 artifact 只读 workspace 内文件。
+- `run_agent` 与 `spawn_agent` 成功路径已传入实际 workspace 根路径。
+- 已新增测试 `declared_workspace_artifacts_are_persisted_in_index_and_payloads`。
+- 已通过 `cargo fmt && cargo test`（53 passed）与 `cargo run -- validate`。

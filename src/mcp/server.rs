@@ -35,9 +35,12 @@ use crate::{
     },
     spec::{
         registry::{load_agent_specs_from_dirs, LoadedAgentSpec},
-        runtime_policy::{FileConflictPolicy, SandboxPolicy},
+        runtime_policy::{
+            ApprovalPolicy, ContextMode, FileConflictPolicy, MemorySource, SandboxPolicy,
+            WorkingDirPolicy,
+        },
         validate::validate_agent_spec,
-        Provider,
+        AgentSpec, Provider,
     },
     types::{ResolvedMemory, RunMode, RunRequest, SelectedFile},
 };
@@ -52,25 +55,46 @@ struct RuntimeState {
 #[derive(Debug, Clone)]
 struct RunRecord {
     status: RunStatus,
+    created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
+    status_history: Vec<RunStatus>,
     summary: Option<StructuredSummary>,
     artifact_index: Vec<ArtifactOutput>,
     artifacts: HashMap<String, String>,
     error_message: Option<String>,
     task: String,
+    request_snapshot: Option<RunRequestSnapshot>,
+    spec_snapshot: Option<RunSpecSnapshot>,
+    probe_result: Option<ProbeResultRecord>,
     workspace: Option<WorkspaceRecord>,
 }
 
 impl RunRecord {
-    fn running(task: String) -> Self {
+    fn running(
+        task: String,
+        request_snapshot: Option<RunRequestSnapshot>,
+        spec_snapshot: Option<RunSpecSnapshot>,
+        probe_result: Option<ProbeResultRecord>,
+    ) -> Self {
+        let now = OffsetDateTime::now_utc();
         Self {
             status: RunStatus::Running,
-            updated_at: OffsetDateTime::now_utc(),
+            created_at: now,
+            updated_at: now,
+            status_history: vec![
+                RunStatus::Received,
+                RunStatus::Validating,
+                RunStatus::ProbingProvider,
+                RunStatus::Running,
+            ],
             summary: None,
             artifact_index: Vec::new(),
             artifacts: HashMap::new(),
             error_message: None,
             task,
+            request_snapshot,
+            spec_snapshot,
+            probe_result,
             workspace: None,
         }
     }
@@ -90,13 +114,72 @@ struct WorkspaceRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SelectedFileSnapshot {
+    path: PathBuf,
+    #[serde(default)]
+    rationale: Option<String>,
+    has_inlined_content: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunRequestSnapshot {
+    task: String,
+    #[serde(default)]
+    task_brief: Option<String>,
+    parent_summary_present: bool,
+    selected_files: Vec<SelectedFileSnapshot>,
+    working_dir: PathBuf,
+    run_mode: RunMode,
+    acceptance_criteria: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunSpecSnapshot {
+    name: String,
+    provider: String,
+    #[serde(default)]
+    model: Option<String>,
+    context_mode: String,
+    working_dir_policy: String,
+    file_conflict_policy: String,
+    sandbox: String,
+    approval: String,
+    timeout_secs: u64,
+    memory_sources: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProbeResultRecord {
+    provider: String,
+    executable: PathBuf,
+    #[serde(default)]
+    version: Option<String>,
+    status: String,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PersistedRunRecord {
     status: RunStatus,
+    #[serde(default)]
+    created_at: Option<OffsetDateTime>,
     updated_at: OffsetDateTime,
+    #[serde(default)]
+    status_history: Vec<RunStatus>,
     summary: Option<StructuredSummary>,
     artifact_index: Vec<ArtifactOutput>,
     error_message: Option<String>,
     task: String,
+    #[serde(default)]
+    request_snapshot: Option<RunRequestSnapshot>,
+    #[serde(default)]
+    spec_snapshot: Option<RunSpecSnapshot>,
+    #[serde(default)]
+    probe_result: Option<ProbeResultRecord>,
     #[serde(default)]
     workspace: Option<WorkspaceRecord>,
 }
@@ -105,11 +188,16 @@ impl From<&RunRecord> for PersistedRunRecord {
     fn from(value: &RunRecord) -> Self {
         Self {
             status: value.status.clone(),
+            created_at: Some(value.created_at),
             updated_at: value.updated_at,
+            status_history: value.status_history.clone(),
             summary: value.summary.clone(),
             artifact_index: value.artifact_index.clone(),
             error_message: value.error_message.clone(),
             task: value.task.clone(),
+            request_snapshot: value.request_snapshot.clone(),
+            spec_snapshot: value.spec_snapshot.clone(),
+            probe_result: value.probe_result.clone(),
             workspace: value.workspace.clone(),
         }
     }
@@ -179,7 +267,7 @@ impl McpSubagentServer {
     fn prepare_run(
         &self,
         input: RunAgentInput,
-    ) -> std::result::Result<(LoadedAgentSpec, RunRequest), ErrorData> {
+    ) -> std::result::Result<(LoadedAgentSpec, RunRequest, ProviderProbe), ErrorData> {
         let specs = self.load_specs()?;
         let loaded = specs
             .into_iter()
@@ -190,7 +278,7 @@ impl McpSubagentServer {
                     None,
                 )
             })?;
-        self.ensure_provider_ready(&loaded.spec.core.provider)?;
+        let probe_result = self.ensure_provider_ready(&loaded.spec.core.provider)?;
 
         let request = RunRequest {
             task: input.task,
@@ -216,17 +304,20 @@ impl McpSubagentServer {
             ],
         };
 
-        Ok((loaded, request))
+        Ok((loaded, request, probe_result))
     }
 
     fn probe_provider(&self, provider: &Provider) -> ProviderProbe {
         self.provider_prober.probe(provider)
     }
 
-    fn ensure_provider_ready(&self, provider: &Provider) -> std::result::Result<(), ErrorData> {
+    fn ensure_provider_ready(
+        &self,
+        provider: &Provider,
+    ) -> std::result::Result<ProviderProbe, ErrorData> {
         let probe = self.probe_provider(provider);
         if probe.is_available() {
-            return Ok(());
+            return Ok(probe);
         }
 
         let mut details = Vec::new();
@@ -470,7 +561,11 @@ impl McpSubagentServer {
         &self,
         Parameters(input): Parameters<RunAgentInput>,
     ) -> std::result::Result<Json<RunAgentOutput>, ErrorData> {
-        let (loaded, request) = self.prepare_run(input)?;
+        let (loaded, request, probe_result) = self.prepare_run(input)?;
+        let request_snapshot = build_run_request_snapshot(&request);
+        let spec_snapshot = build_run_spec_snapshot(&loaded.spec);
+        let probe_snapshot = build_probe_result_snapshot(&probe_result);
+        let run_created_at = OffsetDateTime::now_utc();
         let handle_id = Uuid::now_v7().to_string();
         let lock_key = self.conflict_lock_key(&loaded.spec, &request)?;
         let _serialize_guard = self.acquire_serialize_lock(lock_key.clone()).await;
@@ -484,8 +579,12 @@ impl McpSubagentServer {
         .await?;
         let result = dispatch.result;
 
-        let (artifact_index, artifacts) =
-            build_runtime_artifacts(&result.summary, &result.stdout, &result.stderr);
+        let (artifact_index, artifacts) = build_runtime_artifacts(
+            &result.summary,
+            &result.stdout,
+            &result.stderr,
+            Some(&dispatch.workspace.workspace_path),
+        );
         let output = RunAgentOutput {
             handle_id: handle_id.clone(),
             status: format!("{:?}", result.metadata.status),
@@ -495,12 +594,17 @@ impl McpSubagentServer {
 
         let record = RunRecord {
             status: result.metadata.status,
+            created_at: run_created_at,
             updated_at: OffsetDateTime::now_utc(),
+            status_history: result.metadata.status_history,
             summary: Some(result.summary),
             artifact_index,
             artifacts,
             error_message: result.metadata.error_message,
             task: request.task,
+            request_snapshot: Some(request_snapshot),
+            spec_snapshot: Some(spec_snapshot),
+            probe_result: Some(probe_snapshot),
             workspace: Some(dispatch.workspace),
         };
         self.upsert_and_persist_run(&handle_id, record).await?;
@@ -513,9 +617,14 @@ impl McpSubagentServer {
         &self,
         Parameters(input): Parameters<RunAgentInput>,
     ) -> std::result::Result<Json<SpawnAgentOutput>, ErrorData> {
-        let (loaded, request) = self.prepare_run(input)?;
+        let (loaded, request, probe_result) = self.prepare_run(input)?;
         let handle_id = Uuid::now_v7().to_string();
-        let running_record = RunRecord::running(request.task.clone());
+        let running_record = RunRecord::running(
+            request.task.clone(),
+            Some(build_run_request_snapshot(&request)),
+            Some(build_run_spec_snapshot(&loaded.spec)),
+            Some(build_probe_result_snapshot(&probe_result)),
+        );
         let lock_key = self.conflict_lock_key(&loaded.spec, &request)?;
 
         self.upsert_and_persist_run(&handle_id, running_record)
@@ -554,9 +663,11 @@ impl McpSubagentServer {
                         &dispatch_result.summary,
                         &dispatch_result.stdout,
                         &dispatch_result.stderr,
+                        Some(&result.workspace.workspace_path),
                     );
                     record.status = dispatch_result.metadata.status;
                     record.updated_at = OffsetDateTime::now_utc();
+                    record.status_history = dispatch_result.metadata.status_history;
                     record.error_message = dispatch_result.metadata.error_message;
                     record.summary = Some(dispatch_result.summary);
                     record.artifact_index = artifact_index;
@@ -565,9 +676,11 @@ impl McpSubagentServer {
                 }
                 Err(err) => {
                     let summary = failed_summary(err.message.clone().into_owned());
-                    let (artifact_index, artifacts) = build_runtime_artifacts(&summary, "", "");
+                    let (artifact_index, artifacts) =
+                        build_runtime_artifacts(&summary, "", "", None);
                     record.status = RunStatus::Failed;
                     record.updated_at = OffsetDateTime::now_utc();
+                    append_status_if_terminal(&mut record.status_history, RunStatus::Failed);
                     record.error_message = Some(err.to_string());
                     record.summary = Some(summary);
                     record.artifact_index = artifact_index;
@@ -645,10 +758,11 @@ impl McpSubagentServer {
         if let Some(record) = state.runs.get_mut(&input.handle_id) {
             record.status = RunStatus::Cancelled;
             record.updated_at = OffsetDateTime::now_utc();
+            append_status_if_terminal(&mut record.status_history, RunStatus::Cancelled);
             record.error_message = Some("cancelled by user request".to_string());
             if record.summary.is_none() {
                 let summary = cancelled_summary(record.task.clone());
-                let (artifact_index, artifacts) = build_runtime_artifacts(&summary, "", "");
+                let (artifact_index, artifacts) = build_runtime_artifacts(&summary, "", "", None);
                 record.summary = Some(summary);
                 record.artifact_index = artifact_index;
                 record.artifacts = artifacts;
@@ -751,12 +865,22 @@ fn persist_run_record(
     record: &RunRecord,
 ) -> std::result::Result<(), ErrorData> {
     let run_dir = run_dir(state_dir, handle_id);
+    let temp_dir = run_dir.join("temp");
     let artifacts_dir = run_artifacts_dir(state_dir, handle_id);
     fs::create_dir_all(&artifacts_dir).map_err(|err| {
         ErrorData::internal_error(
             format!(
                 "failed to create run directory {}: {err}",
                 run_dir.display()
+            ),
+            None,
+        )
+    })?;
+    fs::create_dir_all(&temp_dir).map_err(|err| {
+        ErrorData::internal_error(
+            format!(
+                "failed to create run temp directory {}: {err}",
+                temp_dir.display()
             ),
             None,
         )
@@ -794,6 +918,19 @@ fn persist_run_record(
             )
         })?;
     }
+
+    let stdout_log_content = record
+        .artifacts
+        .get("stdout.txt")
+        .map(String::as_str)
+        .unwrap_or("");
+    let stderr_log_content = record
+        .artifacts
+        .get("stderr.txt")
+        .map(String::as_str)
+        .unwrap_or("");
+    write_run_log_file(&run_dir.join("stdout.log"), stdout_log_content)?;
+    write_run_log_file(&run_dir.join("stderr.log"), stderr_log_content)?;
 
     Ok(())
 }
@@ -841,16 +978,38 @@ fn load_run_record_from_disk(
         artifacts.insert(artifact.path.clone(), content);
     }
 
+    let status = persisted.status.clone();
+    let updated_at = persisted.updated_at;
+    let status_history = if persisted.status_history.is_empty() {
+        vec![status.clone()]
+    } else {
+        persisted.status_history
+    };
+
     Ok(Some(RunRecord {
-        status: persisted.status,
-        updated_at: persisted.updated_at,
+        status,
+        created_at: persisted.created_at.unwrap_or(updated_at),
+        updated_at,
+        status_history,
         summary: persisted.summary,
         artifact_index: persisted.artifact_index,
         artifacts,
         error_message: persisted.error_message,
         task: persisted.task,
+        request_snapshot: persisted.request_snapshot,
+        spec_snapshot: persisted.spec_snapshot,
+        probe_result: persisted.probe_result,
         workspace: persisted.workspace,
     }))
+}
+
+fn write_run_log_file(path: &Path, content: &str) -> std::result::Result<(), ErrorData> {
+    fs::write(path, content).map_err(|err| {
+        ErrorData::internal_error(
+            format!("failed to write run log {}: {err}", path.display()),
+            None,
+        )
+    })
 }
 
 fn read_artifact_from_disk(
@@ -889,6 +1048,114 @@ fn build_capability_notes(probe: &ProviderProbe) -> Vec<String> {
     }
     notes.extend(probe.notes.clone());
     notes
+}
+
+fn build_run_request_snapshot(request: &RunRequest) -> RunRequestSnapshot {
+    RunRequestSnapshot {
+        task: request.task.clone(),
+        task_brief: request.task_brief.clone(),
+        parent_summary_present: request.parent_summary.is_some(),
+        selected_files: request
+            .selected_files
+            .iter()
+            .map(|selected| SelectedFileSnapshot {
+                path: selected.path.clone(),
+                rationale: selected.rationale.clone(),
+                has_inlined_content: selected.content.is_some(),
+            })
+            .collect(),
+        working_dir: request.working_dir.clone(),
+        run_mode: request.run_mode.clone(),
+        acceptance_criteria: request.acceptance_criteria.clone(),
+    }
+}
+
+fn build_run_spec_snapshot(spec: &AgentSpec) -> RunSpecSnapshot {
+    RunSpecSnapshot {
+        name: spec.core.name.clone(),
+        provider: spec.core.provider.as_str().to_string(),
+        model: spec.core.model.clone(),
+        context_mode: context_mode_to_str(&spec.runtime.context_mode),
+        working_dir_policy: working_dir_policy_to_str(&spec.runtime.working_dir_policy),
+        file_conflict_policy: file_conflict_policy_to_str(&spec.runtime.file_conflict_policy),
+        sandbox: sandbox_policy_to_str(&spec.runtime.sandbox),
+        approval: approval_policy_to_str(&spec.runtime.approval),
+        timeout_secs: spec.runtime.timeout_secs,
+        memory_sources: spec
+            .runtime
+            .memory_sources
+            .iter()
+            .map(memory_source_to_str)
+            .collect(),
+    }
+}
+
+fn build_probe_result_snapshot(probe: &ProviderProbe) -> ProbeResultRecord {
+    ProbeResultRecord {
+        provider: probe.provider.as_str().to_string(),
+        executable: probe.executable.clone(),
+        version: probe.version.clone(),
+        status: probe.status.to_string(),
+        notes: probe.notes.clone(),
+    }
+}
+
+fn append_status_if_terminal(status_history: &mut Vec<RunStatus>, status: RunStatus) {
+    if status_history.last().is_some_and(|last| *last == status) {
+        return;
+    }
+    status_history.push(status);
+}
+
+fn context_mode_to_str(mode: &ContextMode) -> String {
+    match mode {
+        ContextMode::Isolated => "Isolated".to_string(),
+        ContextMode::SummaryOnly => "SummaryOnly".to_string(),
+        ContextMode::SelectedFiles(paths) => format!("SelectedFiles({})", paths.join(",")),
+        ContextMode::ExpandedBrief => "ExpandedBrief".to_string(),
+    }
+}
+
+fn working_dir_policy_to_str(policy: &WorkingDirPolicy) -> String {
+    match policy {
+        WorkingDirPolicy::InPlace => "InPlace".to_string(),
+        WorkingDirPolicy::TempCopy => "TempCopy".to_string(),
+        WorkingDirPolicy::GitWorktree => "GitWorktree".to_string(),
+    }
+}
+
+fn file_conflict_policy_to_str(policy: &FileConflictPolicy) -> String {
+    match policy {
+        FileConflictPolicy::Deny => "Deny".to_string(),
+        FileConflictPolicy::Serialize => "Serialize".to_string(),
+        FileConflictPolicy::AllowWithMergeReview => "AllowWithMergeReview".to_string(),
+    }
+}
+
+fn sandbox_policy_to_str(policy: &SandboxPolicy) -> String {
+    match policy {
+        SandboxPolicy::ReadOnly => "ReadOnly".to_string(),
+        SandboxPolicy::WorkspaceWrite => "WorkspaceWrite".to_string(),
+        SandboxPolicy::FullAccess => "FullAccess".to_string(),
+    }
+}
+
+fn approval_policy_to_str(policy: &ApprovalPolicy) -> String {
+    match policy {
+        ApprovalPolicy::ProviderDefault => "ProviderDefault".to_string(),
+        ApprovalPolicy::Ask => "Ask".to_string(),
+        ApprovalPolicy::AutoAcceptEdits => "AutoAcceptEdits".to_string(),
+        ApprovalPolicy::DenyByDefault => "DenyByDefault".to_string(),
+    }
+}
+
+fn memory_source_to_str(source: &MemorySource) -> String {
+    match source {
+        MemorySource::AutoProjectMemory => "AutoProjectMemory".to_string(),
+        MemorySource::File(path) => format!("File({path})"),
+        MemorySource::Glob(pattern) => format!("Glob({pattern})"),
+        MemorySource::Inline(_) => "Inline(<content>)".to_string(),
+    }
 }
 
 fn map_summary_output(summary: &StructuredSummary) -> SummaryOutput {
@@ -1176,13 +1443,21 @@ fn build_runtime_artifacts(
     summary: &StructuredSummary,
     stdout: &str,
     stderr: &str,
+    workspace_root: Option<&Path>,
 ) -> (Vec<ArtifactOutput>, HashMap<String, String>) {
-    let mut index = summary
-        .artifacts
-        .iter()
-        .map(map_artifact_output)
-        .collect::<Vec<_>>();
+    let mut index = Vec::new();
     let mut payloads = HashMap::new();
+
+    if let Some(root) = workspace_root {
+        for artifact in &summary.artifacts {
+            let Some(content) = read_declared_artifact_content(root, &artifact.path) else {
+                continue;
+            };
+            let artifact_path = artifact.path.display().to_string();
+            index.push(map_artifact_output(artifact));
+            payloads.insert(artifact_path, content);
+        }
+    }
 
     if let Ok(summary_json) = serde_json::to_string_pretty(summary) {
         index.push(ArtifactOutput {
@@ -1215,6 +1490,35 @@ fn build_runtime_artifacts(
     }
 
     (index, payloads)
+}
+
+fn read_declared_artifact_content(workspace_root: &Path, artifact_path: &Path) -> Option<String> {
+    let resolved = resolve_artifact_path_in_workspace(workspace_root, artifact_path)?;
+    if !resolved.is_file() {
+        return None;
+    }
+    fs::read_to_string(&resolved).ok()
+}
+
+fn resolve_artifact_path_in_workspace(
+    workspace_root: &Path,
+    artifact_path: &Path,
+) -> Option<PathBuf> {
+    if artifact_path.as_os_str().is_empty() {
+        return None;
+    }
+
+    let combined = if artifact_path.is_absolute() {
+        artifact_path.to_path_buf()
+    } else {
+        workspace_root.join(artifact_path)
+    };
+    let canonical = combined.canonicalize().ok()?;
+    let canonical_workspace = workspace_root.canonicalize().ok()?;
+    if !canonical.starts_with(&canonical_workspace) {
+        return None;
+    }
+    Some(canonical)
 }
 
 fn failed_summary(message: String) -> StructuredSummary {
@@ -1252,7 +1556,7 @@ mod tests {
     use std::{
         collections::HashMap,
         fs,
-        path::Path,
+        path::{Path, PathBuf},
         sync::Arc,
         time::{Duration, Instant},
     };
@@ -1267,12 +1571,13 @@ mod tests {
 
     use crate::{
         probe::{ProbeStatus, ProviderCapabilities, ProviderProbe, ProviderProber},
+        runtime::summary::{ArtifactKind, ArtifactRef, StructuredSummary, VerificationStatus},
         spec::Provider,
     };
 
     use super::{
-        acquire_serialize_lock_from_state, HandleInput, McpSubagentServer, ReadAgentArtifactInput,
-        RunAgentInput, RunAgentSelectedFileInput, RuntimeState,
+        acquire_serialize_lock_from_state, build_runtime_artifacts, HandleInput, McpSubagentServer,
+        ReadAgentArtifactInput, RunAgentInput, RunAgentSelectedFileInput, RuntimeState,
     };
 
     fn write_agent_spec(dir: &Path) {
@@ -1524,6 +1829,35 @@ sandbox = "ReadOnly"
             .unwrap_or_else(|| panic!("missing field `{key}` in {value}"))
     }
 
+    #[test]
+    fn declared_workspace_artifacts_are_persisted_in_index_and_payloads() {
+        let temp = tempdir().expect("tempdir");
+        fs::write(temp.path().join("report.md"), "# report").expect("write report");
+
+        let summary = StructuredSummary {
+            summary: "done".to_string(),
+            key_findings: vec!["one".to_string()],
+            artifacts: vec![ArtifactRef {
+                path: PathBuf::from("report.md"),
+                kind: ArtifactKind::ReportMarkdown,
+                description: "markdown report".to_string(),
+                media_type: Some("text/markdown".to_string()),
+            }],
+            open_questions: Vec::new(),
+            next_steps: Vec::new(),
+            exit_code: 0,
+            verification_status: VerificationStatus::Passed,
+            touched_files: Vec::new(),
+        };
+
+        let (index, payloads) = build_runtime_artifacts(&summary, "", "", Some(temp.path()));
+        assert!(index.iter().any(|item| item.path == "report.md"));
+        assert_eq!(
+            payloads.get("report.md").expect("report payload"),
+            "# report"
+        );
+    }
+
     #[tokio::test]
     async fn mcp_transport_roundtrip_for_all_tools() {
         let temp = tempdir().expect("temp");
@@ -1771,6 +2105,17 @@ sandbox = "WorkspaceWrite"
             fs::read_to_string(state_dir.join("runs").join(&out.handle_id).join("run.json"))
                 .expect("read run json");
         let run_obj: serde_json::Value = serde_json::from_str(&run_json).expect("parse run json");
+        assert!(!run_obj["created_at"].is_null());
+        assert!(!run_obj["updated_at"].is_null());
+        assert!(run_obj["status_history"].is_array());
+        assert_eq!(run_obj["request_snapshot"]["task"], "copy workspace");
+        assert_eq!(
+            run_obj["request_snapshot"]["working_dir"],
+            project_dir.display().to_string()
+        );
+        assert_eq!(run_obj["spec_snapshot"]["name"], "writer");
+        assert_eq!(run_obj["spec_snapshot"]["working_dir_policy"], "TempCopy");
+        assert_eq!(run_obj["probe_result"]["provider"], "Ollama");
         assert_eq!(run_obj["workspace"]["mode"], "TempCopy");
         let workspace_path = run_obj["workspace"]["workspace_path"]
             .as_str()
@@ -1780,6 +2125,10 @@ sandbox = "WorkspaceWrite"
             .as_str()
             .expect("lock key")
             .contains("project"));
+        let run_dir = state_dir.join("runs").join(&out.handle_id);
+        assert!(run_dir.join("stdout.log").exists());
+        assert!(run_dir.join("stderr.log").exists());
+        assert!(run_dir.join("temp").exists());
     }
 
     #[tokio::test]
