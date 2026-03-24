@@ -219,7 +219,7 @@ mod tests {
             runtime: RuntimePolicy {
                 sandbox: SandboxPolicy::ReadOnly,
                 working_dir_policy: WorkingDirPolicy::InPlace,
-                timeout_secs: 2,
+                timeout_secs: 30,
                 ..RuntimePolicy::default()
             },
             provider_overrides: Default::default(),

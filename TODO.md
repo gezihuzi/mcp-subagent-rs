@@ -142,3 +142,33 @@
 - `doctor` 使用现有 `ProviderProber` 能力，按 Claude/Codex/Gemini/Ollama 顺序输出状态、版本、可执行文件与 notes。
 - 已新增单测 `doctor::tests::builds_report_and_renders_key_fields` 覆盖报告构建与渲染关键字段。
 - 已通过 `cargo fmt && cargo test`（29 passed），并验证 `cargo run -- doctor` 与 `cargo run -- validate`。
+
+## T-011 Phase2-UnifiedConfigAndClapCLI (Completed 2026-03-24)
+任务：将 `agents_dir/state_dir` 提升为统一配置来源，并迁移 CLI 参数解析到 `clap`。
+验收标准：
+1. 新增统一配置解析层，支持默认值、配置文件、环境变量、CLI 参数覆盖。
+2. `mcp/doctor/validate` 三个命令都复用同一份解析后的 runtime config。
+3. CLI 从手动 `env::args` 迁移为 `clap` 子命令模式，参数定义可扩展。
+4. 新增配置合并逻辑单测，覆盖优先级（CLI > ENV > File > Default）。
+5. `cargo test` 全量通过。
+完成记录：
+- 已新增 `config` 模块，统一解析 `agents_dirs/state_dir`，支持默认值、`config.toml`、`MCP_SUBAGENT_*` 环境变量和 CLI 覆盖。
+- 已将 `src/main.rs` 迁移到 `clap`：`mcp-subagent mcp|doctor|validate` 子命令模式，并复用统一 config 解析。
+- `run_mcp_server/doctor/validate` 已全部改为接收统一 `RuntimeConfig`。
+- 已新增配置优先级单测 `config::tests::merge_*`。
+- 已通过 `cargo fmt && cargo test`（36 passed），并验证 `cargo run -- doctor` 与 `cargo run -- validate`。
+
+## T-012 Phase2-ProbeStatusRefinement (Completed 2026-03-24)
+任务：增强 provider probe 状态分类，区分权限受限失败与通用探测失败。
+验收标准：
+1. `ProbeStatus` 新增权限受限状态，避免将权限问题混为 `ProbeFailed`。
+2. probe 推断逻辑能区分 `PermissionDenied/NeedsAuthentication/ExperimentalUnavailable/UnsupportedVersion`。
+3. 对“命令成功但含非致命告警”场景做保守处理，避免误判不可用。
+4. 新增状态推断单测覆盖关键分类路径。
+5. `cargo test` 全量通过。
+完成记录：
+- 已为 `ProbeStatus` 新增 `PermissionDenied`，并更新系统 probe 错误映射逻辑。
+- 已实现文本规则推断函数，细分权限、认证、实验特性、版本不支持等失败原因。
+- 已补充“成功 + 非致命权限告警”回退规则：若检测到有效版本行则保持 `Ready` 并追加说明 note。
+- 已新增 `probe::tests::*` 单测覆盖权限/认证/实验特性/成功版本行等路径。
+- 已通过 `cargo fmt && cargo test`（36 passed），并验证 `doctor` 输出状态分类符合预期。

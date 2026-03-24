@@ -1,32 +1,115 @@
-use std::{env, path::PathBuf, process::ExitCode};
+use std::{path::PathBuf, process::ExitCode};
 
+use clap::{Parser, Subcommand};
 use mcp_subagent::{
+    config::{resolve_runtime_config, ConfigOverrides, RuntimeConfig},
     doctor::{build_doctor_report, render_doctor_report},
     mcp::server::McpSubagentServer,
     probe::SystemProviderProber,
     spec::registry::load_agent_specs_from_dirs,
 };
 
+#[derive(Debug, Parser)]
+#[command(name = "mcp-subagent", version, about = "MCP subagent runtime")]
+struct Cli {
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+    #[arg(long = "agents-dir", global = true)]
+    agents_dirs: Vec<PathBuf>,
+    #[arg(long, global = true)]
+    state_dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    Mcp {
+        #[arg(value_name = "AGENTS_DIR")]
+        agents_dir: Option<PathBuf>,
+    },
+    Doctor {
+        #[arg(value_name = "AGENTS_DIR")]
+        agents_dir: Option<PathBuf>,
+    },
+    Validate {
+        #[arg(value_name = "AGENTS_DIR")]
+        agents_dir: Option<PathBuf>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
-    let args: Vec<String> = env::args().collect();
-    match args.get(1).map(String::as_str) {
-        Some("--mcp") => run_mcp_server(args.get(2).map(PathBuf::from)).await,
-        Some("doctor") => doctor(args.get(2).map(PathBuf::from)),
-        Some("validate") => validate_specs(args.get(2).map(PathBuf::from)),
-        _ => {
-            eprintln!("Usage:");
-            eprintln!("  mcp-subagent --mcp [agents_dir]");
-            eprintln!("  mcp-subagent doctor [agents_dir]");
-            eprintln!("  mcp-subagent validate [agents_dir]");
-            ExitCode::from(2)
+    let cli = Cli::parse();
+    let config_path = cli.config.clone();
+    let global_agents_dirs = cli.agents_dirs.clone();
+    let state_dir = cli.state_dir.clone();
+
+    match cli.command {
+        Commands::Mcp { agents_dir } => {
+            let cfg = match resolve_cli_config(
+                config_path.clone(),
+                state_dir.clone(),
+                global_agents_dirs.clone(),
+                agents_dir,
+            ) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    eprintln!("failed to resolve config: {err}");
+                    return ExitCode::from(2);
+                }
+            };
+            run_mcp_server(cfg).await
+        }
+        Commands::Doctor { agents_dir } => {
+            let cfg = match resolve_cli_config(
+                config_path.clone(),
+                state_dir.clone(),
+                global_agents_dirs.clone(),
+                agents_dir,
+            ) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    eprintln!("failed to resolve config: {err}");
+                    return ExitCode::from(2);
+                }
+            };
+            doctor(cfg)
+        }
+        Commands::Validate { agents_dir } => {
+            let cfg =
+                match resolve_cli_config(config_path, state_dir, global_agents_dirs, agents_dir) {
+                    Ok(cfg) => cfg,
+                    Err(err) => {
+                        eprintln!("failed to resolve config: {err}");
+                        return ExitCode::from(2);
+                    }
+                };
+            validate_specs(cfg)
         }
     }
 }
 
-async fn run_mcp_server(dir: Option<PathBuf>) -> ExitCode {
-    let dirs = vec![dir.unwrap_or_else(|| PathBuf::from("./agents"))];
-    let server = McpSubagentServer::new(dirs);
+fn resolve_cli_config(
+    config_path: Option<PathBuf>,
+    state_dir: Option<PathBuf>,
+    mut agents_dirs: Vec<PathBuf>,
+    command_agents_dir: Option<PathBuf>,
+) -> mcp_subagent::error::Result<RuntimeConfig> {
+    if let Some(dir) = command_agents_dir {
+        agents_dirs = vec![dir];
+    }
+
+    resolve_runtime_config(ConfigOverrides {
+        config_path,
+        agents_dirs,
+        state_dir,
+    })
+}
+
+async fn run_mcp_server(cfg: RuntimeConfig) -> ExitCode {
+    let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
     match server.serve_stdio().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -36,9 +119,8 @@ async fn run_mcp_server(dir: Option<PathBuf>) -> ExitCode {
     }
 }
 
-fn validate_specs(dir: Option<PathBuf>) -> ExitCode {
-    let dirs = vec![dir.unwrap_or_else(|| PathBuf::from("./agents"))];
-    match load_agent_specs_from_dirs(&dirs) {
+fn validate_specs(cfg: RuntimeConfig) -> ExitCode {
+    match load_agent_specs_from_dirs(&cfg.agents_dirs) {
         Ok(loaded) => {
             println!("validated {} agent specs", loaded.len());
             for agent in loaded {
@@ -58,10 +140,8 @@ fn validate_specs(dir: Option<PathBuf>) -> ExitCode {
     }
 }
 
-fn doctor(dir: Option<PathBuf>) -> ExitCode {
-    let agents_dirs = vec![dir.unwrap_or_else(|| PathBuf::from("./agents"))];
-    let state_dir = PathBuf::from(".mcp-subagent/state");
-    let report = build_doctor_report(agents_dirs, state_dir, &SystemProviderProber);
+fn doctor(cfg: RuntimeConfig) -> ExitCode {
+    let report = build_doctor_report(cfg.agents_dirs, cfg.state_dir, &SystemProviderProber);
     println!("{}", render_doctor_report(&report));
     ExitCode::SUCCESS
 }

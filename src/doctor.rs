@@ -103,7 +103,7 @@ mod tests {
 
     use super::{build_doctor_report, render_doctor_report};
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Default)]
     struct FakeProber {
         map: HashMap<crate::spec::Provider, ProviderProbe>,
     }
@@ -112,14 +112,6 @@ mod tests {
         fn with_probe(mut self, probe: ProviderProbe) -> Self {
             self.map.insert(probe.provider.clone(), probe);
             self
-        }
-    }
-
-    impl Default for FakeProber {
-        fn default() -> Self {
-            Self {
-                map: HashMap::new(),
-            }
         }
     }
 

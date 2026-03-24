@@ -13,6 +13,7 @@ use crate::spec::Provider;
 pub enum ProbeStatus {
     Ready,
     MissingBinary,
+    PermissionDenied,
     UnsupportedVersion,
     NeedsAuthentication,
     ExperimentalUnavailable,
@@ -30,6 +31,7 @@ impl std::fmt::Display for ProbeStatus {
         match self {
             Self::Ready => write!(f, "Ready"),
             Self::MissingBinary => write!(f, "MissingBinary"),
+            Self::PermissionDenied => write!(f, "PermissionDenied"),
             Self::UnsupportedVersion => write!(f, "UnsupportedVersion"),
             Self::NeedsAuthentication => write!(f, "NeedsAuthentication"),
             Self::ExperimentalUnavailable => write!(f, "ExperimentalUnavailable"),
@@ -118,7 +120,29 @@ impl ProviderProber for SystemProviderProber {
         match output {
             Ok(output) => {
                 let version = extract_version_line(&output);
-                if output.status.success() {
+                let mut combined = String::new();
+                combined.push_str(&String::from_utf8_lossy(&output.stdout));
+                combined.push('\n');
+                combined.push_str(&String::from_utf8_lossy(&output.stderr));
+                let mut inferred = infer_probe_status(
+                    &combined,
+                    capabilities.experimental,
+                    output.status.success(),
+                );
+                if output.status.success()
+                    && matches!(inferred, ProbeStatus::PermissionDenied)
+                    && version
+                        .as_deref()
+                        .map(is_likely_version_line)
+                        .unwrap_or(false)
+                {
+                    inferred = ProbeStatus::Ready;
+                    notes.push(
+                        "probe emitted non-fatal permission warning; treated as ready".to_string(),
+                    );
+                }
+
+                if output.status.success() && matches!(inferred, ProbeStatus::Ready) {
                     ProviderProbe {
                         provider: provider.clone(),
                         executable,
@@ -128,14 +152,7 @@ impl ProviderProber for SystemProviderProber {
                         notes,
                     }
                 } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
-                    let status = if stderr.contains("auth") || stderr.contains("login") {
-                        ProbeStatus::NeedsAuthentication
-                    } else if capabilities.experimental && stderr.contains("experimental") {
-                        ProbeStatus::ExperimentalUnavailable
-                    } else {
-                        ProbeStatus::ProbeFailed
-                    };
+                    let status = inferred;
                     if let Some(line) = extract_first_error_line(&output) {
                         notes.push(line);
                     }
@@ -159,6 +176,20 @@ impl ProviderProber for SystemProviderProber {
                     executable,
                     version: None,
                     status: ProbeStatus::MissingBinary,
+                    capabilities,
+                    notes,
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                notes.push(format!(
+                    "permission denied when executing `{}`: {err}",
+                    executable.display()
+                ));
+                ProviderProbe {
+                    provider: provider.clone(),
+                    executable,
+                    version: None,
+                    status: ProbeStatus::PermissionDenied,
                     capabilities,
                     notes,
                 }
@@ -216,4 +247,87 @@ fn extract_first_error_line(output: &Output) -> Option<String> {
         }
     }
     None
+}
+
+fn infer_probe_status(
+    combined_output: &str,
+    experimental_provider: bool,
+    command_succeeded: bool,
+) -> ProbeStatus {
+    let text = combined_output.to_lowercase();
+    if text.contains("permission denied")
+        || text.contains("operation not permitted")
+        || text.contains(" eperm")
+        || text.contains(" eacces")
+        || text.contains("errno: -1")
+    {
+        return ProbeStatus::PermissionDenied;
+    }
+    if text.contains("auth")
+        || text.contains("login")
+        || text.contains("api key")
+        || text.contains("unauthorized")
+    {
+        return ProbeStatus::NeedsAuthentication;
+    }
+    if text.contains("unsupported version")
+        || text.contains("not supported")
+        || text.contains("requires version")
+    {
+        return ProbeStatus::UnsupportedVersion;
+    }
+    if experimental_provider && text.contains("experimental") {
+        return ProbeStatus::ExperimentalUnavailable;
+    }
+    if command_succeeded {
+        return ProbeStatus::Ready;
+    }
+    ProbeStatus::ProbeFailed
+}
+
+fn is_likely_version_line(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    if lower.contains("error") || lower.contains("failed") || lower.contains("exception") {
+        return false;
+    }
+    line.chars().any(|ch| ch.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{infer_probe_status, is_likely_version_line, ProbeStatus};
+
+    #[test]
+    fn classify_permission_denied() {
+        let status = infer_probe_status(
+            "Error: EPERM: operation not permitted, open '/Users/a/.gemini/projects.json'",
+            true,
+            false,
+        );
+        assert_eq!(status, ProbeStatus::PermissionDenied);
+    }
+
+    #[test]
+    fn classify_auth_issue() {
+        let status = infer_probe_status("login required: please authenticate first", false, false);
+        assert_eq!(status, ProbeStatus::NeedsAuthentication);
+    }
+
+    #[test]
+    fn classify_experimental_unavailable() {
+        let status = infer_probe_status("this experimental feature is unavailable", true, false);
+        assert_eq!(status, ProbeStatus::ExperimentalUnavailable);
+    }
+
+    #[test]
+    fn classify_ready_when_command_succeeded_without_error_keywords() {
+        let status = infer_probe_status("codex-cli 0.114.0", false, true);
+        assert_eq!(status, ProbeStatus::Ready);
+    }
+
+    #[test]
+    fn version_line_heuristic_rejects_error_text() {
+        assert!(is_likely_version_line("codex-cli 0.114.0"));
+        assert!(!is_likely_version_line("Error: failed to open file"));
+    }
 }
