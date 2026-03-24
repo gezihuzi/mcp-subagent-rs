@@ -1087,3 +1087,35 @@
   - `cargo run -- --agents-dir examples/agents validate`
   - `./scripts/smoke_v06.sh`
   - `cargo run -- run <agent> --selected-file-inline <path> --json` + `jq .request_snapshot.selected_files`（`has_inlined_content=true`）
+
+## T-047 V0.7-P1-WorkflowGateRemainingConditions (Completed 2026-03-24)
+
+任务：补齐 workflow gate 其余四个条件的最小执行闭环（`cross_module/new_interface/migration/human_approval_point`）。
+验收标准：
+
+1. `require_plan_if_cross_module` 可基于 request 信号触发 plan gate。
+2. `require_plan_if_new_interface` 可基于 task/task_brief 信号触发 plan gate。
+3. `require_plan_if_migration` 可基于 task/task_brief 信号触发 plan gate。
+4. `require_plan_if_human_approval_point` 可基于 approval 策略或 task/task_brief 信号触发 plan gate。
+5. gate 命中且缺失 plan 时错误信息包含触发原因，便于观测。
+6. 新增测试覆盖四类触发路径，且回归链路通过。
+完成记录：
+
+- 已更新 `src/runtime/dispatcher.rs`：
+  - 新增 `collect_plan_gate_triggered_reasons()`，统一汇总 gate 触发原因；
+  - 新增四类判定函数：
+    - `detect_cross_module_request()`
+    - `detect_new_interface_request()`
+    - `detect_migration_request()`
+    - `detect_human_approval_point()`
+  - `enforce_workflow_gate()` 在缺失 plan 时输出 `triggered_by=...` 原因列表。
+- 已新增单测：
+  - `build_stage_requires_plan_when_cross_module_gate_hits`
+  - `build_stage_requires_plan_when_new_interface_gate_hits`
+  - `build_stage_requires_plan_when_migration_gate_hits`
+  - `build_stage_requires_plan_when_human_approval_gate_hits`
+- 已通过：
+  - `cargo fmt`
+  - `cargo test -q`（108 passed + 7 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`

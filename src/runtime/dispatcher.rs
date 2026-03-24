@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    collections::HashSet,
+    path::{Component, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -11,7 +14,10 @@ use crate::{
         runners::{AgentRunner, RunnerTerminalState},
         summary::{SummaryEnvelope, SummaryParseStatus},
     },
-    spec::{validate::validate_agent_spec, workflow::WorkflowStageKind, Provider},
+    spec::{
+        runtime_policy::ApprovalPolicy, validate::validate_agent_spec, workflow::WorkflowStageKind,
+        Provider,
+    },
     types::{ResolvedMemory, RunRequest},
 };
 
@@ -178,17 +184,8 @@ fn enforce_workflow_gate(spec: &crate::spec::AgentSpec, request: &RunRequest) ->
     }
 
     let gate = &workflow.require_plan_when;
-    let touched_files_triggered = gate
-        .require_plan_if_touched_files_ge
-        .is_some_and(|threshold| request.selected_files.len() as u32 >= threshold);
-    let runtime_triggered = gate
-        .require_plan_if_estimated_runtime_minutes_ge
-        .is_some_and(|threshold| (spec.runtime.timeout_secs / 60) >= threshold as u64);
-    let async_triggered = gate.require_plan_if_parallel_agents
-        && matches!(request.run_mode, crate::types::RunMode::Async);
-    let requires_plan = touched_files_triggered || runtime_triggered || async_triggered;
-
-    if !requires_plan {
+    let triggered_reasons = collect_plan_gate_triggered_reasons(spec, request, gate);
+    if triggered_reasons.is_empty() {
         return Ok(());
     }
 
@@ -196,9 +193,10 @@ fn enforce_workflow_gate(spec: &crate::spec::AgentSpec, request: &RunRequest) ->
         return Ok(());
     }
 
-    Err(McpSubagentError::SpecValidation(
-        "workflow plan required before Build/Review stage: PLAN.md is missing".to_string(),
-    ))
+    Err(McpSubagentError::SpecValidation(format!(
+        "workflow plan required before Build/Review stage: PLAN.md is missing (triggered_by={})",
+        triggered_reasons.join(",")
+    )))
 }
 
 fn enforce_runtime_depth(spec: &crate::spec::AgentSpec, request: &RunRequest) -> Result<()> {
@@ -264,6 +262,161 @@ fn has_plan_file(request: &RunRequest) -> bool {
         || request.working_dir.join(".mcp-subagent/PLAN.md").is_file()
 }
 
+fn collect_plan_gate_triggered_reasons(
+    spec: &crate::spec::AgentSpec,
+    request: &RunRequest,
+    gate: &crate::spec::workflow::WorkflowGatePolicy,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+
+    if gate
+        .require_plan_if_touched_files_ge
+        .is_some_and(|threshold| request.selected_files.len() as u32 >= threshold)
+    {
+        reasons.push("touched_files_ge".to_string());
+    }
+    if gate
+        .require_plan_if_estimated_runtime_minutes_ge
+        .is_some_and(|threshold| (spec.runtime.timeout_secs / 60) >= threshold as u64)
+    {
+        reasons.push("estimated_runtime_minutes_ge".to_string());
+    }
+    if gate.require_plan_if_parallel_agents
+        && matches!(request.run_mode, crate::types::RunMode::Async)
+    {
+        reasons.push("parallel_agents".to_string());
+    }
+    if gate.require_plan_if_cross_module && detect_cross_module_request(request) {
+        reasons.push("cross_module".to_string());
+    }
+    if gate.require_plan_if_new_interface && detect_new_interface_request(request) {
+        reasons.push("new_interface".to_string());
+    }
+    if gate.require_plan_if_migration && detect_migration_request(request) {
+        reasons.push("migration".to_string());
+    }
+    if gate.require_plan_if_human_approval_point && detect_human_approval_point(spec, request) {
+        reasons.push("human_approval_point".to_string());
+    }
+
+    reasons
+}
+
+fn detect_cross_module_request(request: &RunRequest) -> bool {
+    let mut roots = HashSet::new();
+
+    for selected in &request.selected_files {
+        let root = top_level_module_root(request, &selected.path);
+        if let Some(root) = root {
+            roots.insert(root);
+        }
+        if roots.len() >= 2 {
+            return true;
+        }
+    }
+
+    let text = workflow_signal_text(request);
+    contains_any_keyword(
+        &text,
+        &[
+            "cross module",
+            "cross-module",
+            "multi-module",
+            "multiple modules",
+            "跨模块",
+            "多个模块",
+        ],
+    )
+}
+
+fn top_level_module_root(request: &RunRequest, selected_path: &std::path::Path) -> Option<String> {
+    let effective_path = if selected_path.is_absolute() {
+        selected_path
+            .strip_prefix(&request.working_dir)
+            .unwrap_or(selected_path)
+    } else {
+        selected_path
+    };
+
+    effective_path
+        .components()
+        .find_map(|component| match component {
+            Component::Normal(segment) => Some(segment.to_string_lossy().to_string()),
+            _ => None,
+        })
+}
+
+fn detect_new_interface_request(request: &RunRequest) -> bool {
+    let text = workflow_signal_text(request);
+    contains_any_keyword(
+        &text,
+        &[
+            "new interface",
+            "new api",
+            "public api",
+            "new endpoint",
+            "breaking change",
+            "trait",
+            "新增接口",
+            "新接口",
+            "公开接口",
+            "新增api",
+            "新增 endpoint",
+        ],
+    )
+}
+
+fn detect_migration_request(request: &RunRequest) -> bool {
+    let text = workflow_signal_text(request);
+    contains_any_keyword(
+        &text,
+        &[
+            "migration",
+            "migrate",
+            "database migration",
+            "schema migration",
+            "upgrade",
+            "backfill",
+            "数据迁移",
+            "迁移",
+            "升级",
+        ],
+    )
+}
+
+fn detect_human_approval_point(spec: &crate::spec::AgentSpec, request: &RunRequest) -> bool {
+    if matches!(spec.runtime.approval, ApprovalPolicy::Ask) {
+        return true;
+    }
+    let text = workflow_signal_text(request);
+    contains_any_keyword(
+        &text,
+        &[
+            "human approval",
+            "approval required",
+            "needs approval",
+            "manual approval",
+            "人工审批",
+            "需要审批",
+            "审批点",
+        ],
+    )
+}
+
+fn workflow_signal_text(request: &RunRequest) -> String {
+    let mut text = String::new();
+    text.push_str(&request.task);
+    text.push('\n');
+    if let Some(task_brief) = request.task_brief.as_deref() {
+        text.push_str(task_brief);
+    }
+    text.to_lowercase()
+}
+
+fn contains_any_keyword(text: &str, keywords: &[&str]) -> bool {
+    keywords.iter().any(|keyword| text.contains(keyword))
+}
+
 #[derive(Debug)]
 struct RunTracker {
     metadata: RunMetadata,
@@ -315,7 +468,7 @@ mod tests {
         },
         spec::{
             core::{AgentSpecCore, Provider},
-            runtime_policy::{RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
+            runtime_policy::{ApprovalPolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
             workflow::{WorkflowGatePolicy, WorkflowSpec, WorkflowStageKind},
             AgentSpec,
         },
@@ -387,6 +540,17 @@ mod tests {
                 require_plan_if_human_approval_point: false,
                 require_plan_if_estimated_runtime_minutes_ge: None,
             },
+            stages: vec![WorkflowStageKind::Build],
+            ..WorkflowSpec::default()
+        });
+        spec
+    }
+
+    fn sample_spec_with_custom_plan_gate(gate: WorkflowGatePolicy) -> AgentSpec {
+        let mut spec = sample_spec();
+        spec.workflow = Some(WorkflowSpec {
+            enabled: true,
+            require_plan_when: gate,
             stages: vec![WorkflowStageKind::Build],
             ..WorkflowSpec::default()
         });
@@ -566,6 +730,155 @@ mod tests {
             .await
             .expect("dispatch should pass with plan");
         assert_eq!(result.metadata.status, RunStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn build_stage_requires_plan_when_cross_module_gate_hits() {
+        let temp = tempdir().expect("tempdir");
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Succeeded {
+                summary: success_summary(),
+            }),
+        );
+        let mut request = sample_request();
+        request.stage = Some("Build".to_string());
+        request.working_dir = temp.path().to_path_buf();
+        request.selected_files = vec![
+            SelectedFile {
+                path: PathBuf::from("src/a.rs"),
+                rationale: None,
+                content: None,
+            },
+            SelectedFile {
+                path: PathBuf::from("web/app.ts"),
+                rationale: None,
+                content: None,
+            },
+        ];
+
+        let gate = WorkflowGatePolicy {
+            require_plan_if_touched_files_ge: None,
+            require_plan_if_cross_module: true,
+            require_plan_if_parallel_agents: false,
+            require_plan_if_new_interface: false,
+            require_plan_if_migration: false,
+            require_plan_if_human_approval_point: false,
+            require_plan_if_estimated_runtime_minutes_ge: None,
+        };
+
+        let err = dispatcher
+            .run(
+                &sample_spec_with_custom_plan_gate(gate),
+                &request,
+                ResolvedMemory::default(),
+            )
+            .await
+            .expect_err("missing plan should fail when cross_module trigger hits");
+        assert!(err.to_string().contains("cross_module"));
+    }
+
+    #[tokio::test]
+    async fn build_stage_requires_plan_when_new_interface_gate_hits() {
+        let temp = tempdir().expect("tempdir");
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Succeeded {
+                summary: success_summary(),
+            }),
+        );
+        let mut request = sample_request();
+        request.stage = Some("Build".to_string());
+        request.working_dir = temp.path().to_path_buf();
+        request.task = "add new public API endpoint for parser".to_string();
+
+        let gate = WorkflowGatePolicy {
+            require_plan_if_touched_files_ge: None,
+            require_plan_if_cross_module: false,
+            require_plan_if_parallel_agents: false,
+            require_plan_if_new_interface: true,
+            require_plan_if_migration: false,
+            require_plan_if_human_approval_point: false,
+            require_plan_if_estimated_runtime_minutes_ge: None,
+        };
+
+        let err = dispatcher
+            .run(
+                &sample_spec_with_custom_plan_gate(gate),
+                &request,
+                ResolvedMemory::default(),
+            )
+            .await
+            .expect_err("missing plan should fail when new_interface trigger hits");
+        assert!(err.to_string().contains("new_interface"));
+    }
+
+    #[tokio::test]
+    async fn build_stage_requires_plan_when_migration_gate_hits() {
+        let temp = tempdir().expect("tempdir");
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Succeeded {
+                summary: success_summary(),
+            }),
+        );
+        let mut request = sample_request();
+        request.stage = Some("Build".to_string());
+        request.working_dir = temp.path().to_path_buf();
+        request.task = "run database migration from v1 to v2".to_string();
+
+        let gate = WorkflowGatePolicy {
+            require_plan_if_touched_files_ge: None,
+            require_plan_if_cross_module: false,
+            require_plan_if_parallel_agents: false,
+            require_plan_if_new_interface: false,
+            require_plan_if_migration: true,
+            require_plan_if_human_approval_point: false,
+            require_plan_if_estimated_runtime_minutes_ge: None,
+        };
+
+        let err = dispatcher
+            .run(
+                &sample_spec_with_custom_plan_gate(gate),
+                &request,
+                ResolvedMemory::default(),
+            )
+            .await
+            .expect_err("missing plan should fail when migration trigger hits");
+        assert!(err.to_string().contains("migration"));
+    }
+
+    #[tokio::test]
+    async fn build_stage_requires_plan_when_human_approval_gate_hits() {
+        let temp = tempdir().expect("tempdir");
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Succeeded {
+                summary: success_summary(),
+            }),
+        );
+        let mut request = sample_request();
+        request.stage = Some("Build".to_string());
+        request.working_dir = temp.path().to_path_buf();
+
+        let gate = WorkflowGatePolicy {
+            require_plan_if_touched_files_ge: None,
+            require_plan_if_cross_module: false,
+            require_plan_if_parallel_agents: false,
+            require_plan_if_new_interface: false,
+            require_plan_if_migration: false,
+            require_plan_if_human_approval_point: true,
+            require_plan_if_estimated_runtime_minutes_ge: None,
+        };
+
+        let mut spec = sample_spec_with_custom_plan_gate(gate);
+        spec.runtime.approval = ApprovalPolicy::Ask;
+
+        let err = dispatcher
+            .run(&spec, &request, ResolvedMemory::default())
+            .await
+            .expect_err("missing plan should fail when human_approval_point trigger hits");
+        assert!(err.to_string().contains("human_approval_point"));
     }
 
     #[tokio::test]
