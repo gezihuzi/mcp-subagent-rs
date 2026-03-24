@@ -7,7 +7,7 @@ use crate::{
     },
     spec::{
         core::{AgentSpecCore, Provider},
-        runtime_policy::RuntimePolicy,
+        runtime_policy::{ContextMode, RuntimePolicy},
         AgentSpec,
     },
     types::{
@@ -50,13 +50,31 @@ impl ContextCompiler for DefaultContextCompiler {
     ) -> Result<CompiledContext> {
         let mut source_manifest = Vec::new();
         let mut selected_context = String::new();
+        let injection = ContextInjectionPolicy::for_mode(&spec.runtime.context_mode);
 
-        if let Some(parent_summary) = request.parent_summary.as_deref() {
-            writeln!(&mut selected_context, "parent_summary:\n{parent_summary}\n")
-                .expect("write to string");
+        if injection.include_parent_summary {
+            if let Some(parent_summary) = request.parent_summary.as_deref() {
+                if is_likely_raw_transcript(parent_summary) {
+                    writeln!(
+                        &mut selected_context,
+                        "parent_summary: [suppressed because it appears to contain raw transcript]\n"
+                    )
+                    .expect("write to string");
+                } else if injection.parent_summary_digest_only {
+                    let digest = summarize_parent_summary(parent_summary);
+                    writeln!(&mut selected_context, "parent_summary_digest:\n{digest}\n")
+                        .expect("write to string");
+                } else {
+                    writeln!(&mut selected_context, "parent_summary:\n{parent_summary}\n")
+                        .expect("write to string");
+                }
+            }
         }
 
         for selected in &request.selected_files {
+            if !injection.should_include_selected_file(selected.path.as_path()) {
+                continue;
+            }
             source_manifest.push(ContextSourceRef {
                 label: format!("selected_file:{}", selected.path.display()),
                 path: Some(selected.path.clone()),
@@ -256,6 +274,85 @@ fn compile_constraints(spec: &AgentSpec) -> String {
     )
 }
 
+#[derive(Debug)]
+struct ContextInjectionPolicy {
+    include_parent_summary: bool,
+    parent_summary_digest_only: bool,
+    selected_files_allowlist: Option<Vec<String>>,
+}
+
+impl ContextInjectionPolicy {
+    fn for_mode(mode: &ContextMode) -> Self {
+        match mode {
+            ContextMode::Isolated => Self {
+                include_parent_summary: false,
+                parent_summary_digest_only: false,
+                selected_files_allowlist: None,
+            },
+            ContextMode::SummaryOnly => Self {
+                include_parent_summary: true,
+                parent_summary_digest_only: false,
+                selected_files_allowlist: None,
+            },
+            ContextMode::SelectedFiles(paths) => Self {
+                include_parent_summary: false,
+                parent_summary_digest_only: false,
+                selected_files_allowlist: Some(paths.clone()),
+            },
+            ContextMode::ExpandedBrief => Self {
+                include_parent_summary: true,
+                parent_summary_digest_only: true,
+                selected_files_allowlist: None,
+            },
+        }
+    }
+
+    fn should_include_selected_file(&self, candidate_path: &std::path::Path) -> bool {
+        let Some(allowlist) = &self.selected_files_allowlist else {
+            return false;
+        };
+        if allowlist.is_empty() {
+            return false;
+        }
+
+        allowlist
+            .iter()
+            .map(|entry| entry.trim())
+            .filter(|entry| !entry.is_empty())
+            .any(|entry| {
+                let allow_path = std::path::Path::new(entry);
+                candidate_path == allow_path || candidate_path.ends_with(allow_path)
+            })
+    }
+}
+
+fn summarize_parent_summary(parent_summary: &str) -> String {
+    let compact = parent_summary
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if compact.chars().count() <= 320 {
+        compact
+    } else {
+        let truncated = compact.chars().take(320).collect::<String>();
+        format!("{truncated} ...[digest truncated]")
+    }
+}
+
+fn is_likely_raw_transcript(parent_summary: &str) -> bool {
+    let mut role_lines = 0_u32;
+    for line in parent_summary.lines() {
+        let lower = line.trim().to_ascii_lowercase();
+        if lower.starts_with("user:")
+            || lower.starts_with("assistant:")
+            || lower.starts_with("system:")
+        {
+            role_lines += 1;
+        }
+    }
+    role_lines >= 2
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -267,13 +364,15 @@ mod tests {
         },
         spec::{
             core::{AgentSpecCore, Provider},
-            runtime_policy::RuntimePolicy,
+            runtime_policy::{ContextMode, RuntimePolicy},
             AgentSpec,
         },
         types::{MemorySnippet, ResolvedMemory, RunMode, RunRequest, SelectedFile},
     };
 
-    fn sample_spec() -> AgentSpec {
+    fn sample_spec(mode: ContextMode) -> AgentSpec {
+        let mut runtime = RuntimePolicy::default();
+        runtime.context_mode = mode;
         AgentSpec {
             core: AgentSpecCore {
                 name: "reviewer".to_string(),
@@ -287,7 +386,7 @@ mod tests {
                 tags: Vec::new(),
                 metadata: Default::default(),
             },
-            runtime: RuntimePolicy::default(),
+            runtime,
             provider_overrides: Default::default(),
         }
     }
@@ -295,7 +394,9 @@ mod tests {
     #[test]
     fn compile_contains_required_sections() {
         let compiler = DefaultContextCompiler;
-        let spec = sample_spec();
+        let spec = sample_spec(ContextMode::SelectedFiles(
+            vec!["src/parser.rs".to_string()],
+        ));
         let req = RunRequest {
             task: "Review parser changes".to_string(),
             task_brief: Some("Review parser module".to_string()),
@@ -336,6 +437,143 @@ mod tests {
             );
         }
         assert_eq!(compiled.source_manifest.len(), 3);
+    }
+
+    #[test]
+    fn isolated_mode_excludes_parent_summary_and_selected_files() {
+        let compiler = DefaultContextCompiler;
+        let spec = sample_spec(ContextMode::Isolated);
+        let req = RunRequest {
+            task: "task".to_string(),
+            task_brief: None,
+            parent_summary: Some("parent summary should be hidden".to_string()),
+            selected_files: vec![SelectedFile {
+                path: PathBuf::from("src/a.rs"),
+                rationale: None,
+                content: Some("fn a() {}".to_string()),
+            }],
+            working_dir: PathBuf::from("."),
+            run_mode: RunMode::Sync,
+            acceptance_criteria: Vec::new(),
+        };
+
+        let compiled = compiler
+            .compile(&spec, &req, ResolvedMemory::default())
+            .expect("compile");
+        assert!(!compiled.injected_prompt.contains("parent_summary:"));
+        assert!(!compiled.injected_prompt.contains("selected_file: src/a.rs"));
+    }
+
+    #[test]
+    fn summary_only_mode_includes_parent_summary_but_excludes_selected_files() {
+        let compiler = DefaultContextCompiler;
+        let spec = sample_spec(ContextMode::SummaryOnly);
+        let req = RunRequest {
+            task: "task".to_string(),
+            task_brief: None,
+            parent_summary: Some("this is parent summary".to_string()),
+            selected_files: vec![SelectedFile {
+                path: PathBuf::from("src/a.rs"),
+                rationale: None,
+                content: Some("fn a() {}".to_string()),
+            }],
+            working_dir: PathBuf::from("."),
+            run_mode: RunMode::Sync,
+            acceptance_criteria: Vec::new(),
+        };
+
+        let compiled = compiler
+            .compile(&spec, &req, ResolvedMemory::default())
+            .expect("compile");
+        assert!(compiled.injected_prompt.contains("parent_summary:"));
+        assert!(!compiled.injected_prompt.contains("selected_file: src/a.rs"));
+    }
+
+    #[test]
+    fn selected_files_mode_only_includes_allowlisted_files() {
+        let compiler = DefaultContextCompiler;
+        let spec = sample_spec(ContextMode::SelectedFiles(vec!["src/keep.rs".to_string()]));
+        let req = RunRequest {
+            task: "task".to_string(),
+            task_brief: None,
+            parent_summary: Some("ignored".to_string()),
+            selected_files: vec![
+                SelectedFile {
+                    path: PathBuf::from("src/keep.rs"),
+                    rationale: None,
+                    content: Some("fn keep() {}".to_string()),
+                },
+                SelectedFile {
+                    path: PathBuf::from("src/drop.rs"),
+                    rationale: None,
+                    content: Some("fn drop() {}".to_string()),
+                },
+            ],
+            working_dir: PathBuf::from("."),
+            run_mode: RunMode::Sync,
+            acceptance_criteria: Vec::new(),
+        };
+
+        let compiled = compiler
+            .compile(&spec, &req, ResolvedMemory::default())
+            .expect("compile");
+        assert!(compiled
+            .injected_prompt
+            .contains("selected_file: src/keep.rs"));
+        assert!(!compiled
+            .injected_prompt
+            .contains("selected_file: src/drop.rs"));
+        assert!(!compiled.injected_prompt.contains("parent_summary:"));
+    }
+
+    #[test]
+    fn expanded_brief_mode_uses_parent_summary_digest() {
+        let compiler = DefaultContextCompiler;
+        let spec = sample_spec(ContextMode::ExpandedBrief);
+        let req = RunRequest {
+            task: "task".to_string(),
+            task_brief: None,
+            parent_summary: Some("word ".repeat(120)),
+            selected_files: vec![SelectedFile {
+                path: PathBuf::from("src/ignored.rs"),
+                rationale: None,
+                content: Some("fn ignored() {}".to_string()),
+            }],
+            working_dir: PathBuf::from("."),
+            run_mode: RunMode::Sync,
+            acceptance_criteria: Vec::new(),
+        };
+
+        let compiled = compiler
+            .compile(&spec, &req, ResolvedMemory::default())
+            .expect("compile");
+        assert!(compiled.injected_prompt.contains("parent_summary_digest:"));
+        assert!(!compiled
+            .injected_prompt
+            .contains("selected_file: src/ignored.rs"));
+    }
+
+    #[test]
+    fn summary_only_blocks_raw_transcript_like_parent_summary() {
+        let compiler = DefaultContextCompiler;
+        let spec = sample_spec(ContextMode::SummaryOnly);
+        let req = RunRequest {
+            task: "task".to_string(),
+            task_brief: None,
+            parent_summary: Some("User: hi\nAssistant: hello".to_string()),
+            selected_files: Vec::new(),
+            working_dir: PathBuf::from("."),
+            run_mode: RunMode::Sync,
+            acceptance_criteria: Vec::new(),
+        };
+
+        let compiled = compiler
+            .compile(&spec, &req, ResolvedMemory::default())
+            .expect("compile");
+        assert!(compiled
+            .injected_prompt
+            .contains("suppressed because it appears to contain raw transcript"));
+        assert!(!compiled.injected_prompt.contains("User: hi"));
     }
 
     #[test]

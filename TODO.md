@@ -264,3 +264,54 @@
 - `run_agent` 与 `spawn_agent` 成功路径已传入实际 workspace 根路径。
 - 已新增测试 `declared_workspace_artifacts_are_persisted_in_index_and_payloads`。
 - 已通过 `cargo fmt && cargo test`（53 passed）与 `cargo run -- validate`。
+
+## T-018 Phase3-TracingAndLogLevelSurface (Completed 2026-03-24)
+任务：补齐日志基线能力，支持 `RUST_LOG` / `--log-level`，并把 server 全局日志落到 state 目录。
+验收标准：
+1. CLI 支持全局 `--log-level` 参数，且优先级高于 `RUST_LOG` 与配置默认值。
+2. runtime config 支持 `server.log_level`（配置文件）并保持 `CLI > ENV > File > Default` 合并顺序。
+3. 进程启动后初始化 tracing subscriber，并把日志写到 `stderr + <state_dir>/server.log`。
+4. 新增单测覆盖日志级别解析优先级与配置合并逻辑。
+5. `cargo test` 全量通过。
+完成记录：
+- 已新增 `logging` 模块，落地 tracing 初始化与日志级别解析。
+- CLI 已新增全局 `--log-level`，并在 `mcp/doctor/validate` 路径统一初始化 logging。
+- `config` 已扩展 `RuntimeConfig.log_level` 与 `[server].log_level` 解析，支持 `MCP_SUBAGENT_LOG_LEVEL`。
+- 已新增测试：
+  - `logging::tests::*`（CLI/env/config 优先级）
+  - `config::tests::merge_*`（含 log level 断言）
+- 已通过 `cargo fmt && cargo test`（56 passed）与 `cargo run -- validate`。
+
+## T-019 V0.6-P0-1-ContextModeBehavior (Completed 2026-03-24)
+任务：按 v0.6 文档落地 P0-1，让 `context_mode` 真正控制上下文注入分支。
+验收标准：
+1. `Isolated/SummaryOnly/SelectedFiles/ExpandedBrief` 四种模式有真实注入差异，不再“统一全带”。
+2. `SelectedFiles` 仅注入 allowlist 文件；`SummaryOnly` 不注入 selected files 正文；`Isolated` 不注入 parent summary。
+3. `ExpandedBrief` 注入 parent summary digest，而非原文全文。
+4. 具备“raw transcript 风险抑制”校验，出现明显对话转录格式时不直接注入。
+5. 单测覆盖四种模式与 raw transcript 抑制路径。
+6. `cargo test` 全量通过。
+完成记录：
+- 已在 `runtime::context` 新增 `ContextInjectionPolicy`，按 `context_mode` 决定 parent summary / selected files 注入范围。
+- 已实现 `SelectedFiles` allowlist 匹配、`ExpandedBrief` digest 生成、以及 raw transcript 形态抑制逻辑。
+- 已新增测试：
+  - `isolated_mode_excludes_parent_summary_and_selected_files`
+  - `summary_only_mode_includes_parent_summary_but_excludes_selected_files`
+  - `selected_files_mode_only_includes_allowlisted_files`
+  - `expanded_brief_mode_uses_parent_summary_digest`
+  - `summary_only_blocks_raw_transcript_like_parent_summary`
+- 已通过 `cargo fmt && cargo test`（61 passed）与 `cargo run -- validate`。
+
+## T-020 V0.6-P0-2a-McpServerDtoSplit (Completed 2026-03-24)
+任务：推进 v0.6 P0-2 的第一步，先将 MCP 输入输出 DTO 从 `mcp/server.rs` 独立拆分，降低 server 文件职责密度并保持兼容。
+验收标准：
+1. 新增 `src/mcp/dto.rs`，集中承载 MCP tools 的输入/输出结构体。
+2. `src/mcp/server.rs` 不再定义重复 DTO，改为引用独立模块。
+3. 兼容旧调用路径（`mcp::server::*`）不破坏。
+4. 功能与测试行为不回退。
+5. `cargo test` 全量通过。
+完成记录：
+- 已新增 `src/mcp/dto.rs`，迁移 `RunAgentInput/Output`、`Spawn`、`Status`、`Artifact`、`ListAgents` 等 DTO。
+- `src/mcp/mod.rs` 已注册 `pub mod dto;`。
+- `src/mcp/server.rs` 已移除本地 DTO 定义并 `pub use crate::mcp::dto::*` 保持兼容导出。
+- 已通过 `cargo fmt && cargo test`（61 passed）与 `cargo run -- validate`。
