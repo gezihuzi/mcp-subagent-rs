@@ -1,6 +1,7 @@
 pub mod config;
 pub mod doctor;
 pub mod error;
+pub mod logging;
 pub mod mcp;
 pub mod probe;
 pub mod runtime;

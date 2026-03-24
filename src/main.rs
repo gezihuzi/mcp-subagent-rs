@@ -4,11 +4,13 @@ use clap::{Parser, Subcommand};
 use mcp_subagent::{
     config::{resolve_runtime_config, ConfigOverrides, RuntimeConfig},
     doctor::{build_doctor_report, render_doctor_report},
+    logging::init_logging,
     mcp::server::McpSubagentServer,
     probe::SystemProviderProber,
     runtime::context::validate_default_summary_contract_template,
     spec::registry::load_agent_specs_from_dirs,
 };
+use tracing::info;
 
 #[derive(Debug, Parser)]
 #[command(name = "mcp-subagent", version, about = "MCP subagent runtime")]
@@ -19,6 +21,8 @@ struct Cli {
     agents_dirs: Vec<PathBuf>,
     #[arg(long, global = true)]
     state_dir: Option<PathBuf>,
+    #[arg(long, global = true)]
+    log_level: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -46,6 +50,7 @@ async fn main() -> ExitCode {
     let config_path = cli.config.clone();
     let global_agents_dirs = cli.agents_dirs.clone();
     let state_dir = cli.state_dir.clone();
+    let cli_log_level = cli.log_level.clone();
 
     match cli.command {
         Commands::Mcp { agents_dir } => {
@@ -54,6 +59,7 @@ async fn main() -> ExitCode {
                 state_dir.clone(),
                 global_agents_dirs.clone(),
                 agents_dir,
+                cli_log_level.clone(),
             ) {
                 Ok(cfg) => cfg,
                 Err(err) => {
@@ -61,6 +67,18 @@ async fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            let _logging_guard = match init_logging(
+                &cfg.state_dir,
+                cli_log_level.as_deref(),
+                cfg.log_level.as_str(),
+            ) {
+                Ok(guard) => guard,
+                Err(err) => {
+                    eprintln!("failed to initialize logging: {err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: mcp");
             run_mcp_server(cfg).await
         }
         Commands::Doctor { agents_dir } => {
@@ -69,6 +87,7 @@ async fn main() -> ExitCode {
                 state_dir.clone(),
                 global_agents_dirs.clone(),
                 agents_dir,
+                cli_log_level.clone(),
             ) {
                 Ok(cfg) => cfg,
                 Err(err) => {
@@ -76,17 +95,46 @@ async fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            let _logging_guard = match init_logging(
+                &cfg.state_dir,
+                cli_log_level.as_deref(),
+                cfg.log_level.as_str(),
+            ) {
+                Ok(guard) => guard,
+                Err(err) => {
+                    eprintln!("failed to initialize logging: {err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: doctor");
             doctor(cfg)
         }
         Commands::Validate { agents_dir } => {
-            let cfg =
-                match resolve_cli_config(config_path, state_dir, global_agents_dirs, agents_dir) {
-                    Ok(cfg) => cfg,
-                    Err(err) => {
-                        eprintln!("failed to resolve config: {err}");
-                        return ExitCode::from(2);
-                    }
-                };
+            let cfg = match resolve_cli_config(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                agents_dir,
+                cli_log_level.clone(),
+            ) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    eprintln!("failed to resolve config: {err}");
+                    return ExitCode::from(2);
+                }
+            };
+            let _logging_guard = match init_logging(
+                &cfg.state_dir,
+                cli_log_level.as_deref(),
+                cfg.log_level.as_str(),
+            ) {
+                Ok(guard) => guard,
+                Err(err) => {
+                    eprintln!("failed to initialize logging: {err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: validate");
             validate_specs(cfg)
         }
     }
@@ -97,6 +145,7 @@ fn resolve_cli_config(
     state_dir: Option<PathBuf>,
     mut agents_dirs: Vec<PathBuf>,
     command_agents_dir: Option<PathBuf>,
+    log_level: Option<String>,
 ) -> mcp_subagent::error::Result<RuntimeConfig> {
     if let Some(dir) = command_agents_dir {
         agents_dirs = vec![dir];
@@ -106,6 +155,7 @@ fn resolve_cli_config(
         config_path,
         agents_dirs,
         state_dir,
+        log_level,
     })
 }
 
