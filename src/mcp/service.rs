@@ -70,11 +70,7 @@ fn select_runner(provider: &Provider) -> Box<dyn AgentRunner> {
         Provider::Claude => Box::new(runners::claude::from_env()),
         Provider::Codex => Box::new(runners::codex::from_env()),
         Provider::Gemini => Box::new(runners::gemini::from_env()),
-        Provider::Ollama => Box::new(MockRunner::new(MockRunPlan::Failed {
-            message: "provider `Ollama` is reserved in current build".to_string(),
-            stdout: String::new(),
-            stderr: "ollama runner is not enabled".to_string(),
-        })),
+        Provider::Ollama => Box::new(runners::ollama::from_env()),
     }
 }
 

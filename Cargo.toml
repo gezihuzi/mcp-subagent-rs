@@ -3,6 +3,7 @@ name = "mcp-subagent"
 version = "0.6.0"
 edition = "2021"
 repository = "https://github.com/gezihuzi/mcp-subagent-rs"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 async-trait = "0.1"

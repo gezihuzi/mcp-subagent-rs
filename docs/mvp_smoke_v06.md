@@ -13,7 +13,8 @@ Checklist:
 3. `list-agents --json` returns structured provider availability.
 4. `run mock_runner --json` succeeds.
 5. `run codex_runner --json` is attempted (optional pass; may be unavailable by environment).
-6. `mcp` boot path is verified with short timeout.
+6. `run ollama_runner --json` is optional when `MCP_SUBAGENT_SMOKE_OLLAMA_MODEL` is set.
+7. `mcp` boot path is verified with short timeout.
 
 Provider status declarations for current build:
 
@@ -21,4 +22,4 @@ Provider status declarations for current build:
 - `Claude`: Beta
 - `Gemini`: Experimental
 - `Mock`: Stable local debug
-- `Ollama`: Reserved
+- `Ollama`: Local (requires local model)

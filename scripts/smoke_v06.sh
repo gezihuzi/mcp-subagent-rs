@@ -26,6 +26,17 @@ provider = "Codex"
 instructions = "run codex smoke task"
 TOML
 
+if [[ -n "${MCP_SUBAGENT_SMOKE_OLLAMA_MODEL:-}" ]]; then
+cat >"$AGENTS_DIR/ollama_runner.agent.toml" <<TOML
+[core]
+name = "ollama_runner"
+description = "local smoke ollama agent"
+provider = "Ollama"
+model = "${MCP_SUBAGENT_SMOKE_OLLAMA_MODEL}"
+instructions = "run ollama smoke task"
+TOML
+fi
+
 run_cmd() {
   cargo run --quiet -- \
     --agents-dir "$AGENTS_DIR" \
@@ -51,6 +62,17 @@ if run_cmd run codex_runner --task "smoke codex run" --working-dir "$WORK_DIR" -
   echo "[smoke] codex run succeeded"
 else
   echo "[smoke] codex unavailable in current environment (allowed for local smoke)"
+fi
+
+if [[ -n "${MCP_SUBAGENT_SMOKE_OLLAMA_MODEL:-}" ]]; then
+  echo "[smoke] run ollama (optional)"
+  if run_cmd run ollama_runner --task "smoke ollama run" --working-dir "$WORK_DIR" --json >"$TMP_DIR/run_ollama.json" 2>"$TMP_DIR/run_ollama.err"; then
+    echo "[smoke] ollama run succeeded"
+  else
+    echo "[smoke] ollama unavailable or model not pulled (allowed for local smoke)"
+  fi
+else
+  echo "[smoke] run ollama skipped (set MCP_SUBAGENT_SMOKE_OLLAMA_MODEL to enable)"
 fi
 
 echo "[smoke] mcp boot check"

@@ -153,14 +153,6 @@ impl McpSubagentServer {
         &self,
         provider: &Provider,
     ) -> std::result::Result<ProviderProbe, ErrorData> {
-        if matches!(provider, Provider::Ollama) {
-            return Err(ErrorData::invalid_params(
-                "provider `Ollama` is reserved in current build; use `Mock` for local test runs"
-                    .to_string(),
-                None,
-            ));
-        }
-
         let probe = self.probe_provider(provider);
         if probe.is_available() {
             return Ok(probe);
@@ -278,7 +270,7 @@ pub(crate) fn provider_tier_note(provider: &Provider) -> &'static str {
         Provider::Claude => "provider_tier: beta",
         Provider::Codex => "provider_tier: primary",
         Provider::Gemini => "provider_tier: experimental",
-        Provider::Ollama => "provider_tier: reserved (real runner not enabled in current build)",
+        Provider::Ollama => "provider_tier: local (community runner path)",
     }
 }
 
@@ -586,7 +578,7 @@ sandbox = "ReadOnly"
     }
 
     #[tokio::test]
-    async fn list_agents_marks_ollama_reserved() {
+    async fn list_agents_marks_ollama_available_when_probe_ready() {
         let temp = tempdir().expect("temp");
         let agents_dir = temp.path().join("agents");
         let state_dir = temp.path().join("state");
@@ -596,11 +588,11 @@ sandbox = "ReadOnly"
 
         let out = server.list_agents().await.expect("list").0;
         assert_eq!(out.agents.len(), 1);
-        assert!(!out.agents[0].available);
+        assert!(out.agents[0].available);
         assert!(out.agents[0]
             .capability_notes
             .iter()
-            .any(|note| note.contains("provider_tier: reserved")));
+            .any(|note| note.contains("provider_tier: local")));
     }
 
     #[tokio::test]
@@ -681,13 +673,21 @@ sandbox = "ReadOnly"
     }
 
     #[tokio::test]
-    async fn run_agent_rejects_reserved_ollama_provider() {
+    async fn run_agent_rejects_unavailable_ollama_provider() {
         let temp = tempdir().expect("temp");
         let agents_dir = temp.path().join("agents");
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&agents_dir).expect("create agents");
         write_agent_spec_with_provider(&agents_dir, "Ollama");
-        let server = make_server(agents_dir, state_dir);
+        let server = McpSubagentServer::new_with_state_dir_and_prober(
+            vec![agents_dir],
+            state_dir,
+            Arc::new(TestProviderProber::ready().with_status(
+                Provider::Ollama,
+                ProbeStatus::MissingBinary,
+                "ollama CLI not installed",
+            )),
+        );
 
         let err = match server
             .run_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
@@ -702,14 +702,14 @@ sandbox = "ReadOnly"
             }))
             .await
         {
-            Ok(_) => panic!("run should fail when provider is reserved"),
+            Ok(_) => panic!("run should fail when provider is unavailable"),
             Err(err) => err,
         };
 
         assert!(err
             .message
             .as_ref()
-            .contains("provider `Ollama` is reserved"));
+            .contains("provider `Ollama` is unavailable"));
     }
 
     #[derive(Debug, Clone, Default)]

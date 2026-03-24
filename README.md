@@ -1,14 +1,17 @@
-# mcp-subagent-rs (v0.6.0)
+# mcp-subagent-rs
 
-Rust implementation of an MCP subagent runtime aligned to `docs/mcp-subagent_tech_design_v0.6.md`.
+[![GitHub Release](https://img.shields.io/github/v/release/gezihuzi/mcp-subagent-rs?display_name=tag)](https://github.com/gezihuzi/mcp-subagent-rs/releases)
+[![GitHub License](https://img.shields.io/github/license/gezihuzi/mcp-subagent-rs)](https://github.com/gezihuzi/mcp-subagent-rs#license)
 
-## Provider Tiers (v0.6)
+Rust implementation of an MCP subagent runtime aligned to the technical design baseline in `docs/`.
+
+## Provider Tiers
 
 - `Mock`: stable local debug path (built-in, no external binary required)
 - `Codex`: primary implementation path
 - `Claude`: beta path
 - `Gemini`: experimental path
-- `Ollama`: reserved (runner intentionally disabled in current build)
+- `Ollama`: local community runner path
 
 ## Command Surface
 
@@ -45,7 +48,7 @@ Default paths:
 - `agents_dirs = ["./agents"]`
 - `state_dir = ".mcp-subagent/state"`
 
-## Local Smoke (v0.6)
+## Local Smoke
 
 Run one command for minimal local acceptance:
 
@@ -60,6 +63,18 @@ This script validates:
 3. `list-agents`
 4. `run` on `Mock` (and `Codex` if available)
 5. `mcp` boot via short-lived `timeout`
+
+Optional local run with Ollama:
+
+- set `provider = "Ollama"` and `core.model = "<local-model>"` in agent spec
+- or set `MCP_SUBAGENT_OLLAMA_MODEL=<local-model>`
+
+## License
+
+Licensed under either of:
+
+- [MIT License](./LICENSE-MIT)
+- [Apache License 2.0](./LICENSE-APACHE)
 
 ## Example Workflow Specs
 

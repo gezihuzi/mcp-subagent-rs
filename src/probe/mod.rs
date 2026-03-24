@@ -269,7 +269,7 @@ fn provider_tier_note(provider: &Provider) -> &'static str {
         Provider::Claude => "provider_tier: beta",
         Provider::Codex => "provider_tier: primary",
         Provider::Gemini => "provider_tier: experimental",
-        Provider::Ollama => "provider_tier: reserved (real runner not enabled in current build)",
+        Provider::Ollama => "provider_tier: local (community runner path)",
     }
 }
 

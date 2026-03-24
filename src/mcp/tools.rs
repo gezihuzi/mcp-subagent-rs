@@ -29,7 +29,6 @@ use crate::{
         },
     },
     runtime::dispatcher::RunStatus,
-    spec::Provider,
 };
 
 pub(crate) fn build_tool_router() -> ToolRouter<McpSubagentServer> {
@@ -52,11 +51,7 @@ impl McpSubagentServer {
                     .or_insert_with(|| self.probe_provider(&provider))
                     .clone();
                 let capability_notes = build_capability_notes(&probe);
-                let available = if matches!(provider, Provider::Ollama) {
-                    false
-                } else {
-                    probe.is_available()
-                };
+                let available = probe.is_available();
                 AgentListing {
                     name: loaded.spec.core.name,
                     description: loaded.spec.core.description,

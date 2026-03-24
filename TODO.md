@@ -950,3 +950,35 @@
   - `cargo test`（92 passed + 3 passed + 3 integration passed）
   - `cargo run -- --agents-dir examples/agents validate`
   - `./scripts/smoke_v06.sh`
+
+## T-043 PostV0.6-ReadmeBadgesLicenseAndOllamaLocalRunner (Completed 2026-03-24)
+
+任务：收口 README 版本信息展示、仓库许可证声明，并补齐本地 Ollama 真实 runner 路径。
+验收标准：
+
+1. README 不再手写版本号，改为 GitHub release/license 徽标。
+2. 仓库与 crate 元数据具备明确许可证声明，且可对应到仓库内许可证文本。
+3. `Provider::Ollama` 从保留态升级为本地 runner 路径：`run_agent/spawn_agent` 可进入真实 runner 分发分支。
+4. `list_agents`/provider tier 描述反映 Ollama 本地路径语义，不再强制 reserved 不可用。
+5. 本地 smoke 和测试链路覆盖 Ollama 最小可跑路径（环境可选）。
+完成记录：
+
+- 已更新 `README.md`：
+  - 移除显式版本文案，保留 GitHub release/license 徽标；
+  - provider tier 与本地 smoke 文案已同步到 Ollama 本地 runner 路径。
+- 已更新 `Cargo.toml`：新增 `license = "MIT OR Apache-2.0"`。
+- 已新增许可证文件：
+  - `LICENSE-MIT`
+  - `LICENSE-APACHE`
+- 已新增 `src/runtime/runners/ollama.rs`（真实本地 runner，支持超时/失败/模型缺失校验）并接入 `mcp::service::select_runner`。
+- 已移除 `mcp` 层对 Ollama 的 reserved 硬拒绝与强制 unavailable 逻辑，`list_agents` 可按 probe 真实反映可用性。
+- 已更新文档和 smoke：
+  - `docs/mvp_smoke_v06.md`
+  - `docs/release_v0.6.0.md`
+  - `CHANGELOG.md`
+  - `scripts/smoke_v06.sh`（支持 `MCP_SUBAGENT_SMOKE_OLLAMA_MODEL` 可选 smoke）。
+- 已通过：
+  - `cargo fmt`
+  - `cargo test -q`（96 passed + 3 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`

@@ -27,5 +27,5 @@ This release marks completion of the v0.6 technical design baseline:
 
 ## Notes
 
-- `Ollama` remains intentionally reserved in this release and is not treated as runnable.
-- `Mock` remains the guaranteed local fallback for development and CI smoke runs.
+- `Ollama` is available as a local runner path and requires a configured local model.
+- `Mock` remains the guaranteed fallback for development and CI smoke runs.
