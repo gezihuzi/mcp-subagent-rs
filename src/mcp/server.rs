@@ -20,6 +20,7 @@ use crate::{
     error::McpSubagentError,
     probe::{ProbeStatus, ProviderProbe, ProviderProber, SystemProviderProber},
     runtime::{
+        claude_runner::{claude_runner_from_env, supports_provider as claude_supports_provider},
         codex_runner::{codex_runner_from_env, supports_provider as codex_supports_provider},
         context::{ContextCompiler, DefaultContextCompiler},
         dispatcher::{DispatchResult, Dispatcher, RunMetadata, RunStatus},
@@ -823,6 +824,9 @@ async fn run_dispatch(
     spec: &crate::spec::AgentSpec,
     request: &RunRequest,
 ) -> std::result::Result<DispatchResult, ErrorData> {
+    if claude_supports_provider(&spec.core.provider) {
+        return run_dispatch_claude(spec, request).await;
+    }
     if codex_supports_provider(&spec.core.provider) {
         return run_dispatch_codex(spec, request).await;
     }
@@ -859,6 +863,45 @@ async fn run_dispatch_codex(
         .compile(spec, request, ResolvedMemory::default())
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     let execution = codex_runner_from_env()
+        .execute(spec, request, &compiled)
+        .await
+        .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+    let summary = compiler
+        .parse_summary(&execution.stdout, &execution.stderr)
+        .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+
+    let (status, error_message) = match execution.terminal_state {
+        RunnerTerminalState::Succeeded => (RunStatus::Succeeded, None),
+        RunnerTerminalState::Failed { message } => (RunStatus::Failed, Some(message)),
+        RunnerTerminalState::TimedOut => (
+            RunStatus::TimedOut,
+            Some("runner exceeded timeout".to_string()),
+        ),
+        RunnerTerminalState::Cancelled => (
+            RunStatus::Cancelled,
+            Some("runner cancelled by request".to_string()),
+        ),
+    };
+    let metadata = build_terminal_metadata(spec, request, status, error_message);
+
+    Ok(DispatchResult {
+        metadata,
+        summary,
+        stdout: execution.stdout,
+        stderr: execution.stderr,
+    })
+}
+
+async fn run_dispatch_claude(
+    spec: &crate::spec::AgentSpec,
+    request: &RunRequest,
+) -> std::result::Result<DispatchResult, ErrorData> {
+    validate_agent_spec(spec).map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+    let compiler = DefaultContextCompiler;
+    let compiled = compiler
+        .compile(spec, request, ResolvedMemory::default())
+        .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+    let execution = claude_runner_from_env()
         .execute(spec, request, &compiled)
         .await
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
@@ -1081,7 +1124,7 @@ mod tests {
     };
 
     fn write_agent_spec(dir: &Path) {
-        write_agent_spec_with_provider(dir, "Claude");
+        write_agent_spec_with_provider(dir, "Ollama");
     }
 
     fn write_codex_agent_spec(dir: &Path) {

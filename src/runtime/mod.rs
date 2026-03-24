@@ -1,3 +1,4 @@
+pub mod claude_runner;
 pub mod codex_runner;
 pub mod context;
 pub mod dispatcher;

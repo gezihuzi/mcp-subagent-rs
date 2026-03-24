@@ -111,3 +111,19 @@
 - Gemini 路径与既有 summary 解析、state 持久化、artifact 输出逻辑已打通，仍会产出 `summary.json/stdout.txt/stderr.txt`。
 - 已新增 `runtime::gemini_runner` 单测：fake binary 成功输出路径、非零退出失败路径、超时路径。
 - 已通过 `cargo test`（25 passed）与 `cargo run -- validate`。
+
+## T-009 Phase2-ClaudeRunnerMVP (Completed 2026-03-24)
+任务：接入最小可用 ClaudeRunner，使 Claude provider 可走真实 CLI 执行链路。
+验收标准：
+1. 新增 `ClaudeRunner`，使用 `claude --print` 非交互执行并支持 `timeout_secs`。
+2. Claude provider 在 `run_agent/spawn_agent` 中走真实 runner，其他未接入 provider 暂保留 mock runner。
+3. 运行结束后仍能产出并持久化 `summary.json/stdout.txt/stderr.txt`。
+4. 新增 runner 级单测（fake claude binary）覆盖成功与失败/超时至少两条路径。
+5. `cargo test` 全量通过。
+完成记录：
+- 已新增 `runtime::claude_runner`：基于 `claude --print` 非交互执行，支持 model/permission-mode 映射与超时处理。
+- MCP server 分发已改为：`Provider::Claude` 走真实 ClaudeRunner，`Provider::Codex` 走 CodexRunner，`Provider::Gemini` 走 GeminiRunner，其他 provider 仍走 mock。
+- Claude 路径与既有 summary 解析、state 持久化、artifact 输出逻辑已打通，仍会产出 `summary.json/stdout.txt/stderr.txt`。
+- 已新增 `runtime::claude_runner` 单测：fake binary 成功输出路径、非零退出失败路径、超时路径。
+- 为避免宿主登录态影响 MCP 单测，测试默认 provider 已切到 `Ollama`（走 mock 路径）。
+- 已通过 `cargo test`（28 passed）与 `cargo run -- validate`。
