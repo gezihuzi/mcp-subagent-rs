@@ -15,10 +15,23 @@
 - 已实现 `runtime::summary` 哨兵 JSON 解析与 ParseFailed 降级。
 - 已新增 9 个单元测试并通过 `cargo test`。
 
-## T-002 Phase1-RuntimeStateMock (Next)
+## T-002 Phase1-RuntimeStateMock (Completed 2026-03-24)
 任务：实现 dispatcher 生命周期状态机与 mock runner。
 验收标准：run 流程可从 RECEIVED 走到 SUCCEEDED/FAILED/TIMED_OUT/CANCELLED，产出 run 元数据和 summary。
+完成记录：
+- 已实现 `runtime::dispatcher`，覆盖完整生命周期状态流与 run metadata。
+- 已实现 `runtime::mock_runner`，可模拟成功/失败/超时/取消四类终态。
+- Dispatcher 在四类终态均返回 summary（失败类会降级为 ParseFailed）。
+- 已新增状态机与 mock runner 测试并通过 `cargo test`。
 
-## T-003 Phase2-MCPStdioListRun
+## T-003 Phase2-MCPStdioListRun (Completed 2026-03-24)
 任务：接入 rmcp stdio 最小 server，暴露 list_agents/run_agent。
 验收标准：`mcp-subagent --mcp` 可启动并响应基础工具调用。
+完成记录：
+- 已接入 `rmcp = 1.2.0`（`server/macros/transport-io`）并实现 `McpSubagentServer`。
+- 已实现 `--mcp` 启动入口（stdio transport）。
+- 已实现并暴露 `list_agents`、`run_agent` 两个 MCP tool。
+- 已新增 `mcp::server` 单测覆盖 `list_agents/run_agent` 返回结构。
+- `cargo test` 通过（17 passed）。
+残余风险：
+- 已覆盖 rmcp duplex 端到端调用；仍未覆盖 Claude Desktop/Cursor 等宿主集成测试。

@@ -1,0 +1,186 @@
+use crate::{
+    error::Result,
+    runtime::summary::{StructuredSummary, SUMMARY_END_SENTINEL, SUMMARY_START_SENTINEL},
+    spec::AgentSpec,
+    types::{CompiledContext, RunRequest},
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunnerTerminalState {
+    Succeeded,
+    Failed { message: String },
+    TimedOut,
+    Cancelled,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunnerExecution {
+    pub terminal_state: RunnerTerminalState,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+pub trait RuntimeRunner: Send + Sync {
+    fn execute(
+        &self,
+        spec: &AgentSpec,
+        request: &RunRequest,
+        compiled: &CompiledContext,
+    ) -> Result<RunnerExecution>;
+}
+
+#[derive(Debug, Clone)]
+pub enum MockRunPlan {
+    Succeeded {
+        summary: StructuredSummary,
+    },
+    Failed {
+        message: String,
+        stdout: String,
+        stderr: String,
+    },
+    TimedOut,
+    Cancelled,
+}
+
+#[derive(Debug, Clone)]
+pub struct MockRunner {
+    plan: MockRunPlan,
+}
+
+impl MockRunner {
+    pub fn new(plan: MockRunPlan) -> Self {
+        Self { plan }
+    }
+}
+
+impl RuntimeRunner for MockRunner {
+    fn execute(
+        &self,
+        _spec: &AgentSpec,
+        _request: &RunRequest,
+        _compiled: &CompiledContext,
+    ) -> Result<RunnerExecution> {
+        let execution = match &self.plan {
+            MockRunPlan::Succeeded { summary } => {
+                let summary_json = serde_json::to_string_pretty(summary)?;
+                RunnerExecution {
+                    terminal_state: RunnerTerminalState::Succeeded,
+                    stdout: format!(
+                        "mock runner completed\n{}\n{}\n{}\n",
+                        SUMMARY_START_SENTINEL, summary_json, SUMMARY_END_SENTINEL
+                    ),
+                    stderr: String::new(),
+                }
+            }
+            MockRunPlan::Failed {
+                message,
+                stdout,
+                stderr,
+            } => RunnerExecution {
+                terminal_state: RunnerTerminalState::Failed {
+                    message: message.clone(),
+                },
+                stdout: stdout.clone(),
+                stderr: stderr.clone(),
+            },
+            MockRunPlan::TimedOut => RunnerExecution {
+                terminal_state: RunnerTerminalState::TimedOut,
+                stdout: "mock runner timed out".to_string(),
+                stderr: String::new(),
+            },
+            MockRunPlan::Cancelled => RunnerExecution {
+                terminal_state: RunnerTerminalState::Cancelled,
+                stdout: String::new(),
+                stderr: "mock runner cancelled".to_string(),
+            },
+        };
+        Ok(execution)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::{
+        runtime::{
+            mock_runner::{MockRunPlan, MockRunner, RunnerTerminalState, RuntimeRunner},
+            summary::{StructuredSummary, VerificationStatus},
+        },
+        spec::{
+            core::{AgentSpecCore, Provider},
+            runtime_policy::{RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
+            AgentSpec,
+        },
+        types::{CompiledContext, RunMode, RunRequest},
+    };
+
+    fn sample_spec() -> AgentSpec {
+        AgentSpec {
+            core: AgentSpecCore {
+                name: "reviewer".to_string(),
+                description: "review code".to_string(),
+                provider: Provider::Codex,
+                model: None,
+                instructions: "review".to_string(),
+                allowed_tools: Vec::new(),
+                disallowed_tools: Vec::new(),
+                skills: Vec::new(),
+                tags: Vec::new(),
+                metadata: Default::default(),
+            },
+            runtime: RuntimePolicy {
+                sandbox: SandboxPolicy::ReadOnly,
+                working_dir_policy: WorkingDirPolicy::InPlace,
+                ..RuntimePolicy::default()
+            },
+            provider_overrides: Default::default(),
+        }
+    }
+
+    fn sample_request() -> RunRequest {
+        RunRequest {
+            task: "review".to_string(),
+            task_brief: None,
+            parent_summary: None,
+            selected_files: Vec::new(),
+            working_dir: PathBuf::from("."),
+            run_mode: RunMode::Sync,
+            acceptance_criteria: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mock_runner_success_wraps_summary_json() {
+        let runner = MockRunner::new(MockRunPlan::Succeeded {
+            summary: StructuredSummary {
+                summary: "ok".to_string(),
+                key_findings: vec!["a".to_string()],
+                artifacts: Vec::new(),
+                open_questions: Vec::new(),
+                next_steps: Vec::new(),
+                exit_code: 0,
+                verification_status: VerificationStatus::Passed,
+                touched_files: Vec::new(),
+            },
+        });
+
+        let execution = runner
+            .execute(
+                &sample_spec(),
+                &sample_request(),
+                &CompiledContext {
+                    system_prefix: String::new(),
+                    injected_prompt: String::new(),
+                    source_manifest: Vec::new(),
+                },
+            )
+            .expect("execute");
+
+        assert_eq!(execution.terminal_state, RunnerTerminalState::Succeeded);
+        assert!(execution
+            .stdout
+            .contains("<<<MCP_SUBAGENT_SUMMARY_JSON_START>>>"));
+    }
+}

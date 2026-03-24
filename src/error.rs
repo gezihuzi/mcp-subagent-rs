@@ -19,6 +19,9 @@ pub enum McpSubagentError {
 
     #[error("spec validation failed: {0}")]
     SpecValidation(String),
+
+    #[error("mcp server error: {0}")]
+    McpServer(String),
 }
 
 pub type Result<T> = std::result::Result<T, McpSubagentError>;
