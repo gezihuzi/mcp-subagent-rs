@@ -1,39 +1,17 @@
 use crate::{
     error::Result,
+    runtime::runner::{AgentRunner, RunnerExecution, RunnerTerminalState},
     runtime::summary::{StructuredSummary, SUMMARY_END_SENTINEL, SUMMARY_START_SENTINEL},
     spec::AgentSpec,
     types::{CompiledContext, RunRequest},
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RunnerTerminalState {
-    Succeeded,
-    Failed { message: String },
-    TimedOut,
-    Cancelled,
-}
-
-#[derive(Debug, Clone)]
-pub struct RunnerExecution {
-    pub terminal_state: RunnerTerminalState,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-pub trait RuntimeRunner: Send + Sync {
-    fn execute(
-        &self,
-        spec: &AgentSpec,
-        request: &RunRequest,
-        compiled: &CompiledContext,
-    ) -> Result<RunnerExecution>;
-}
 
 #[derive(Debug, Clone)]
 pub enum MockRunPlan {
     Succeeded {
         summary: StructuredSummary,
     },
+    SucceededFromRequest,
     Failed {
         message: String,
         stdout: String,
@@ -54,16 +32,29 @@ impl MockRunner {
     }
 }
 
-impl RuntimeRunner for MockRunner {
-    fn execute(
+#[async_trait::async_trait]
+impl AgentRunner for MockRunner {
+    async fn execute(
         &self,
-        _spec: &AgentSpec,
-        _request: &RunRequest,
+        spec: &AgentSpec,
+        request: &RunRequest,
         _compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
         let execution = match &self.plan {
             MockRunPlan::Succeeded { summary } => {
                 let summary_json = serde_json::to_string_pretty(summary)?;
+                RunnerExecution {
+                    terminal_state: RunnerTerminalState::Succeeded,
+                    stdout: format!(
+                        "mock runner completed\n{}\n{}\n{}\n",
+                        SUMMARY_START_SENTINEL, summary_json, SUMMARY_END_SENTINEL
+                    ),
+                    stderr: String::new(),
+                }
+            }
+            MockRunPlan::SucceededFromRequest => {
+                let summary_json =
+                    serde_json::to_string_pretty(&build_mock_summary_from_request(spec, request))?;
                 RunnerExecution {
                     terminal_state: RunnerTerminalState::Succeeded,
                     stdout: format!(
@@ -99,13 +90,38 @@ impl RuntimeRunner for MockRunner {
     }
 }
 
+fn build_mock_summary_from_request(spec: &AgentSpec, request: &RunRequest) -> StructuredSummary {
+    let touched_files = request
+        .selected_files
+        .iter()
+        .map(|file| file.path.display().to_string())
+        .collect::<Vec<_>>();
+
+    StructuredSummary {
+        summary: format!("Mock run completed for task: {}", request.task),
+        key_findings: vec![format!(
+            "Agent `{}` executed through dispatcher mock runner.",
+            spec.core.name
+        )],
+        artifacts: Vec::new(),
+        open_questions: Vec::new(),
+        next_steps: vec![
+            "Replace mock runner with provider runner for production use.".to_string(),
+        ],
+        exit_code: 0,
+        verification_status: crate::runtime::summary::VerificationStatus::Passed,
+        touched_files,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use crate::{
         runtime::{
-            mock_runner::{MockRunPlan, MockRunner, RunnerTerminalState, RuntimeRunner},
+            mock_runner::{MockRunPlan, MockRunner},
+            runner::{AgentRunner, RunnerTerminalState},
             summary::{StructuredSummary, VerificationStatus},
         },
         spec::{
@@ -151,8 +167,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn mock_runner_success_wraps_summary_json() {
+    #[tokio::test]
+    async fn mock_runner_success_wraps_summary_json() {
         let runner = MockRunner::new(MockRunPlan::Succeeded {
             summary: StructuredSummary {
                 summary: "ok".to_string(),
@@ -176,6 +192,7 @@ mod tests {
                     source_manifest: Vec::new(),
                 },
             )
+            .await
             .expect("execute");
 
         assert_eq!(execution.terminal_state, RunnerTerminalState::Succeeded);

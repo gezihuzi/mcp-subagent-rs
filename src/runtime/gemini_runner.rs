@@ -4,9 +4,11 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
+
 use crate::{
     error::{McpSubagentError, Result},
-    runtime::mock_runner::{RunnerExecution, RunnerTerminalState},
+    runtime::runner::{AgentRunner, RunnerExecution, RunnerTerminalState},
     spec::{runtime_policy::SandboxPolicy, AgentSpec},
     types::{CompiledContext, RunRequest},
 };
@@ -101,6 +103,18 @@ impl GeminiRunner {
     }
 }
 
+#[async_trait]
+impl AgentRunner for GeminiRunner {
+    async fn execute(
+        &self,
+        spec: &AgentSpec,
+        request: &RunRequest,
+        compiled: &CompiledContext,
+    ) -> Result<RunnerExecution> {
+        GeminiRunner::execute(self, spec, request, compiled).await
+    }
+}
+
 fn compose_prompt(compiled: &CompiledContext) -> String {
     format!(
         "{}\n\n{}",
@@ -137,7 +151,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        runtime::{gemini_runner::GeminiRunner, mock_runner::RunnerTerminalState},
+        runtime::{gemini_runner::GeminiRunner, runner::RunnerTerminalState},
         spec::{
             core::{AgentSpecCore, Provider},
             runtime_policy::{RuntimePolicy, SandboxPolicy, WorkingDirPolicy},

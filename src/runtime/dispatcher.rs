@@ -8,7 +8,7 @@ use crate::{
     error::Result,
     runtime::{
         context::ContextCompiler,
-        mock_runner::{RunnerTerminalState, RuntimeRunner},
+        runner::{AgentRunner, RunnerTerminalState},
         summary::StructuredSummary,
     },
     spec::{validate::validate_agent_spec, Provider},
@@ -68,13 +68,13 @@ pub struct Dispatcher<C, R> {
 impl<C, R> Dispatcher<C, R>
 where
     C: ContextCompiler,
-    R: RuntimeRunner,
+    R: AgentRunner,
 {
     pub fn new(compiler: C, runner: R) -> Self {
         Self { compiler, runner }
     }
 
-    pub fn run(
+    pub async fn run(
         &self,
         spec: &crate::spec::AgentSpec,
         request: &RunRequest,
@@ -94,7 +94,7 @@ where
 
         tracker.transition(RunStatus::Launching);
         tracker.transition(RunStatus::Running);
-        let execution = self.runner.execute(spec, request, &compiled)?;
+        let execution = self.runner.execute(spec, request, &compiled).await?;
 
         tracker.transition(RunStatus::Collecting);
         tracker.transition(RunStatus::ParsingSummary);
@@ -257,8 +257,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dispatch_reaches_succeeded() {
+    #[tokio::test]
+    async fn dispatch_reaches_succeeded() {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
@@ -268,6 +268,7 @@ mod tests {
 
         let result = dispatcher
             .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .await
             .expect("dispatch run");
 
         assert_eq!(result.metadata.status, RunStatus::Succeeded);
@@ -278,8 +279,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dispatch_reaches_failed_and_keeps_summary() {
+    #[tokio::test]
+    async fn dispatch_reaches_failed_and_keeps_summary() {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Failed {
@@ -291,6 +292,7 @@ mod tests {
 
         let result = dispatcher
             .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .await
             .expect("dispatch run");
 
         assert_eq!(result.metadata.status, RunStatus::Failed);
@@ -305,8 +307,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dispatch_reaches_timed_out() {
+    #[tokio::test]
+    async fn dispatch_reaches_timed_out() {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::TimedOut),
@@ -314,14 +316,15 @@ mod tests {
 
         let result = dispatcher
             .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .await
             .expect("dispatch run");
 
         assert_eq!(result.metadata.status, RunStatus::TimedOut);
         assert_common_lifecycle(&result.metadata.status_history);
     }
 
-    #[test]
-    fn dispatch_reaches_cancelled() {
+    #[tokio::test]
+    async fn dispatch_reaches_cancelled() {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Cancelled),
@@ -329,6 +332,7 @@ mod tests {
 
         let result = dispatcher
             .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .await
             .expect("dispatch run");
 
         assert_eq!(result.metadata.status, RunStatus::Cancelled);

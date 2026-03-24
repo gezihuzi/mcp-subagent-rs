@@ -402,3 +402,24 @@
 - `src/mcp/server.rs` 已移除 dispatch 链实现并清理对应导入。
 - `src/mcp/tools.rs` 已改为通过 `mcp::service::run_dispatch` 调用运行链路。
 - 已通过 `cargo fmt && cargo test`（61 passed）与 `cargo run -- validate`（summary contract template: ok）。
+
+## T-026 V0.6-P0-3-UnifiedAgentRunnerTrait (Completed 2026-03-24)
+任务：按 v0.6 P0-3 统一真实 runner 抽象，让 mock 与真实 provider runner 走同一 trait 与同一 dispatcher 主链。
+验收标准：
+1. 新增统一 runner trait，mock/codex/claude/gemini 全部实现该 trait。
+2. `Dispatcher` 仅依赖统一 trait，不再绑定 `mock_runner` 内部 trait。
+3. `mcp/service.rs` 的 `run_dispatch()` 保留一条主链，不再存在 provider-specific 的执行分叉函数实现。
+4. provider-specific 细节收敛在各 runner 模块内部（命令参数/超时/错误映射等）。
+5. `cargo test` 与 `cargo run -- validate` 通过，行为不回退。
+完成记录：
+- 已新增 `src/runtime/runner.rs`，集中定义：
+  - `AgentRunner`（async trait）
+  - `RunnerExecution`
+  - `RunnerTerminalState`
+  - `Box<T>` 的 trait 转发实现
+- `src/runtime/mock_runner.rs`、`codex_runner.rs`、`claude_runner.rs`、`gemini_runner.rs` 已统一实现 `AgentRunner`。
+- `src/runtime/dispatcher.rs` 已改为异步 `run()`，统一走 `AgentRunner`；对应 dispatcher 测试改为 async 并保持通过。
+- `src/mcp/service.rs` 已重构为单一 dispatch 主链：
+  - workspace 准备 + memory 解析后统一调用 `Dispatcher`
+  - 仅通过 runner 选择器获取具体 runner，不再维护 `run_dispatch_codex/claude/gemini/mock` 分叉函数。
+- 已通过 `cargo fmt && cargo test`（61 passed）与 `cargo run -- validate`（summary contract template: ok）。

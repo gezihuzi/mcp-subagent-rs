@@ -4,9 +4,11 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
+
 use crate::{
     error::{McpSubagentError, Result},
-    runtime::mock_runner::{RunnerExecution, RunnerTerminalState},
+    runtime::runner::{AgentRunner, RunnerExecution, RunnerTerminalState},
     spec::{runtime_policy::SandboxPolicy, AgentSpec},
     types::{CompiledContext, RunRequest},
 };
@@ -101,6 +103,18 @@ impl ClaudeRunner {
     }
 }
 
+#[async_trait]
+impl AgentRunner for ClaudeRunner {
+    async fn execute(
+        &self,
+        spec: &AgentSpec,
+        request: &RunRequest,
+        compiled: &CompiledContext,
+    ) -> Result<RunnerExecution> {
+        ClaudeRunner::execute(self, spec, request, compiled).await
+    }
+}
+
 fn compose_prompt(compiled: &CompiledContext) -> String {
     format!(
         "{}\n\n{}",
@@ -146,7 +160,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        runtime::{claude_runner::ClaudeRunner, mock_runner::RunnerTerminalState},
+        runtime::{claude_runner::ClaudeRunner, runner::RunnerTerminalState},
         spec::{
             core::{AgentSpecCore, Provider},
             runtime_policy::{RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
