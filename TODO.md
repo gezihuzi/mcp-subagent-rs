@@ -96,3 +96,18 @@
 - Codex 路径与既有状态持久化/artifact 逻辑已打通，仍会落盘 `summary.json/stdout.txt/stderr.txt`。
 - 已新增 `runtime::codex_runner` 单测：fake codex binary 成功输出路径、非零退出失败路径。
 - 已通过 `cargo test`（22 passed）与 `cargo run -- validate`。
+
+## T-008 Phase1-GeminiRunnerMVP (Completed 2026-03-24)
+任务：接入最小可用 GeminiRunner，使 Gemini provider 可走真实 CLI 执行链路。
+验收标准：
+1. 新增 `GeminiRunner`，使用 `gemini --prompt` 非交互执行并支持 `timeout_secs`。
+2. Gemini provider 在 `run_agent/spawn_agent` 中走真实 runner，其他未接入 provider 暂保留 mock runner。
+3. 运行结束后仍能产出并持久化 `summary.json/stdout.txt/stderr.txt`。
+4. 新增 runner 级单测（fake gemini binary）覆盖成功与失败/超时至少两条路径。
+5. `cargo test` 全量通过。
+完成记录：
+- 已新增 `runtime::gemini_runner`：基于 `gemini --prompt` 非交互执行，支持 model/approval-mode 映射与超时处理。
+- MCP server 分发已改为：`Provider::Gemini` 走真实 GeminiRunner，`Provider::Codex` 走 CodexRunner，其他 provider 仍走 mock。
+- Gemini 路径与既有 summary 解析、state 持久化、artifact 输出逻辑已打通，仍会产出 `summary.json/stdout.txt/stderr.txt`。
+- 已新增 `runtime::gemini_runner` 单测：fake binary 成功输出路径、非零退出失败路径、超时路径。
+- 已通过 `cargo test`（25 passed）与 `cargo run -- validate`。
