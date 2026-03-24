@@ -209,3 +209,26 @@
   - `spec::validate::*`（absolute/parent traversal/glob misuse/empty inline/valid paths）
   - `runtime::context::validates_default_summary_contract_template`
   - `runtime::context::rejects_template_missing_required_sections`
+
+## T-015 Phase3-ResolvedMemoryAndDedup (Completed 2026-03-24)
+任务：实现真实的 `ResolvedMemory` 解析链路，并覆盖 provider 原生记忆文件不重复内联的去重要求。
+验收标准：
+1. `run_agent/spawn_agent` 不再使用 `ResolvedMemory::default()`，改为按 `runtime.memory_sources` 动态解析。
+2. `AutoProjectMemory` 至少解析 `PROJECT.md` 与 provider 原生记忆文件路径（native passthrough）。
+3. `File/Glob/Inline` memory source 能被解析并注入 `ResolvedMemory`。
+4. 去重策略覆盖“provider 原生文件不重复内联”场景（显式 `File` 命中 native 文件时移除 native passthrough）。
+5. 新增单测覆盖 auto memory、glob 解析、native 去重与空 glob 失败路径。
+6. `cargo test` 全量通过。
+完成记录：
+- 已新增 `runtime::memory` 模块：`resolve_memory` 支持 `AutoProjectMemory/File/Glob/Inline`。
+- `AutoProjectMemory` 已支持：
+  - 项目记忆候选：`PROJECT.md`、`.mcp-subagent/PROJECT.md`
+  - provider native 记忆候选：Claude(`CLAUDE.md/.claude/CLAUDE.md`)、Codex(`AGENTS.md/AGENTS.override.md`)、Gemini(`GEMINI.md`)
+- 已实现 memory 内容读取与截断保护（32KB 上限，保留截断标记）。
+- 已接入 `mcp::server::run_dispatch`，真实 runner 与 mock runner 均使用解析后的 memory。
+- 已新增测试：
+  - `runtime::memory::auto_project_memory_resolves_project_and_native_paths`
+  - `runtime::memory::explicit_file_memory_dedups_native_passthrough`
+  - `runtime::memory::glob_memory_source_inlines_all_matches`
+  - `runtime::memory::glob_memory_source_requires_at_least_one_match`
+- 已通过 `cargo fmt && cargo test`（52 passed）与 `cargo run -- validate`。

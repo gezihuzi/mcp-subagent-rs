@@ -28,6 +28,7 @@ use crate::{
         context::{ContextCompiler, DefaultContextCompiler},
         dispatcher::{DispatchResult, Dispatcher, RunMetadata, RunStatus},
         gemini_runner::{gemini_runner_from_env, supports_provider as gemini_supports_provider},
+        memory::resolve_memory,
         mock_runner::{MockRunPlan, MockRunner, RunnerTerminalState},
         summary::{ArtifactKind, ArtifactRef, StructuredSummary, VerificationStatus},
         workspace::{prepare_workspace, resolve_source_path, PreparedWorkspace, WorkspaceMode},
@@ -929,15 +930,17 @@ async fn run_dispatch(
     let workspace_record = to_workspace_record(&prepared_workspace, lock_key);
     let mut effective_request = request.clone();
     effective_request.working_dir = prepared_workspace.workspace_path;
+    let resolved_memory = resolve_memory(spec, &effective_request)
+        .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
 
     let result = if claude_supports_provider(&spec.core.provider) {
-        run_dispatch_claude(spec, &effective_request, handle_id).await
+        run_dispatch_claude(spec, &effective_request, handle_id, resolved_memory.clone()).await
     } else if codex_supports_provider(&spec.core.provider) {
-        run_dispatch_codex(spec, &effective_request, handle_id).await
+        run_dispatch_codex(spec, &effective_request, handle_id, resolved_memory.clone()).await
     } else if gemini_supports_provider(&spec.core.provider) {
-        run_dispatch_gemini(spec, &effective_request, handle_id).await
+        run_dispatch_gemini(spec, &effective_request, handle_id, resolved_memory.clone()).await
     } else {
-        run_dispatch_mock(spec, &effective_request, handle_id)
+        run_dispatch_mock(spec, &effective_request, handle_id, resolved_memory)
     }?;
 
     Ok(DispatchEnvelope {
@@ -970,6 +973,7 @@ fn run_dispatch_mock(
     spec: &crate::spec::AgentSpec,
     request: &RunRequest,
     handle_id: &str,
+    resolved_memory: ResolvedMemory,
 ) -> std::result::Result<DispatchResult, ErrorData> {
     let mock_summary = build_mock_summary(&spec.core.name, request);
     let dispatcher = Dispatcher::new(
@@ -980,7 +984,7 @@ fn run_dispatch_mock(
     );
 
     let mut dispatched = dispatcher
-        .run(spec, request, ResolvedMemory::default())
+        .run(spec, request, resolved_memory)
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     dispatched.metadata.handle_id = parse_handle_id(handle_id);
     dispatched.metadata.workspace_path = request.working_dir.clone();
@@ -991,11 +995,12 @@ async fn run_dispatch_codex(
     spec: &crate::spec::AgentSpec,
     request: &RunRequest,
     handle_id: &str,
+    resolved_memory: ResolvedMemory,
 ) -> std::result::Result<DispatchResult, ErrorData> {
     validate_agent_spec(spec).map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     let compiler = DefaultContextCompiler;
     let compiled = compiler
-        .compile(spec, request, ResolvedMemory::default())
+        .compile(spec, request, resolved_memory)
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     let execution = codex_runner_from_env()
         .execute(spec, request, &compiled)
@@ -1031,11 +1036,12 @@ async fn run_dispatch_claude(
     spec: &crate::spec::AgentSpec,
     request: &RunRequest,
     handle_id: &str,
+    resolved_memory: ResolvedMemory,
 ) -> std::result::Result<DispatchResult, ErrorData> {
     validate_agent_spec(spec).map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     let compiler = DefaultContextCompiler;
     let compiled = compiler
-        .compile(spec, request, ResolvedMemory::default())
+        .compile(spec, request, resolved_memory)
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     let execution = claude_runner_from_env()
         .execute(spec, request, &compiled)
@@ -1071,11 +1077,12 @@ async fn run_dispatch_gemini(
     spec: &crate::spec::AgentSpec,
     request: &RunRequest,
     handle_id: &str,
+    resolved_memory: ResolvedMemory,
 ) -> std::result::Result<DispatchResult, ErrorData> {
     validate_agent_spec(spec).map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     let compiler = DefaultContextCompiler;
     let compiled = compiler
-        .compile(spec, request, ResolvedMemory::default())
+        .compile(spec, request, resolved_memory)
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     let execution = gemini_runner_from_env()
         .execute(spec, request, &compiled)
