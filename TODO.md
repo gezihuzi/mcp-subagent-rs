@@ -32,11 +32,11 @@
 ## T-003 Phase2-MCPStdioListRun (Completed 2026-03-24)
 
 任务：接入 rmcp stdio 最小 server，暴露 list_agents/run_agent。
-验收标准：`mcp-subagent --mcp` 可启动并响应基础工具调用。
+验收标准：`mcp-subagent mcp` 可启动并响应基础工具调用。
 完成记录：
 
 - 已接入 `rmcp = 1.2.0`（`server/macros/transport-io`）并实现 `McpSubagentServer`。
-- 已实现 `--mcp` 启动入口（stdio transport）。
+- 已实现 `mcp` 子命令启动入口（stdio transport）。
 - 已实现并暴露 `list_agents`、`run_agent` 两个 MCP tool。
 - 已新增 `mcp::server` 单测覆盖 `list_agents/run_agent` 返回结构。
 - `cargo test` 通过（17 passed）。
@@ -840,7 +840,7 @@
 任务：建立“本地可跑”统一验收脚本与文档，收口 v0.6 MVP。
 验收标准：
 
-1. 固化 smoke 流程：`doctor -> validate -> list-agents -> run(mock/codex) -> --mcp`。
+1. 固化 smoke 流程：`doctor -> validate -> list-agents -> run(mock/codex) -> mcp`。
 2. 明确 Claude(Beta)/Gemini(Experimental)/Ollama(Reserved) 状态声明与限制。
 3. README/开发文档更新到当前命令面和配置面。
 4. CI 或本地脚本可一键跑最小验收。
@@ -980,5 +980,45 @@
 - 已通过：
   - `cargo fmt`
   - `cargo test -q`（96 passed + 3 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`
+
+## T-044 V0.7-P0-ProviderMappingAndStdioDocsAlignment (Completed 2026-03-24)
+
+任务：按 v0.7 设计文档收口 P0 映射与文档一致性（Gemini/Claude 参数映射 + stdio 命令面与可核验性声明）。
+验收标准：
+
+1. Gemini runner 不再使用 `--approval-mode plan`，改为 `ReadOnly->default / WorkspaceWrite->auto_edit / FullAccess->yolo`。
+2. Claude runner 不再将 `auto` 作为公开 permission mode；override allowlist 与公开模式对齐。
+3. `doctor/list-agents` 可见 provider 参数映射提示（至少覆盖 Gemini/Claude）。
+4. README 明确 `mcp-subagent mcp` 为 stdio-only MCP 入口，且明确“不能保证零幻觉，只能提高可核验性”。
+5. TODO 中当前命令面不再使用 `--mcp` 作为现行入口描述。
+完成记录：
+
+- 已更新 `src/runtime/runners/gemini.rs`：
+  - `resolve_approval_mode` 映射改为 `default/auto_edit/yolo`。
+- 已更新 `src/runtime/runners/claude.rs`：
+  - `permission_mode` override allowlist 改为：
+    - `default`
+    - `acceptEdits`
+    - `plan`
+    - `dontAsk`
+    - `bypassPermissions`
+  - 默认映射中 `FullAccess` 改为 `bypassPermissions`，移除旧 `auto` 映射。
+- 已更新 `src/probe/mod.rs`：
+  - 新增 provider CLI 映射说明 notes；
+  - `doctor/list-agents` 通过现有 notes 输出路径自动展示映射提示。
+- 已新增/更新单测：
+  - `gemini_runner_maps_readonly_to_default_approval_mode`
+  - `claude_runner_rejects_legacy_auto_permission_mode_override`
+  - `claude_runner_maps_full_access_to_bypass_permissions`
+  - `probe::tests::gemini_mapping_notes_reflect_default_auto_edit_yolo`
+  - `probe::tests::claude_mapping_notes_include_public_permission_modes`
+- 已更新文档：
+  - `README.md` 新增 `MCP Transport`（stdio-only）和 `Verification Model`（非零幻觉承诺）说明；
+  - `TODO.md` 中现行命令面描述统一改为 `mcp` 子命令。
+- 已通过：
+  - `cargo fmt`
+  - `cargo test -q`（101 passed + 3 passed + 3 integration passed）
   - `cargo run -- --agents-dir examples/agents validate`
   - `./scripts/smoke_v06.sh`

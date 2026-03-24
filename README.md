@@ -27,6 +27,11 @@ mcp-subagent cancel <handle-id> [--json]
 mcp-subagent artifact <handle-id> [--path ... | --kind summary|log|patch|json] [--json]
 ```
 
+## MCP Transport
+
+- Current implementation is `stdio` only (`mcp-subagent mcp`).
+- HTTP transport is not implemented in current build.
+
 Global flags:
 
 - `--config <path>`
@@ -68,6 +73,10 @@ Optional local run with Ollama:
 
 - set `provider = "Ollama"` and `core.model = "<local-model>"` in agent spec
 - or set `MCP_SUBAGENT_OLLAMA_MODEL=<local-model>`
+
+## Verification Model
+
+This runtime cannot guarantee zero hallucination. It improves verifiability by enforcing structured summary output and explicit artifacts (`verification_status`, `touched_files`, `plan_refs`, `artifact_index`), while keeping agent context isolated by policy.
 
 ## License
 

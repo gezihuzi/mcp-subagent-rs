@@ -146,9 +146,12 @@ fn resolve_permission_mode(spec: &AgentSpec) -> Result<String> {
         .as_ref()
         .and_then(|override_cfg| override_cfg.permission_mode.as_ref())
     {
-        if !matches!(mode.as_str(), "plan" | "acceptEdits" | "auto") {
+        if !matches!(
+            mode.as_str(),
+            "default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions"
+        ) {
             return Err(McpSubagentError::SpecValidation(format!(
-                "unsupported Claude permission_mode override `{mode}`; supported: plan|acceptEdits|auto"
+                "unsupported Claude permission_mode override `{mode}`; supported: default|acceptEdits|plan|dontAsk|bypassPermissions"
             )));
         }
         return Ok(mode.clone());
@@ -158,7 +161,7 @@ fn resolve_permission_mode(spec: &AgentSpec) -> Result<String> {
         ApprovalPolicy::ProviderDefault => match spec.runtime.sandbox {
             SandboxPolicy::ReadOnly => "plan",
             SandboxPolicy::WorkspaceWrite => "acceptEdits",
-            SandboxPolicy::FullAccess => "auto",
+            SandboxPolicy::FullAccess => "bypassPermissions",
         },
         ApprovalPolicy::DenyByDefault => "plan",
         ApprovalPolicy::AutoAcceptEdits => "acceptEdits",
@@ -444,6 +447,100 @@ sleep 2
                 .contains("unsupported Claude permission_mode"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn claude_runner_rejects_legacy_auto_permission_mode_override() {
+        let dir = tempdir().expect("tempdir");
+        let mut spec = sample_spec(30);
+        spec.provider_overrides = ProviderOverrides {
+            claude: Some(ClaudeOverrides {
+                permission_mode: Some("auto".to_string()),
+            }),
+            codex: None,
+            gemini: None,
+        };
+        let runner = ClaudeRunner::new(PathBuf::from("claude"));
+
+        let err = runner
+            .execute(
+                &spec,
+                &sample_request(dir.path().to_path_buf()),
+                &CompiledContext {
+                    system_prefix: "sys".to_string(),
+                    injected_prompt: "prompt".to_string(),
+                    source_manifest: Vec::new(),
+                },
+            )
+            .await
+            .expect_err("legacy auto permission_mode should fail");
+        assert!(
+            err.to_string()
+                .contains("supported: default|acceptEdits|plan|dontAsk|bypassPermissions"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_runner_maps_full_access_to_bypass_permissions() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("fake-claude-perm.sh");
+        let script = r#"#!/bin/sh
+set -eu
+permission_mode=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --permission-mode)
+      permission_mode="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+[ "$permission_mode" = "bypassPermissions" ] || {
+  echo "unexpected permission mode: $permission_mode" >&2
+  exit 33
+}
+cat <<'EOF'
+<<<MCP_SUBAGENT_SUMMARY_JSON_START>>>
+{
+  "summary": "ok",
+  "key_findings": [],
+  "artifacts": [],
+  "open_questions": [],
+  "next_steps": [],
+  "exit_code": 0,
+  "verification_status": "Passed",
+  "touched_files": []
+}
+<<<MCP_SUBAGENT_SUMMARY_JSON_END>>>
+EOF
+exit 0
+"#;
+        fs::write(&script_path, script).expect("write script");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod");
+
+        let mut spec = sample_spec(30);
+        spec.runtime.sandbox = SandboxPolicy::FullAccess;
+        let runner = ClaudeRunner::new(script_path);
+        let execution = runner
+            .execute(
+                &spec,
+                &sample_request(dir.path().to_path_buf()),
+                &CompiledContext {
+                    system_prefix: "sys".to_string(),
+                    injected_prompt: "prompt".to_string(),
+                    source_manifest: Vec::new(),
+                },
+            )
+            .await
+            .expect("execute");
+
+        assert_eq!(execution.terminal_state, RunnerTerminalState::Succeeded);
     }
 
     #[tokio::test]

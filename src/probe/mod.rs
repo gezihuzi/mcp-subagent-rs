@@ -130,6 +130,9 @@ impl ProviderProber for SystemProviderProber {
         let validated_flags = validated_flags_for_provider(provider);
 
         let mut notes = vec![provider_tier_note(provider).to_string()];
+        for mapping_note in provider_cli_mapping_notes(provider) {
+            notes.push((*mapping_note).to_string());
+        }
         if capabilities.experimental {
             notes
                 .push("provider support is experimental and may change across CLI versions".into());
@@ -263,6 +266,21 @@ fn validated_flags_for_provider(provider: &Provider) -> Vec<String> {
     flags.iter().map(|flag| flag.to_string()).collect()
 }
 
+fn provider_cli_mapping_notes(provider: &Provider) -> &'static [&'static str] {
+    match provider {
+        Provider::Mock => &[],
+        Provider::Claude => &[
+            "permission mapping: ReadOnly->plan, WorkspaceWrite->acceptEdits, FullAccess->bypassPermissions",
+            "permission_mode override allowlist: default|acceptEdits|plan|dontAsk|bypassPermissions",
+        ],
+        Provider::Codex => &[],
+        Provider::Gemini => &[
+            "approval mapping: ReadOnly->default, WorkspaceWrite->auto_edit, FullAccess->yolo",
+        ],
+        Provider::Ollama => &[],
+    }
+}
+
 fn provider_tier_note(provider: &Provider) -> &'static str {
     match provider {
         Provider::Mock => "provider_tier: mock (stable local debug path)",
@@ -360,7 +378,11 @@ fn is_likely_version_line(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_probe_status, is_likely_version_line, ProbeStatus};
+    use crate::spec::Provider;
+
+    use super::{
+        infer_probe_status, is_likely_version_line, provider_cli_mapping_notes, ProbeStatus,
+    };
 
     #[test]
     fn classify_permission_denied() {
@@ -394,5 +416,21 @@ mod tests {
     fn version_line_heuristic_rejects_error_text() {
         assert!(is_likely_version_line("codex-cli 0.114.0"));
         assert!(!is_likely_version_line("Error: failed to open file"));
+    }
+
+    #[test]
+    fn gemini_mapping_notes_reflect_default_auto_edit_yolo() {
+        let joined = provider_cli_mapping_notes(&Provider::Gemini).join(" ");
+        assert!(joined.contains("ReadOnly->default"));
+        assert!(joined.contains("WorkspaceWrite->auto_edit"));
+        assert!(joined.contains("FullAccess->yolo"));
+    }
+
+    #[test]
+    fn claude_mapping_notes_include_public_permission_modes() {
+        let joined = provider_cli_mapping_notes(&Provider::Claude).join(" ");
+        assert!(joined.contains("bypassPermissions"));
+        assert!(joined.contains("dontAsk"));
+        assert!(joined.contains("acceptEdits"));
     }
 }

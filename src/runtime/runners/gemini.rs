@@ -131,7 +131,7 @@ fn resolve_approval_mode(spec: &AgentSpec) -> Result<&'static str> {
     match spec.runtime.approval {
         ApprovalPolicy::ProviderDefault | ApprovalPolicy::DenyByDefault => {
             match spec.runtime.sandbox {
-                SandboxPolicy::ReadOnly => Ok("plan"),
+                SandboxPolicy::ReadOnly => Ok("default"),
                 SandboxPolicy::WorkspaceWrite => Ok("auto_edit"),
                 SandboxPolicy::FullAccess => Ok("yolo"),
             }
@@ -258,6 +258,66 @@ exit 0
 
         assert_eq!(execution.terminal_state, RunnerTerminalState::Succeeded);
         assert!(execution.stdout.contains("MCP_SUBAGENT_SUMMARY_JSON_START"));
+    }
+
+    #[tokio::test]
+    async fn gemini_runner_maps_readonly_to_default_approval_mode() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("fake-gemini-approval.sh");
+        let script = r#"#!/bin/sh
+set -eu
+approval_mode=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --approval-mode)
+      approval_mode="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+[ "$approval_mode" = "default" ] || {
+  echo "unexpected approval mode: $approval_mode" >&2
+  exit 31
+}
+cat <<'EOF'
+<<<MCP_SUBAGENT_SUMMARY_JSON_START>>>
+{
+  "summary": "ok",
+  "key_findings": [],
+  "artifacts": [],
+  "open_questions": [],
+  "next_steps": [],
+  "exit_code": 0,
+  "verification_status": "Passed",
+  "touched_files": []
+}
+<<<MCP_SUBAGENT_SUMMARY_JSON_END>>>
+EOF
+exit 0
+"#;
+        fs::write(&script_path, script).expect("write script");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod");
+
+        let runner = GeminiRunner::new(script_path);
+        let execution = runner
+            .execute(
+                &sample_spec(30),
+                &sample_request(dir.path().to_path_buf()),
+                &CompiledContext {
+                    system_prefix: "sys".to_string(),
+                    injected_prompt: "prompt".to_string(),
+                    source_manifest: Vec::new(),
+                },
+            )
+            .await
+            .expect("execute");
+
+        assert_eq!(execution.terminal_state, RunnerTerminalState::Succeeded);
     }
 
     #[tokio::test]
