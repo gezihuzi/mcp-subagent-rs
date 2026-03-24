@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -21,6 +21,10 @@ use uuid::Uuid;
 
 use crate::{
     error::McpSubagentError,
+    mcp::artifacts::{
+        build_runtime_artifacts, read_artifact_from_disk, run_artifacts_dir, run_dir,
+        sanitize_relative_artifact_path,
+    },
     probe::{ProbeStatus, ProviderProbe, ProviderProber, SystemProviderProber},
     runtime::{
         claude_runner::{claude_runner_from_env, supports_provider as claude_supports_provider},
@@ -30,7 +34,7 @@ use crate::{
         gemini_runner::{gemini_runner_from_env, supports_provider as gemini_supports_provider},
         memory::resolve_memory,
         mock_runner::{MockRunPlan, MockRunner, RunnerTerminalState},
-        summary::{ArtifactKind, ArtifactRef, StructuredSummary, VerificationStatus},
+        summary::{StructuredSummary, VerificationStatus},
         workspace::{prepare_workspace, resolve_source_path, PreparedWorkspace, WorkspaceMode},
     },
     spec::{
@@ -723,39 +727,8 @@ fn default_state_dir() -> PathBuf {
     PathBuf::from(".mcp-subagent/state")
 }
 
-fn run_root_dir(state_dir: &Path) -> PathBuf {
-    state_dir.join("runs")
-}
-
-fn run_dir(state_dir: &Path, handle_id: &str) -> PathBuf {
-    run_root_dir(state_dir).join(handle_id)
-}
-
 fn run_meta_path(state_dir: &Path, handle_id: &str) -> PathBuf {
     run_dir(state_dir, handle_id).join("run.json")
-}
-
-fn run_artifacts_dir(state_dir: &Path, handle_id: &str) -> PathBuf {
-    run_dir(state_dir, handle_id).join("artifacts")
-}
-
-fn sanitize_relative_artifact_path(path: &str) -> Option<PathBuf> {
-    let original = Path::new(path);
-    if path.is_empty() || original.is_absolute() {
-        return None;
-    }
-
-    let mut sanitized = PathBuf::new();
-    for component in original.components() {
-        match component {
-            Component::Normal(segment) => sanitized.push(segment),
-            _ => return None,
-        }
-    }
-    if sanitized.as_os_str().is_empty() {
-        return None;
-    }
-    Some(sanitized)
 }
 
 fn persist_run_record(
@@ -911,28 +884,6 @@ fn write_run_log_file(path: &Path, content: &str) -> std::result::Result<(), Err
     })
 }
 
-fn read_artifact_from_disk(
-    state_dir: &Path,
-    handle_id: &str,
-    artifact_path: &str,
-) -> std::result::Result<Option<String>, ErrorData> {
-    let rel_path = sanitize_relative_artifact_path(artifact_path).ok_or_else(|| {
-        ErrorData::invalid_params(format!("invalid artifact path: {artifact_path}"), None)
-    })?;
-    let full_path = run_artifacts_dir(state_dir, handle_id).join(rel_path);
-    if !full_path.exists() {
-        return Ok(None);
-    }
-
-    let content = fs::read_to_string(&full_path).map_err(|err| {
-        ErrorData::internal_error(
-            format!("failed to read artifact {}: {err}", full_path.display()),
-            None,
-        )
-    })?;
-    Ok(Some(content))
-}
-
 fn build_capability_notes(probe: &ProviderProbe) -> Vec<String> {
     let mut notes = Vec::new();
     notes.push(format!("probe_status: {}", probe.status));
@@ -1066,15 +1017,6 @@ fn map_summary_output(summary: &StructuredSummary) -> SummaryOutput {
         exit_code: summary.exit_code,
         verification_status: format!("{:?}", summary.verification_status),
         touched_files: summary.touched_files.clone(),
-    }
-}
-
-fn map_artifact_output(artifact: &ArtifactRef) -> ArtifactOutput {
-    ArtifactOutput {
-        path: artifact.path.display().to_string(),
-        kind: format!("{:?}", artifact.kind),
-        description: artifact.description.clone(),
-        media_type: artifact.media_type.clone(),
     }
 }
 
@@ -1336,88 +1278,6 @@ fn build_mock_summary(agent_name: &str, request: &RunRequest) -> StructuredSumma
         verification_status: VerificationStatus::Passed,
         touched_files,
     }
-}
-
-fn build_runtime_artifacts(
-    summary: &StructuredSummary,
-    stdout: &str,
-    stderr: &str,
-    workspace_root: Option<&Path>,
-) -> (Vec<ArtifactOutput>, HashMap<String, String>) {
-    let mut index = Vec::new();
-    let mut payloads = HashMap::new();
-
-    if let Some(root) = workspace_root {
-        for artifact in &summary.artifacts {
-            let Some(content) = read_declared_artifact_content(root, &artifact.path) else {
-                continue;
-            };
-            let artifact_path = artifact.path.display().to_string();
-            index.push(map_artifact_output(artifact));
-            payloads.insert(artifact_path, content);
-        }
-    }
-
-    if let Ok(summary_json) = serde_json::to_string_pretty(summary) {
-        index.push(ArtifactOutput {
-            path: "summary.json".to_string(),
-            kind: format!("{:?}", ArtifactKind::SummaryJson),
-            description: "Structured summary JSON".to_string(),
-            media_type: Some("application/json".to_string()),
-        });
-        payloads.insert("summary.json".to_string(), summary_json);
-    }
-
-    if !stdout.is_empty() {
-        index.push(ArtifactOutput {
-            path: "stdout.txt".to_string(),
-            kind: format!("{:?}", ArtifactKind::StdoutText),
-            description: "Captured stdout".to_string(),
-            media_type: Some("text/plain".to_string()),
-        });
-        payloads.insert("stdout.txt".to_string(), stdout.to_string());
-    }
-
-    if !stderr.is_empty() {
-        index.push(ArtifactOutput {
-            path: "stderr.txt".to_string(),
-            kind: format!("{:?}", ArtifactKind::StderrText),
-            description: "Captured stderr".to_string(),
-            media_type: Some("text/plain".to_string()),
-        });
-        payloads.insert("stderr.txt".to_string(), stderr.to_string());
-    }
-
-    (index, payloads)
-}
-
-fn read_declared_artifact_content(workspace_root: &Path, artifact_path: &Path) -> Option<String> {
-    let resolved = resolve_artifact_path_in_workspace(workspace_root, artifact_path)?;
-    if !resolved.is_file() {
-        return None;
-    }
-    fs::read_to_string(&resolved).ok()
-}
-
-fn resolve_artifact_path_in_workspace(
-    workspace_root: &Path,
-    artifact_path: &Path,
-) -> Option<PathBuf> {
-    if artifact_path.as_os_str().is_empty() {
-        return None;
-    }
-
-    let combined = if artifact_path.is_absolute() {
-        artifact_path.to_path_buf()
-    } else {
-        workspace_root.join(artifact_path)
-    };
-    let canonical = combined.canonicalize().ok()?;
-    let canonical_workspace = workspace_root.canonicalize().ok()?;
-    if !canonical.starts_with(&canonical_workspace) {
-        return None;
-    }
-    Some(canonical)
 }
 
 fn failed_summary(message: String) -> StructuredSummary {

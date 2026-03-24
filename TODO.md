@@ -315,3 +315,21 @@
 - `src/mcp/mod.rs` 已注册 `pub mod dto;`。
 - `src/mcp/server.rs` 已移除本地 DTO 定义并 `pub use crate::mcp::dto::*` 保持兼容导出。
 - 已通过 `cargo fmt && cargo test`（61 passed）与 `cargo run -- validate`。
+
+## T-021 V0.6-P0-2b-McpServerArtifactSplit (Completed 2026-03-24)
+任务：推进 v0.6 P0-2 的第二步，将 artifact/path 相关逻辑从 `mcp/server.rs` 抽离到独立模块，继续降低 server 文件职责密度。
+验收标准：
+1. 新增/完善 `src/mcp/artifacts.rs`，集中承载 run 路径、artifact 路径净化、artifact 读取和 runtime artifact 构建逻辑。
+2. `src/mcp/server.rs` 不再保留上述重复实现，统一调用 `mcp::artifacts`。
+3. 现有工具行为不回退（`run_agent/spawn_agent/read_agent_artifact` 路径保持可用）。
+4. 相关单测持续通过，特别是声明 artifact 持久化可读场景。
+5. `cargo test` 与 `cargo run -- validate` 通过。
+完成记录：
+- 已新增 `src/mcp/artifacts.rs`，落地：
+  - `run_root_dir/run_dir/run_artifacts_dir`
+  - `sanitize_relative_artifact_path`
+  - `read_artifact_from_disk`
+  - `build_runtime_artifacts` 及其 workspace artifact 解析辅助函数
+- `src/mcp/mod.rs` 已注册 `pub(crate) mod artifacts;`。
+- `src/mcp/server.rs` 已删除本地重复函数，改为统一引用 `mcp::artifacts`。
+- 已通过 `cargo test`（61 passed）与 `cargo run -- validate`（summary contract template: ok）。
