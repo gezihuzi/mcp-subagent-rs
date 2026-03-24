@@ -81,3 +81,18 @@
 - `run_agent/spawn_agent` 已新增 provider 可用性前置校验，不可用时返回明确错误。
 - 已新增测试 `list_agents_marks_provider_unavailable` 与 `run_agent_rejects_unavailable_provider`，并将现有 MCP 测试切到可控 probe。
 - 已通过 `cargo fmt && cargo test`（20 passed）与 `cargo run -- validate`。
+
+## T-007 Phase1-CodexRunnerMVP (Completed 2026-03-24)
+任务：接入最小可用 CodexRunner，使 Codex provider 可走真实 CLI 执行链路。
+验收标准：
+1. 新增 `CodexRunner`，使用 `codex exec` 非交互执行并支持 `timeout_secs`。
+2. Codex provider 在 `run_agent/spawn_agent` 中走真实 runner，非 Codex provider 暂保留 mock runner。
+3. 运行结束后仍能产出并持久化 `summary.json/stdout.txt/stderr.txt`。
+4. 新增 runner 级单测（fake codex binary）覆盖成功与失败/超时至少两条路径。
+5. `cargo test` 全量通过。
+完成记录：
+- 已新增 `runtime::codex_runner`：基于 `codex exec` 非交互执行，支持 sandbox/model/reasoning 配置透传和超时处理。
+- MCP server 分发已改为：`Provider::Codex` 走真实 CodexRunner，其他 provider 继续走 mock dispatcher，避免一次性引入多 provider 风险。
+- Codex 路径与既有状态持久化/artifact 逻辑已打通，仍会落盘 `summary.json/stdout.txt/stderr.txt`。
+- 已新增 `runtime::codex_runner` 单测：fake codex binary 成功输出路径、非零退出失败路径。
+- 已通过 `cargo test`（22 passed）与 `cargo run -- validate`。
