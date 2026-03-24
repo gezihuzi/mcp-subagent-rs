@@ -138,7 +138,7 @@ run_cmd run review_runner \
 grep -Eq '"status"[[:space:]]*:[[:space:]]*"Succeeded"' "$TMP_DIR/run_review.json"
 grep -Eq '"path"[[:space:]]*:[[:space:]]*"review/evidence.json"' "$TMP_DIR/run_review.json"
 REVIEW_HANDLE="$(extract_handle_id <"$TMP_DIR/run_review.json")"
-run_cmd artifact "$REVIEW_HANDLE" --path review/evidence.json --json >"$TMP_DIR/review_evidence.json"
+run_cmd artifact "$REVIEW_HANDLE" --path review/evidence.json >"$TMP_DIR/review_evidence.json"
 grep -Eq '"dual_review_satisfied"[[:space:]]*:[[:space:]]*true' "$TMP_DIR/review_evidence.json"
 
 echo "[smoke-v07] run codex (optional)"
