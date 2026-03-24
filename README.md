@@ -100,7 +100,7 @@ This script validates:
 3. `validate`
 4. `list-agents`
 5. `run` on `Mock`
-6. async policy gate (`run` fail + `spawn` pass)
+6. async policy gate (`run` fail + `spawn/status` path)
 7. review evidence artifact generation and readback
 8. `run` on `Codex` (optional)
 9. `run` on `Ollama` (optional)

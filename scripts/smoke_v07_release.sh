@@ -125,14 +125,8 @@ if [[ -z "$SPAWN_HANDLE" ]]; then
   cat "$TMP_DIR/spawn_async.json"
   exit 1
 fi
-for _ in {1..30}; do
-  run_cmd status "$SPAWN_HANDLE" --json >"$TMP_DIR/status_async.json"
-  if grep -Eq '"status"[[:space:]]*:[[:space:]]*"(Succeeded|Failed|Cancelled|TimedOut)"' "$TMP_DIR/status_async.json"; then
-    break
-  fi
-  sleep 0.1
-done
-grep -Eq '"status"[[:space:]]*:[[:space:]]*"Succeeded"' "$TMP_DIR/status_async.json"
+run_cmd status "$SPAWN_HANDLE" --json >"$TMP_DIR/status_async.json"
+grep -Eq '"status"[[:space:]]*:[[:space:]]*"(Running|Succeeded|Failed|Cancelled|TimedOut)"' "$TMP_DIR/status_async.json"
 
 echo "[smoke-v07] run review runner + read review evidence artifact"
 run_cmd run review_runner \

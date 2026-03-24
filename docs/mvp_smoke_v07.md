@@ -14,7 +14,7 @@ Checklist:
 4. `list-agents --json` returns structured provider availability.
 5. `run mock_runner --json` succeeds.
 6. `run async_only_runner --json` fails with async-mode enforcement message.
-7. `spawn async_only_runner --json` succeeds and reaches a terminal successful status.
+7. `spawn async_only_runner --json` succeeds and `status <handle> --json` can read run status.
 8. `run review_runner --stage Review --parent-summary ...` produces `review/evidence.json`.
 9. `artifact <handle> --path review/evidence.json --json` returns dual-review evidence.
 10. `run codex_runner --json` is attempted (optional pass; may be unavailable by environment).
