@@ -71,6 +71,14 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
             "  version: {}\n",
             probe.version.as_deref().unwrap_or("unknown")
         ));
+        if probe.validated_flags.is_empty() {
+            out.push_str("  validated_flags: []\n");
+        } else {
+            out.push_str("  validated_flags:\n");
+            for flag in &probe.validated_flags {
+                out.push_str(&format!("    - {flag}\n"));
+            }
+        }
         if probe.notes.is_empty() {
             out.push_str("  notes: []\n");
         } else {
@@ -135,6 +143,7 @@ mod tests {
                 supports_native_project_memory: false,
                 experimental: matches!(provider, crate::spec::Provider::Gemini),
             },
+            validated_flags: Vec::new(),
             notes: Vec::new(),
         }
     }
@@ -166,6 +175,7 @@ instructions = "review"
                 supports_native_project_memory: true,
                 experimental: false,
             },
+            validated_flags: vec!["--sandbox".to_string(), "--ask-for-approval".to_string()],
             notes: vec!["binary missing".to_string()],
         });
         let report =
@@ -178,6 +188,8 @@ instructions = "review"
         assert!(rendered.contains("agents_loaded: 1"));
         assert!(rendered.contains("provider: Codex"));
         assert!(rendered.contains("status: MissingBinary"));
+        assert!(rendered.contains("validated_flags"));
+        assert!(rendered.contains("--ask-for-approval"));
         assert!(rendered.contains("binary missing"));
     }
 }

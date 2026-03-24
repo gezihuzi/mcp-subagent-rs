@@ -9,7 +9,10 @@ use async_trait::async_trait;
 use crate::{
     error::{McpSubagentError, Result},
     runtime::runner::{AgentRunner, RunnerExecution, RunnerTerminalState},
-    spec::{runtime_policy::SandboxPolicy, AgentSpec},
+    spec::{
+        runtime_policy::{ApprovalPolicy, SandboxPolicy},
+        AgentSpec,
+    },
     types::{CompiledContext, RunRequest},
 };
 
@@ -39,6 +42,7 @@ impl ClaudeRunner {
     ) -> Result<RunnerExecution> {
         let prompt = compose_prompt(compiled);
         let timeout = Duration::from_secs(spec.runtime.timeout_secs.max(1));
+        let permission_mode = resolve_permission_mode(spec)?;
 
         let mut command = tokio::process::Command::new(&self.executable);
         command
@@ -46,7 +50,7 @@ impl ClaudeRunner {
             .arg("--output-format")
             .arg("text")
             .arg("--permission-mode")
-            .arg(resolve_permission_mode(spec))
+            .arg(permission_mode)
             .arg("--add-dir")
             .arg(&request.working_dir)
             .arg(&prompt)
@@ -123,21 +127,38 @@ fn compose_prompt(compiled: &CompiledContext) -> String {
     )
 }
 
-fn resolve_permission_mode(spec: &AgentSpec) -> String {
+fn resolve_permission_mode(spec: &AgentSpec) -> Result<String> {
     if let Some(mode) = spec
         .provider_overrides
         .claude
         .as_ref()
         .and_then(|override_cfg| override_cfg.permission_mode.as_ref())
     {
-        return mode.clone();
+        if !matches!(mode.as_str(), "plan" | "acceptEdits" | "auto") {
+            return Err(McpSubagentError::SpecValidation(format!(
+                "unsupported Claude permission_mode override `{mode}`; supported: plan|acceptEdits|auto"
+            )));
+        }
+        return Ok(mode.clone());
     }
 
-    match spec.runtime.sandbox {
-        SandboxPolicy::ReadOnly => "plan".to_string(),
-        SandboxPolicy::WorkspaceWrite => "acceptEdits".to_string(),
-        SandboxPolicy::FullAccess => "auto".to_string(),
-    }
+    let mapped = match spec.runtime.approval {
+        ApprovalPolicy::ProviderDefault => match spec.runtime.sandbox {
+            SandboxPolicy::ReadOnly => "plan",
+            SandboxPolicy::WorkspaceWrite => "acceptEdits",
+            SandboxPolicy::FullAccess => "auto",
+        },
+        ApprovalPolicy::DenyByDefault => "plan",
+        ApprovalPolicy::AutoAcceptEdits => "acceptEdits",
+        ApprovalPolicy::Ask => {
+            return Err(McpSubagentError::SpecValidation(
+                "Claude approval policy `Ask` is not yet validated for current CLI mapping"
+                    .to_string(),
+            ))
+        }
+    };
+
+    Ok(mapped.to_string())
 }
 
 pub fn supports_provider(provider: &crate::spec::Provider) -> bool {
@@ -163,7 +184,8 @@ mod tests {
         runtime::{claude_runner::ClaudeRunner, runner::RunnerTerminalState},
         spec::{
             core::{AgentSpecCore, Provider},
-            runtime_policy::{RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
+            provider_overrides::{ClaudeOverrides, ProviderOverrides},
+            runtime_policy::{ApprovalPolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
             AgentSpec,
         },
         types::{CompiledContext, RunMode, RunRequest},
@@ -316,5 +338,62 @@ sleep 2
             .expect("execute");
 
         assert_eq!(execution.terminal_state, RunnerTerminalState::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn claude_runner_rejects_invalid_permission_mode_override() {
+        let dir = tempdir().expect("tempdir");
+        let mut spec = sample_spec(30);
+        spec.provider_overrides = ProviderOverrides {
+            claude: Some(ClaudeOverrides {
+                permission_mode: Some("unknown_mode".to_string()),
+            }),
+            codex: None,
+            gemini: None,
+        };
+        let runner = ClaudeRunner::new(PathBuf::from("claude"));
+
+        let err = runner
+            .execute(
+                &spec,
+                &sample_request(dir.path().to_path_buf()),
+                &CompiledContext {
+                    system_prefix: "sys".to_string(),
+                    injected_prompt: "prompt".to_string(),
+                    source_manifest: Vec::new(),
+                },
+            )
+            .await
+            .expect_err("invalid permission_mode should fail");
+        assert!(
+            err.to_string()
+                .contains("unsupported Claude permission_mode"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_runner_rejects_unvalidated_approval_policy() {
+        let dir = tempdir().expect("tempdir");
+        let mut spec = sample_spec(30);
+        spec.runtime.approval = ApprovalPolicy::Ask;
+        let runner = ClaudeRunner::new(PathBuf::from("claude"));
+
+        let err = runner
+            .execute(
+                &spec,
+                &sample_request(dir.path().to_path_buf()),
+                &CompiledContext {
+                    system_prefix: "sys".to_string(),
+                    injected_prompt: "prompt".to_string(),
+                    source_manifest: Vec::new(),
+                },
+            )
+            .await
+            .expect_err("Ask should be rejected until validated");
+        assert!(
+            err.to_string().contains("not yet validated"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -423,3 +423,26 @@
   - workspace 准备 + memory 解析后统一调用 `Dispatcher`
   - 仅通过 runner 选择器获取具体 runner，不再维护 `run_dispatch_codex/claude/gemini/mock` 分叉函数。
 - 已通过 `cargo fmt && cargo test`（61 passed）与 `cargo run -- validate`（summary contract template: ok）。
+
+## T-027 V0.6-P0-4-ProviderMappingGuardAndDoctorFlags (Completed 2026-03-24)
+任务：推进 v0.6 P0-4，校准 provider 参数映射的失败策略并把已验证 flag 组合显式暴露到 doctor/probe 输出。
+验收标准：
+1. provider 映射遇到未验证/不支持的参数值时，返回结构化错误而非静默降级。
+2. Codex/Claude/Gemini 的 approval/permission 映射逻辑具备“显式支持范围”与失败保护。
+3. `ProviderProbe` 增加已验证 flag 集合，`doctor` 报告可直接查看每个 provider 的 flag 组合。
+4. 新增测试覆盖参数映射失败路径与 doctor flag 输出。
+5. `cargo test` 与 `cargo run -- validate` 通过。
+完成记录：
+- 已新增严格映射保护：
+  - `codex_runner`: `runtime.approval` 仅接受已验证映射；未验证策略（如 `Ask`）立即返回 `SpecValidation` 错误。
+  - `claude_runner`: `permission_mode` override 增加 allowlist 校验；`runtime.approval=Ask` 明确拒绝并返回结构化错误。
+  - `gemini_runner`: `runtime.approval` 未验证策略（如 `Ask`/`AutoAcceptEdits`）明确拒绝。
+- 已在 `probe::ProviderProbe` 增加 `validated_flags` 字段，并由系统 probe 按 provider 填充已验证 CLI flag 集合。
+- `doctor` 渲染已新增 `validated_flags` 输出段，便于本地直接核对映射能力。
+- 已新增测试：
+  - `codex_runner_rejects_unvalidated_approval_policy`
+  - `claude_runner_rejects_invalid_permission_mode_override`
+  - `claude_runner_rejects_unvalidated_approval_policy`
+  - `gemini_runner_rejects_unvalidated_approval_policy`
+  - `doctor` 渲染断言覆盖 `validated_flags`
+- 已通过 `cargo fmt && cargo test`（65 passed）与 `cargo run -- validate`（summary contract template: ok）。

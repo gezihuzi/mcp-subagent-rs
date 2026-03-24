@@ -9,7 +9,10 @@ use async_trait::async_trait;
 use crate::{
     error::{McpSubagentError, Result},
     runtime::runner::{AgentRunner, RunnerExecution, RunnerTerminalState},
-    spec::{runtime_policy::SandboxPolicy, AgentSpec},
+    spec::{
+        runtime_policy::{ApprovalPolicy, SandboxPolicy},
+        AgentSpec,
+    },
     types::{CompiledContext, RunRequest},
 };
 
@@ -39,6 +42,7 @@ impl GeminiRunner {
     ) -> Result<RunnerExecution> {
         let prompt = compose_prompt(compiled);
         let timeout = Duration::from_secs(spec.runtime.timeout_secs.max(1));
+        let approval_mode = resolve_approval_mode(spec)?;
 
         let mut command = tokio::process::Command::new(&self.executable);
         command
@@ -47,7 +51,7 @@ impl GeminiRunner {
             .arg("--output-format")
             .arg("text")
             .arg("--approval-mode")
-            .arg(resolve_approval_mode(spec))
+            .arg(approval_mode)
             .arg("--include-directories")
             .arg(&request.working_dir)
             .current_dir(&request.working_dir)
@@ -123,11 +127,22 @@ fn compose_prompt(compiled: &CompiledContext) -> String {
     )
 }
 
-fn resolve_approval_mode(spec: &AgentSpec) -> &'static str {
-    match spec.runtime.sandbox {
-        SandboxPolicy::ReadOnly => "plan",
-        SandboxPolicy::WorkspaceWrite => "auto_edit",
-        SandboxPolicy::FullAccess => "yolo",
+fn resolve_approval_mode(spec: &AgentSpec) -> Result<&'static str> {
+    match spec.runtime.approval {
+        ApprovalPolicy::ProviderDefault | ApprovalPolicy::DenyByDefault => {
+            match spec.runtime.sandbox {
+                SandboxPolicy::ReadOnly => Ok("plan"),
+                SandboxPolicy::WorkspaceWrite => Ok("auto_edit"),
+                SandboxPolicy::FullAccess => Ok("yolo"),
+            }
+        }
+        ApprovalPolicy::Ask => Err(McpSubagentError::SpecValidation(
+            "Gemini approval policy `Ask` is not yet validated for current CLI mapping".to_string(),
+        )),
+        ApprovalPolicy::AutoAcceptEdits => Err(McpSubagentError::SpecValidation(
+            "Gemini approval policy `AutoAcceptEdits` is not yet validated for current CLI mapping"
+                .to_string(),
+        )),
     }
 }
 
@@ -154,7 +169,7 @@ mod tests {
         runtime::{gemini_runner::GeminiRunner, runner::RunnerTerminalState},
         spec::{
             core::{AgentSpecCore, Provider},
-            runtime_policy::{RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
+            runtime_policy::{ApprovalPolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
             AgentSpec,
         },
         types::{CompiledContext, RunMode, RunRequest},
@@ -307,5 +322,30 @@ sleep 2
             .expect("execute");
 
         assert_eq!(execution.terminal_state, RunnerTerminalState::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn gemini_runner_rejects_unvalidated_approval_policy() {
+        let dir = tempdir().expect("tempdir");
+        let mut spec = sample_spec(30);
+        spec.runtime.approval = ApprovalPolicy::Ask;
+        let runner = GeminiRunner::new(PathBuf::from("gemini"));
+
+        let err = runner
+            .execute(
+                &spec,
+                &sample_request(dir.path().to_path_buf()),
+                &CompiledContext {
+                    system_prefix: "sys".to_string(),
+                    injected_prompt: "prompt".to_string(),
+                    source_manifest: Vec::new(),
+                },
+            )
+            .await
+            .expect_err("Ask should be rejected until validated");
+        assert!(
+            err.to_string().contains("not yet validated"),
+            "unexpected error: {err}"
+        );
     }
 }

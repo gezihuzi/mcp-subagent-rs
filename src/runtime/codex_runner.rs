@@ -13,7 +13,7 @@ use crate::{
     runtime::runner::{AgentRunner, RunnerExecution, RunnerTerminalState},
     spec::{
         provider_overrides::{CodexSandboxMode, ReasoningEffort},
-        runtime_policy::SandboxPolicy,
+        runtime_policy::{ApprovalPolicy, SandboxPolicy},
         AgentSpec,
     },
     types::{CompiledContext, RunRequest},
@@ -49,6 +49,7 @@ impl CodexRunner {
             uuid::Uuid::now_v7()
         ));
         let timeout = Duration::from_secs(spec.runtime.timeout_secs.max(1));
+        let approval_mode = resolve_approval_mode(spec)?;
 
         let mut command = tokio::process::Command::new(&self.executable);
         command
@@ -57,7 +58,7 @@ impl CodexRunner {
             .arg("--sandbox")
             .arg(resolve_sandbox(spec))
             .arg("--ask-for-approval")
-            .arg("never")
+            .arg(approval_mode)
             .arg("--cd")
             .arg(&request.working_dir)
             .arg("--output-last-message")
@@ -186,6 +187,19 @@ fn map_reasoning_effort(value: &ReasoningEffort) -> &'static str {
     }
 }
 
+fn resolve_approval_mode(spec: &AgentSpec) -> Result<&'static str> {
+    match spec.runtime.approval {
+        ApprovalPolicy::ProviderDefault | ApprovalPolicy::DenyByDefault => Ok("never"),
+        ApprovalPolicy::Ask => Err(McpSubagentError::SpecValidation(
+            "Codex approval policy `Ask` is not yet validated for current CLI mapping".to_string(),
+        )),
+        ApprovalPolicy::AutoAcceptEdits => Err(McpSubagentError::SpecValidation(
+            "Codex approval policy `AutoAcceptEdits` is not yet validated for current CLI mapping"
+                .to_string(),
+        )),
+    }
+}
+
 pub fn supports_provider(provider: &crate::spec::Provider) -> bool {
     matches!(provider, crate::spec::Provider::Codex)
 }
@@ -209,7 +223,7 @@ mod tests {
         runtime::{codex_runner::CodexRunner, runner::RunnerTerminalState},
         spec::{
             core::{AgentSpecCore, Provider},
-            runtime_policy::{RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
+            runtime_policy::{ApprovalPolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
             AgentSpec,
         },
         types::{CompiledContext, RunMode, RunRequest},
@@ -345,5 +359,31 @@ exit 7
             other => panic!("unexpected terminal state: {other:?}"),
         }
         assert!(execution.stderr.contains("auth required"));
+    }
+
+    #[tokio::test]
+    async fn codex_runner_rejects_unvalidated_approval_policy() {
+        let dir = tempdir().expect("tempdir");
+        let mut spec = sample_spec();
+        spec.runtime.approval = ApprovalPolicy::Ask;
+        let runner = CodexRunner::new(PathBuf::from("codex"));
+
+        let err = runner
+            .execute(
+                &spec,
+                &sample_request(dir.path().to_path_buf()),
+                &CompiledContext {
+                    system_prefix: "sys".to_string(),
+                    injected_prompt: "prompt".to_string(),
+                    source_manifest: Vec::new(),
+                },
+            )
+            .await
+            .expect_err("Ask should be rejected until validated");
+
+        assert!(
+            err.to_string().contains("not yet validated"),
+            "unexpected error: {err}"
+        );
     }
 }

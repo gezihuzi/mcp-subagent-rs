@@ -397,6 +397,7 @@ sandbox = "ReadOnly"
                     version: Some("test-version".to_string()),
                     status,
                     capabilities: provider_capabilities(&provider),
+                    validated_flags: provider_validated_flags(&provider),
                     notes: vec![note.to_string()],
                 },
             );
@@ -415,6 +416,7 @@ sandbox = "ReadOnly"
                     version: Some("test-version".to_string()),
                     status: ProbeStatus::Ready,
                     capabilities: provider_capabilities(provider),
+                    validated_flags: provider_validated_flags(provider),
                     notes: Vec::new(),
                 })
         }
@@ -452,6 +454,27 @@ sandbox = "ReadOnly"
                 supports_native_project_memory: false,
                 experimental: false,
             },
+        }
+    }
+
+    fn provider_validated_flags(provider: &Provider) -> Vec<String> {
+        match provider {
+            Provider::Claude => vec![
+                "--permission-mode".to_string(),
+                "--add-dir".to_string(),
+                "--output-format".to_string(),
+            ],
+            Provider::Codex => vec![
+                "--sandbox".to_string(),
+                "--ask-for-approval".to_string(),
+                "--output-last-message".to_string(),
+            ],
+            Provider::Gemini => vec![
+                "--approval-mode".to_string(),
+                "--include-directories".to_string(),
+                "--output-format".to_string(),
+            ],
+            Provider::Ollama => Vec::new(),
         }
     }
 

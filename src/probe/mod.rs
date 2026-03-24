@@ -85,6 +85,8 @@ pub struct ProviderProbe {
     pub status: ProbeStatus,
     pub capabilities: ProviderCapabilities,
     #[serde(default)]
+    pub validated_flags: Vec<String>,
+    #[serde(default)]
     pub notes: Vec<String>,
 }
 
@@ -105,6 +107,7 @@ impl ProviderProber for SystemProviderProber {
     fn probe(&self, provider: &Provider) -> ProviderProbe {
         let executable = default_executable(provider);
         let capabilities = ProviderCapabilities::for_provider(provider);
+        let validated_flags = validated_flags_for_provider(provider);
 
         let mut notes = Vec::new();
         if capabilities.experimental {
@@ -149,6 +152,7 @@ impl ProviderProber for SystemProviderProber {
                         version,
                         status: ProbeStatus::Ready,
                         capabilities,
+                        validated_flags,
                         notes,
                     }
                 } else {
@@ -162,6 +166,7 @@ impl ProviderProber for SystemProviderProber {
                         version,
                         status,
                         capabilities,
+                        validated_flags,
                         notes,
                     }
                 }
@@ -177,6 +182,7 @@ impl ProviderProber for SystemProviderProber {
                     version: None,
                     status: ProbeStatus::MissingBinary,
                     capabilities,
+                    validated_flags,
                     notes,
                 }
             }
@@ -191,6 +197,7 @@ impl ProviderProber for SystemProviderProber {
                     version: None,
                     status: ProbeStatus::PermissionDenied,
                     capabilities,
+                    validated_flags,
                     notes,
                 }
             }
@@ -202,11 +209,37 @@ impl ProviderProber for SystemProviderProber {
                     version: None,
                     status: ProbeStatus::ProbeFailed,
                     capabilities,
+                    validated_flags,
                     notes,
                 }
             }
         }
     }
+}
+
+fn validated_flags_for_provider(provider: &Provider) -> Vec<String> {
+    let flags: &[&str] = match provider {
+        Provider::Claude => &[
+            "--permission-mode",
+            "--add-dir",
+            "--output-format",
+            "--json-schema",
+        ],
+        Provider::Codex => &[
+            "--sandbox",
+            "--ask-for-approval",
+            "--output-last-message",
+            "--output-schema",
+        ],
+        Provider::Gemini => &[
+            "--approval-mode",
+            "--include-directories",
+            "--output-format",
+        ],
+        Provider::Ollama => &[],
+    };
+
+    flags.iter().map(|flag| flag.to_string()).collect()
 }
 
 fn default_executable(provider: &Provider) -> PathBuf {
