@@ -267,7 +267,10 @@ impl McpSubagentServer {
             .iter()
             .map(|selected| {
                 let scoped_path = if selected.path.is_absolute() {
-                    selected.path.strip_prefix(&source).unwrap_or(&selected.path)
+                    selected
+                        .path
+                        .strip_prefix(&source)
+                        .unwrap_or(&selected.path)
                 } else {
                     selected.path.as_path()
                 };
@@ -359,8 +362,8 @@ mod tests {
     };
 
     use super::{
-        acquire_serialize_locks_from_state, HandleInput, McpSubagentServer,
-        ReadAgentArtifactInput, RunAgentInput, RunAgentSelectedFileInput,
+        acquire_serialize_locks_from_state, HandleInput, McpSubagentServer, ReadAgentArtifactInput,
+        RunAgentInput, RunAgentSelectedFileInput,
     };
     use crate::{mcp::artifacts::build_runtime_artifacts, mcp::state::RuntimeState};
 
@@ -1109,11 +1112,9 @@ sandbox = "WorkspaceWrite"
             .expect("lock key")
             .contains("project"));
         assert!(run_obj["workspace"]["lock_keys"].is_array());
-        assert!(
-            run_obj["workspace"]["lock_keys"]
-                .as_array()
-                .is_some_and(|keys| !keys.is_empty())
-        );
+        assert!(run_obj["workspace"]["lock_keys"]
+            .as_array()
+            .is_some_and(|keys| !keys.is_empty()));
         assert!(run_obj["compiled_context_markdown"]
             .as_str()
             .unwrap_or_default()
@@ -1179,21 +1180,16 @@ sandbox = "WorkspaceWrite"
     #[tokio::test]
     async fn serialize_lock_blocks_until_guard_released() {
         let state = Arc::new(Mutex::new(RuntimeState::default()));
-        let first_guard = acquire_serialize_locks_from_state(
-            &state,
-            vec!["repo-key::src".to_string()],
-        )
-        .await;
+        let first_guard =
+            acquire_serialize_locks_from_state(&state, vec!["repo-key::src".to_string()]).await;
         assert_eq!(first_guard.len(), 1, "first guard");
 
         let state_clone = Arc::clone(&state);
         let waiter = tokio::spawn(async move {
             let start = Instant::now();
-            let guard = acquire_serialize_locks_from_state(
-                &state_clone,
-                vec!["repo-key::src".to_string()],
-            )
-            .await;
+            let guard =
+                acquire_serialize_locks_from_state(&state_clone, vec!["repo-key::src".to_string()])
+                    .await;
             let elapsed = start.elapsed();
             drop(guard);
             elapsed
@@ -1216,21 +1212,16 @@ sandbox = "WorkspaceWrite"
     #[tokio::test]
     async fn serialize_lock_allows_non_conflicting_scopes() {
         let state = Arc::new(Mutex::new(RuntimeState::default()));
-        let first_guard = acquire_serialize_locks_from_state(
-            &state,
-            vec!["repo-key::src".to_string()],
-        )
-        .await;
+        let first_guard =
+            acquire_serialize_locks_from_state(&state, vec!["repo-key::src".to_string()]).await;
         assert_eq!(first_guard.len(), 1);
 
         let state_clone = Arc::clone(&state);
         let waiter = tokio::spawn(async move {
             let start = Instant::now();
-            let guard = acquire_serialize_locks_from_state(
-                &state_clone,
-                vec!["repo-key::web".to_string()],
-            )
-            .await;
+            let guard =
+                acquire_serialize_locks_from_state(&state_clone, vec!["repo-key::web".to_string()])
+                    .await;
             let elapsed = start.elapsed();
             drop(guard);
             elapsed

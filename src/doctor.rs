@@ -30,6 +30,7 @@ pub struct DoctorReport {
     pub probes: Vec<ProviderProbe>,
     pub workspace_policy_hints: Vec<WorkspacePolicyHint>,
     pub knowledge_layout: KnowledgeLayoutHealth,
+    pub version_pins: ProviderVersionPinReport,
     pub status: String,
     pub issues: Vec<DoctorIssue>,
     pub advice: Vec<String>,
@@ -41,6 +42,23 @@ pub struct DoctorIssue {
     pub code: String,
     pub message: String,
     pub suggestion: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderVersionPinReport {
+    pub enabled: bool,
+    pub source: Option<PathBuf>,
+    pub entries: Vec<ProviderVersionPinEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderVersionPinEntry {
+    pub provider: String,
+    pub configured_pin: Option<String>,
+    pub detected_version: Option<String>,
+    pub compatibility: String,
+    pub supported_policy: String,
+    pub suggestion: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,11 +101,13 @@ fn build_doctor_report_for_cwd(
 
     let workspace_policy_hints = build_workspace_policy_hints(&loaded_specs);
     let knowledge_layout = build_knowledge_layout_health(&cwd);
-    let probes = all_providers()
+    let probes: Vec<ProviderProbe> = all_providers()
         .into_iter()
         .map(|provider| prober.probe(&provider))
         .collect();
-    let (status, issues, advice) = build_doctor_health(&agents_error, &knowledge_layout, &probes);
+    let version_pins = build_provider_version_pin_report(&cwd, &probes);
+    let (status, issues, advice) =
+        build_doctor_health(&agents_error, &knowledge_layout, &probes, &version_pins);
 
     DoctorReport {
         cwd,
@@ -98,6 +118,7 @@ fn build_doctor_report_for_cwd(
         probes,
         workspace_policy_hints,
         knowledge_layout,
+        version_pins,
         status,
         issues,
         advice,
@@ -108,6 +129,7 @@ fn build_doctor_health(
     agents_error: &Option<String>,
     knowledge_layout: &KnowledgeLayoutHealth,
     probes: &[ProviderProbe],
+    version_pins: &ProviderVersionPinReport,
 ) -> (String, Vec<DoctorIssue>, Vec<String>) {
     let mut issues = Vec::new();
     let mut advice = Vec::new();
@@ -141,7 +163,10 @@ fn build_doctor_health(
         let suggestion = probe.notes.first().cloned();
         issues.push(DoctorIssue {
             level: "warning".to_string(),
-            code: format!("provider_{}_unavailable", probe.provider.as_str().to_lowercase()),
+            code: format!(
+                "provider_{}_unavailable",
+                probe.provider.as_str().to_lowercase()
+            ),
             message: format!(
                 "provider {} unavailable ({})",
                 probe.provider.as_str(),
@@ -149,6 +174,24 @@ fn build_doctor_health(
             ),
             suggestion,
         });
+    }
+
+    for entry in &version_pins.entries {
+        if entry.compatibility == "drift" || entry.compatibility == "not_detected" {
+            issues.push(DoctorIssue {
+                level: "warning".to_string(),
+                code: format!(
+                    "provider_{}_version_{}",
+                    entry.provider.to_lowercase(),
+                    entry.compatibility
+                ),
+                message: format!(
+                    "provider {} version compatibility is {}",
+                    entry.provider, entry.compatibility
+                ),
+                suggestion: Some(entry.suggestion.clone()),
+            });
+        }
     }
 
     if issues.is_empty() {
@@ -170,6 +213,123 @@ fn build_doctor_health(
         "warning"
     };
     (status.to_string(), issues, advice)
+}
+
+fn build_provider_version_pin_report(
+    root: &Path,
+    probes: &[ProviderProbe],
+) -> ProviderVersionPinReport {
+    let config_path = root.join(".mcp-subagent/config.toml");
+    let pin_config = load_provider_pin_config(&config_path);
+    let enabled = pin_config.enabled;
+    let entries = all_providers()
+        .into_iter()
+        .map(|provider| {
+            let configured_pin = pin_config.pins.get(provider.as_str()).cloned();
+            let detected_version = probes
+                .iter()
+                .find(|probe| probe.provider == provider)
+                .and_then(|probe| probe.version.clone());
+            let compatibility = if !enabled {
+                "disabled".to_string()
+            } else if configured_pin.is_none() {
+                "unpinned".to_string()
+            } else if detected_version.is_none() {
+                "not_detected".to_string()
+            } else if version_matches_pin(
+                detected_version.as_deref().unwrap_or_default(),
+                configured_pin.as_deref().unwrap_or_default(),
+            ) {
+                "matched".to_string()
+            } else {
+                "drift".to_string()
+            };
+            let suggestion = match compatibility.as_str() {
+                "matched" => "Pinned version matches detected CLI version.".to_string(),
+                "disabled" => "Enable [provider_version_pins] to enforce version drift checks."
+                    .to_string(),
+                "unpinned" => format!(
+                    "Add {} = \"<version>\" under [provider_version_pins] to pin this provider.",
+                    provider.as_str().to_lowercase()
+                ),
+                "not_detected" => {
+                    "CLI version not detected; verify binary installation and --version output."
+                        .to_string()
+                }
+                "drift" => format!(
+                    "Detected version differs from pin; update pin or install a compatible CLI for {}.",
+                    provider.as_str()
+                ),
+                _ => "unknown".to_string(),
+            };
+
+            ProviderVersionPinEntry {
+                provider: provider.as_str().to_string(),
+                configured_pin,
+                detected_version,
+                compatibility,
+                supported_policy: "pin_exact_or_prefix_match".to_string(),
+                suggestion,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    ProviderVersionPinReport {
+        enabled,
+        source: pin_config.source,
+        entries,
+    }
+}
+
+#[derive(Debug, Default)]
+struct ProviderPinConfig {
+    enabled: bool,
+    source: Option<PathBuf>,
+    pins: BTreeMap<String, String>,
+}
+
+fn load_provider_pin_config(path: &Path) -> ProviderPinConfig {
+    if !path.is_file() {
+        return ProviderPinConfig::default();
+    }
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(_) => return ProviderPinConfig::default(),
+    };
+    let parsed = match raw.parse::<toml::Value>() {
+        Ok(value) => value,
+        Err(_) => return ProviderPinConfig::default(),
+    };
+
+    let Some(table) = parsed
+        .get("provider_version_pins")
+        .and_then(|value| value.as_table())
+    else {
+        return ProviderPinConfig::default();
+    };
+
+    let enabled = table
+        .get("enabled")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let mut pins = BTreeMap::new();
+    for provider in all_providers() {
+        let key = provider.as_str().to_lowercase();
+        if let Some(pin) = table.get(&key).and_then(|value| value.as_str()) {
+            pins.insert(provider.as_str().to_string(), pin.to_string());
+        }
+    }
+    ProviderPinConfig {
+        enabled,
+        source: Some(path.to_path_buf()),
+        pins,
+    }
+}
+
+fn version_matches_pin(detected_version: &str, configured_pin: &str) -> bool {
+    let detected = detected_version.to_lowercase();
+    let pin = configured_pin.to_lowercase();
+    detected.contains(&pin)
 }
 
 fn build_workspace_policy_hints(loaded_specs: &[LoadedAgentSpec]) -> Vec<WorkspacePolicyHint> {
@@ -342,6 +502,29 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
         }
     }
 
+    out.push_str("\nprovider_version_pins:\n");
+    out.push_str(&format!("  enabled: {}\n", report.version_pins.enabled));
+    out.push_str(&format!(
+        "  source: {}\n",
+        report
+            .version_pins
+            .source
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".to_string())
+    ));
+    for entry in &report.version_pins.entries {
+        out.push_str(&format!(
+            "  - provider: {}\n    configured_pin: {}\n    detected_version: {}\n    compatibility: {}\n    policy: {}\n    suggestion: {}\n",
+            entry.provider,
+            entry.configured_pin.as_deref().unwrap_or("none"),
+            entry.detected_version.as_deref().unwrap_or("unknown"),
+            entry.compatibility,
+            entry.supported_policy,
+            entry.suggestion,
+        ));
+    }
+
     out.push_str("\nworkspace_policy_hints:\n");
     for hint in &report.workspace_policy_hints {
         out.push_str(&format!(
@@ -414,7 +597,7 @@ fn all_providers() -> Vec<Provider> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::PathBuf};
+    use std::{collections::HashMap, fs, path::PathBuf};
 
     use tempfile::tempdir;
 
@@ -556,5 +739,92 @@ sandbox = "WorkspaceWrite"
                 .map(|hint| hint.usage_count),
             Some(1)
         );
+    }
+
+    #[test]
+    fn provider_pin_report_marks_matched_when_pin_hits() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join(".mcp-subagent")).expect("create config dir");
+        fs::write(
+            temp.path().join(".mcp-subagent/config.toml"),
+            r#"
+[provider_version_pins]
+enabled = true
+codex = "test-version"
+"#,
+        )
+        .expect("write config");
+
+        let report = build_doctor_report_for_cwd(
+            temp.path().to_path_buf(),
+            vec![temp.path().join("agents")],
+            temp.path().join("state"),
+            &FakeProber::default(),
+        );
+        let codex = report
+            .version_pins
+            .entries
+            .iter()
+            .find(|entry| entry.provider == "Codex")
+            .expect("codex entry");
+        assert_eq!(codex.compatibility, "matched");
+    }
+
+    #[test]
+    fn provider_pin_report_marks_drift_when_pin_mismatches() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join(".mcp-subagent")).expect("create config dir");
+        fs::write(
+            temp.path().join(".mcp-subagent/config.toml"),
+            r#"
+[provider_version_pins]
+enabled = true
+codex = "9.9.9"
+"#,
+        )
+        .expect("write config");
+
+        let report = build_doctor_report_for_cwd(
+            temp.path().to_path_buf(),
+            vec![temp.path().join("agents")],
+            temp.path().join("state"),
+            &FakeProber::default(),
+        );
+        let codex = report
+            .version_pins
+            .entries
+            .iter()
+            .find(|entry| entry.provider == "Codex")
+            .expect("codex entry");
+        assert_eq!(codex.compatibility, "drift");
+    }
+
+    #[test]
+    fn provider_pin_report_marks_disabled_when_config_disabled() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join(".mcp-subagent")).expect("create config dir");
+        fs::write(
+            temp.path().join(".mcp-subagent/config.toml"),
+            r#"
+[provider_version_pins]
+enabled = false
+codex = "test-version"
+"#,
+        )
+        .expect("write config");
+
+        let report = build_doctor_report_for_cwd(
+            temp.path().to_path_buf(),
+            vec![temp.path().join("agents")],
+            temp.path().join("state"),
+            &FakeProber::default(),
+        );
+        let codex = report
+            .version_pins
+            .entries
+            .iter()
+            .find(|entry| entry.provider == "Codex")
+            .expect("codex entry");
+        assert_eq!(codex.compatibility, "disabled");
     }
 }

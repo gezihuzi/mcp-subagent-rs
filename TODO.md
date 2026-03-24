@@ -1380,7 +1380,7 @@
   - `cargo run -- --agents-dir examples/agents validate`
   - `./scripts/smoke_v06.sh`
 
-## T-056 V0.7-P2-DoctorJsonIdeOutput (Pending)
+## T-056 V0.7-P2-DoctorJsonIdeOutput (Completed 2026-03-24)
 
 任务：增强 `doctor --json` 稳定输出，方便 IDE/CI 消费。  
 验收标准：
@@ -1389,8 +1389,31 @@
 2. 输出覆盖 provider 可用性、映射提示与修复建议。
 3. exit code 对 CI 友好。
 4. 提供样例与解析测试。
+完成记录：
 
-## T-057 V0.7-P2-ProviderVersionPinCompatibilityReport (Pending)
+- 已增强 doctor 报告结构为 IDE/CI 友好的 JSON 载体：
+  - `src/doctor.rs` 新增：
+    - `status`（`ok|warning|error`）
+    - `issues`（level/code/message/suggestion）
+    - `advice`（去重修复建议列表）
+  - provider 不可用、knowledge layout 缺失、agents 加载失败都会进入结构化 issues。
+- 已新增 `doctor --json`：
+  - `src/main.rs` 的 `Doctor` 子命令增加 `--json` flag；
+  - `--json` 输出稳定序列化对象；
+  - 非 `--json` 仍保持可读文本渲染。
+- exit code 规则：
+  - `status = error` 返回退出码 `1`
+  - `status = ok|warning` 返回退出码 `0`
+- 已补 CLI 解析测试：
+  - `parses_doctor_json_flag`
+  - 并更新 README 命令面展示 `doctor [--json]`。
+- 已通过：
+  - `cargo fmt`
+  - `cargo test -q`（127 passed + 9 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`
+
+## T-057 V0.7-P2-ProviderVersionPinCompatibilityReport (Completed 2026-03-24)
 
 任务：引入 provider 版本 pin 与兼容性报告。  
 验收标准：
@@ -1399,3 +1422,28 @@
 2. `doctor` 输出版本兼容性报告（当前版本 vs 支持矩阵）。
 3. 不兼容时输出可执行修复建议。
 4. 测试覆盖 pin 命中、版本漂移、禁用 pin 三类路径。
+完成记录：
+
+- 已新增 provider version pin 配置读取（基于项目 `.mcp-subagent/config.toml`）：
+  - 配置段：`[provider_version_pins]`
+  - 字段：`enabled`、`codex`、`claude`、`gemini`、`ollama`
+- 已在 `doctor` 输出中加入兼容性报告：
+  - `version_pins.enabled/source`
+  - 按 provider 输出：
+    - `configured_pin`
+    - `detected_version`
+    - `compatibility`（`matched|drift|not_detected|unpinned|disabled`）
+    - `supported_policy`
+    - `suggestion`
+- 已将 drift/not_detected 融入 doctor issue/advice 管道，输出可执行修复建议并在 `--json` 中可消费。
+- 已新增测试覆盖三类核心场景：
+  - `provider_pin_report_marks_matched_when_pin_hits`
+  - `provider_pin_report_marks_drift_when_pin_mismatches`
+  - `provider_pin_report_marks_disabled_when_config_disabled`
+- 文档已更新：
+  - `README.md` 增加 provider_version_pins 配置示例。
+- 已通过：
+  - `cargo fmt`
+  - `cargo test -q`（130 passed + 9 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`

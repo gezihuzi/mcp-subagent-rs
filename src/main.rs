@@ -50,6 +50,8 @@ enum Commands {
     Doctor {
         #[arg(value_name = "AGENTS_DIR")]
         agents_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
     },
     Validate {
         #[arg(value_name = "AGENTS_DIR")]
@@ -187,7 +189,7 @@ async fn main() -> ExitCode {
             info!("starting command: mcp");
             run_mcp_server(cfg).await
         }
-        Commands::Doctor { agents_dir } => {
+        Commands::Doctor { agents_dir, json } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
                 config_path,
                 state_dir,
@@ -202,7 +204,7 @@ async fn main() -> ExitCode {
                 }
             };
             info!("starting command: doctor");
-            doctor(cfg)
+            doctor(cfg, json)
         }
         Commands::Validate { agents_dir } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -470,10 +472,18 @@ fn validate_specs(cfg: RuntimeConfig) -> ExitCode {
     }
 }
 
-fn doctor(cfg: RuntimeConfig) -> ExitCode {
+fn doctor(cfg: RuntimeConfig, json: bool) -> ExitCode {
     let report = build_doctor_report(cfg.agents_dirs, cfg.state_dir, &SystemProviderProber);
-    println!("{}", render_doctor_report(&report));
-    ExitCode::SUCCESS
+    if json {
+        print_json(&report);
+    } else {
+        println!("{}", render_doctor_report(&report));
+    }
+    if report.status == "error" {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn init_command(
@@ -893,6 +903,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_doctor_json_flag() {
+        let cli = Cli::parse_from(["mcp-subagent", "doctor", "--json"]);
+        match cli.command {
+            Commands::Doctor { json, .. } => assert!(json),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_run_command_with_required_args() {
         let cli = Cli::parse_from(["mcp-subagent", "run", "reviewer", "--task", "review code"]);
         match cli.command {
@@ -962,6 +981,22 @@ mod tests {
                 assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisor));
                 assert!(force);
                 assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_init_command_with_new_preset() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "init",
+            "--preset",
+            "minimal-single-provider",
+        ]);
+        match cli.command {
+            Commands::Init { preset, .. } => {
+                assert!(matches!(preset, InitPresetArg::MinimalSingleProvider));
             }
             other => panic!("unexpected command: {other:?}"),
         }

@@ -17,7 +17,7 @@ Rust implementation of an MCP subagent runtime aligned to the technical design b
 
 ```bash
 mcp-subagent mcp [AGENTS_DIR]
-mcp-subagent doctor [AGENTS_DIR]
+mcp-subagent doctor [AGENTS_DIR] [--json]
 mcp-subagent validate [AGENTS_DIR]
 mcp-subagent init [--preset claude-opus-supervisor|codex-primary-builder|gemini-frontend-team|local-ollama-fallback|minimal-single-provider] [--root-dir ...] [--force] [--json]
 mcp-subagent list-agents [--json]
@@ -58,6 +58,17 @@ Default paths:
 
 - `agents_dirs = ["./agents"]`
 - `state_dir = ".mcp-subagent/state"`
+
+Optional provider version pins in `.mcp-subagent/config.toml`:
+
+```toml
+[provider_version_pins]
+enabled = true
+codex = "0.9"
+claude = "1.0"
+gemini = "0.7"
+ollama = "0.5"
+```
 
 ## Local Smoke
 
