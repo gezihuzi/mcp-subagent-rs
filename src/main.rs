@@ -1,16 +1,23 @@
 use std::{env, path::PathBuf, process::ExitCode};
 
-use mcp_subagent::{mcp::server::McpSubagentServer, spec::registry::load_agent_specs_from_dirs};
+use mcp_subagent::{
+    doctor::{build_doctor_report, render_doctor_report},
+    mcp::server::McpSubagentServer,
+    probe::SystemProviderProber,
+    spec::registry::load_agent_specs_from_dirs,
+};
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("--mcp") => run_mcp_server(args.get(2).map(PathBuf::from)).await,
+        Some("doctor") => doctor(args.get(2).map(PathBuf::from)),
         Some("validate") => validate_specs(args.get(2).map(PathBuf::from)),
         _ => {
             eprintln!("Usage:");
             eprintln!("  mcp-subagent --mcp [agents_dir]");
+            eprintln!("  mcp-subagent doctor [agents_dir]");
             eprintln!("  mcp-subagent validate [agents_dir]");
             ExitCode::from(2)
         }
@@ -49,4 +56,12 @@ fn validate_specs(dir: Option<PathBuf>) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn doctor(dir: Option<PathBuf>) -> ExitCode {
+    let agents_dirs = vec![dir.unwrap_or_else(|| PathBuf::from("./agents"))];
+    let state_dir = PathBuf::from(".mcp-subagent/state");
+    let report = build_doctor_report(agents_dirs, state_dir, &SystemProviderProber);
+    println!("{}", render_doctor_report(&report));
+    ExitCode::SUCCESS
 }

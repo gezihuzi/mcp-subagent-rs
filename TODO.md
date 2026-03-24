@@ -127,3 +127,18 @@
 - 已新增 `runtime::claude_runner` 单测：fake binary 成功输出路径、非零退出失败路径、超时路径。
 - 为避免宿主登录态影响 MCP 单测，测试默认 provider 已切到 `Ollama`（走 mock 路径）。
 - 已通过 `cargo test`（28 passed）与 `cargo run -- validate`。
+
+## T-010 Phase2-DoctorCommandProbeReport (Completed 2026-03-24)
+任务：新增 `doctor` 诊断子命令，输出本地 provider 探测和运行目录信息。
+验收标准：
+1. CLI 新增 `mcp-subagent doctor [agents_dir]` 子命令。
+2. `doctor` 输出包含：cwd、agents_dirs、state_dir、agent specs 统计信息。
+3. `doctor` 输出包含 Claude/Codex/Gemini/Ollama 的 probe 结果（status/version/bin/notes）。
+4. 新增单测覆盖 doctor 报告构建与文本渲染的关键字段。
+5. `cargo test` 全量通过。
+完成记录：
+- 已新增 `doctor` 模块（report 构建 + 文本渲染），输出 cwd、agents/state 路径、spec 统计与 provider probe 详情。
+- CLI 已新增 `mcp-subagent doctor [agents_dir]` 子命令，并更新 usage。
+- `doctor` 使用现有 `ProviderProber` 能力，按 Claude/Codex/Gemini/Ollama 顺序输出状态、版本、可执行文件与 notes。
+- 已新增单测 `doctor::tests::builds_report_and_renders_key_fields` 覆盖报告构建与渲染关键字段。
+- 已通过 `cargo fmt && cargo test`（29 passed），并验证 `cargo run -- doctor` 与 `cargo run -- validate`。
