@@ -6,15 +6,15 @@ use uuid::Uuid;
 use crate::{
     mcp::state::{build_memory_resolution_snapshot, MemoryResolutionRecord, WorkspaceRecord},
     runtime::{
-        claude_runner::claude_runner_from_env,
         cleanup::WorkspaceCleanupGuard,
-        codex_runner::codex_runner_from_env,
         context::DefaultContextCompiler,
         dispatcher::{DispatchResult, Dispatcher},
-        gemini_runner::gemini_runner_from_env,
         memory::resolve_memory,
-        mock_runner::{MockRunPlan, MockRunner},
-        runner::AgentRunner,
+        runners::{
+            self,
+            mock::{MockRunPlan, MockRunner},
+            AgentRunner,
+        },
         workspace::{prepare_workspace, PreparedWorkspace, WorkspaceMode},
     },
     spec::Provider,
@@ -67,9 +67,9 @@ pub(crate) async fn run_dispatch(
 fn select_runner(provider: &Provider) -> Box<dyn AgentRunner> {
     match provider {
         Provider::Mock => Box::new(MockRunner::new(MockRunPlan::SucceededFromRequest)),
-        Provider::Claude => Box::new(claude_runner_from_env()),
-        Provider::Codex => Box::new(codex_runner_from_env()),
-        Provider::Gemini => Box::new(gemini_runner_from_env()),
+        Provider::Claude => Box::new(runners::claude::from_env()),
+        Provider::Codex => Box::new(runners::codex::from_env()),
+        Provider::Gemini => Box::new(runners::gemini::from_env()),
         Provider::Ollama => Box::new(MockRunner::new(MockRunPlan::Failed {
             message: "provider `Ollama` is reserved in current build".to_string(),
             stdout: String::new(),

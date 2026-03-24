@@ -8,7 +8,7 @@ use crate::{
     error::{McpSubagentError, Result},
     runtime::{
         context::ContextCompiler,
-        runner::{AgentRunner, RunnerTerminalState},
+        runners::{AgentRunner, RunnerTerminalState},
         summary::{SummaryEnvelope, SummaryParseStatus},
     },
     spec::{validate::validate_agent_spec, workflow::WorkflowStageKind, Provider},
@@ -310,7 +310,7 @@ mod tests {
         runtime::{
             context::DefaultContextCompiler,
             dispatcher::{Dispatcher, RunStatus},
-            mock_runner::{MockRunPlan, MockRunner},
+            runners::mock::{MockRunPlan, MockRunner},
             summary::{StructuredSummary, SummaryParseStatus, VerificationStatus},
         },
         spec::{

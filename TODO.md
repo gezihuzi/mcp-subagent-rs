@@ -920,3 +920,33 @@
 - 已新增 `CHANGELOG.md`（v0.6.0 版本摘要与 provider 状态）。
 - 已新增 `docs/release_v0.6.0.md`（发布切点和打 tag 清单）。
 - 已更新 `README.md`（标注 v0.6.0，并补充 examples validate 用法）。
+
+## T-042 PostV0.6-RunnerModuleRefactor (Completed 2026-03-24)
+
+任务：将 runner 体系封装到独立模块，简化内部命名并降低后续扩展成本。
+验收标准：
+
+1. `runtime` 下 runner 相关实现迁移到独立子模块目录。
+2. runner 文件名简化为 `claude.rs/codex.rs/gemini.rs/mock.rs`。
+3. 公共 trait/执行结果类型统一从单一入口导出。
+4. 全量引用路径完成迁移且 `cargo test` 通过。
+完成记录：
+
+- 已新增 `src/runtime/runners/` 子模块并迁移文件：
+  - `src/runtime/runners/mod.rs`
+  - `src/runtime/runners/claude.rs`
+  - `src/runtime/runners/codex.rs`
+  - `src/runtime/runners/gemini.rs`
+  - `src/runtime/runners/mock.rs`
+- 已移除旧路径：
+  - `src/runtime/runner.rs`
+  - `src/runtime/claude_runner.rs`
+  - `src/runtime/codex_runner.rs`
+  - `src/runtime/gemini_runner.rs`
+  - `src/runtime/mock_runner.rs`
+- `src/runtime/mod.rs` 已切换为 `pub mod runners;`，并更新了 `mcp::service`、`dispatcher` 与相关测试引用。
+- provider runner 构造函数命名已简化为模块内统一 `from_env()`（`runners::claude::from_env()` 等）。
+- 已通过：
+  - `cargo test`（92 passed + 3 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`

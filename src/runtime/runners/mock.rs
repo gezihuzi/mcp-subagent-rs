@@ -1,6 +1,6 @@
 use crate::{
     error::Result,
-    runtime::runner::{AgentRunner, RunnerExecution, RunnerTerminalState},
+    runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
     runtime::summary::{StructuredSummary, SUMMARY_END_SENTINEL, SUMMARY_START_SENTINEL},
     spec::AgentSpec,
     types::{CompiledContext, RunRequest},
@@ -121,8 +121,8 @@ mod tests {
 
     use crate::{
         runtime::{
-            mock_runner::{MockRunPlan, MockRunner},
-            runner::{AgentRunner, RunnerTerminalState},
+            runners::mock::{MockRunPlan, MockRunner},
+            runners::{AgentRunner, RunnerTerminalState},
             summary::{StructuredSummary, VerificationStatus},
         },
         spec::{

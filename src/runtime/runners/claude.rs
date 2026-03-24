@@ -9,7 +9,7 @@ use async_trait::async_trait;
 
 use crate::{
     error::{McpSubagentError, Result},
-    runtime::runner::{AgentRunner, RunnerExecution, RunnerTerminalState},
+    runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
     spec::{
         runtime_policy::{ApprovalPolicy, SandboxPolicy},
         AgentSpec,
@@ -177,7 +177,7 @@ pub fn supports_provider(provider: &crate::spec::Provider) -> bool {
     matches!(provider, crate::spec::Provider::Claude)
 }
 
-pub fn claude_runner_from_env() -> ClaudeRunner {
+pub fn from_env() -> ClaudeRunner {
     let configured = std::env::var("MCP_SUBAGENT_CLAUDE_BIN").ok();
     match configured {
         Some(path) if !path.trim().is_empty() => ClaudeRunner::new(Path::new(&path).to_path_buf()),
@@ -193,7 +193,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        runtime::{claude_runner::ClaudeRunner, runner::RunnerTerminalState},
+        runtime::{runners::claude::ClaudeRunner, runners::RunnerTerminalState},
         spec::{
             core::{AgentSpecCore, Provider},
             provider_overrides::{ClaudeOverrides, ProviderOverrides},
