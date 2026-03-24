@@ -221,8 +221,10 @@ mod tests {
     };
 
     fn sample_spec(provider: Provider, memory_sources: Vec<MemorySource>) -> AgentSpec {
-        let mut runtime = RuntimePolicy::default();
-        runtime.memory_sources = memory_sources;
+        let runtime = RuntimePolicy {
+            memory_sources,
+            ..Default::default()
+        };
         AgentSpec {
             core: AgentSpecCore {
                 name: "reviewer".to_string(),
