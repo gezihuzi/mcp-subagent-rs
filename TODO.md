@@ -1150,3 +1150,120 @@
   - `cargo test -q`（112 passed + 7 passed + 3 integration passed）
   - `cargo run -- --agents-dir examples/agents validate`
   - `./scripts/smoke_v06.sh`
+
+## T-049 V0.7-P1-WorkflowPolicyExecutionClosure (Pending)
+
+任务：把 `spawn_policy/background_preference/max_turns/retry_policy` 从 schema 层推进到真实执行策略，补齐运行时可观测闭环。  
+验收标准：
+
+1. `spawn_policy` 与 `background_preference` 能影响 `run/spawn` 与 MCP 工具路径的真实行为。
+2. `max_turns` 具备执行时终止或降级语义，并可在 run 状态中观测。
+3. `retry_policy` 对可重试失败生效（次数、间隔、终态）。
+4. run 快照记录“生效策略 + 来源（default/spec/override）”。
+5. 回归链路（`cargo test`、`validate`、`smoke`）通过。
+
+## T-050 V0.7-P1-ReviewPolicyEnforcement (Pending)
+
+任务：让 `ReviewPolicy` 从声明式字段变成真实约束执行，支持高风险默认双审。  
+验收标准：
+
+1. `ReviewPolicy` 可影响 Review 阶段放行/拒绝或必经流程。
+2. 高风险任务可强制双 reviewer 路径（至少 correctness + style 策略可表达）。
+3. Build 与 Review 的角色隔离可观测且可测试。
+4. summary/artifact 中补齐 review 证据字段或结构化记录。
+5. 回归链路（`cargo test`、`validate`、`smoke`）通过。
+
+## T-051 V0.7-P1-ArchiveKnowledgeCaptureHook (Completed 2026-03-24)
+
+任务：落地自动归档 hook，在 Archive 阶段自动生成 `final summary`、`decision note` 和 `metadata index`。  
+验收标准：
+
+1. Archive 阶段成功运行后自动生成 final summary。
+2. 命中 knowledge capture 触发条件时自动生成 decision note。
+3. 归档 metadata index 会追加本次 run 元数据，且可被 `artifact` 命令读取。
+4. 归档产物进入 run artifact index，并保留降级 warning 可观测语义。
+5. 回归链路（`cargo test`、`validate`、`smoke`）通过。
+完成记录：
+
+- 已新增 `src/mcp/archive.rs`：
+  - `apply_archive_hook()` 自动归档执行入口；
+  - Archive 成功路径生成并落盘：
+    - `<archive_dir>/<date>-<slug>-<handle>-final-summary.md`
+    - `docs/decisions/<date>-<slug>-<handle>-decision-note.md`（按 policy/触发条件）
+    - `<archive_dir>/index.json`（metadata index 追加写入）
+  - 归档失败或配置不合法时生成 `archive/hook-warnings.txt`，不中断主运行结果。
+- 已在 `src/mcp/tools.rs` 接入 hook：
+  - `run_agent` 成功路径接入；
+  - `spawn_agent` 后台成功路径接入。
+- 归档产物同时写入：
+  - 项目源目录（`workspace.source_path`）用于长期沉淀；
+  - run artifacts（index + payload）用于 `artifact` 命令即时读取。
+- 已新增单测：
+  - `archive_stage_generates_final_summary_decision_and_metadata_index`
+  - `non_archive_stage_skips_archive_hook`
+  - `invalid_archive_dir_creates_warning_artifact`
+- 已通过：
+  - `cargo fmt`
+  - `cargo test -q`（115 passed + 7 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`
+
+## T-052 V0.7-P1-McpServerDecompositionFinalPass (Pending)
+
+任务：继续拆分 `src/mcp/server.rs` 职责，降低耦合与复杂度，同时保持协议兼容。  
+验收标准：
+
+1. `server.rs` 中 capability/snapshot/io mapping/run helper 至少一类完成下沉。
+2. MCP tool 对外输入输出协议保持兼容。
+3. `server.rs` 复杂度可见下降（行数/职责分离）。
+4. 回归链路（`cargo test`、`validate`、`smoke`）通过。
+
+## T-053 V0.7-P1-ReadonlyGitWorktreeScopedAllow (Pending)
+
+任务：放宽 `ReadOnly + GitWorktree` 的阶段限制，仅允许在 `Research/Plan` 使用。  
+验收标准：
+
+1. `ReadOnly + GitWorktree` 在 `Research/Plan` 阶段可放行。
+2. `Build/Review` 阶段继续拒绝该组合。
+3. 校验与运行错误信息清晰可观测。
+4. 回归链路（`cargo test`、`validate`、`smoke`）通过。
+
+## T-054 V0.7-P2-PresetPackAndPresetCatalog (Pending)
+
+任务：扩展 preset 体系，补齐项目级团队模板与目录化注册。  
+验收标准：
+
+1. 在 `claude-opus-supervisor` 之外新增多套 preset（如 codex/gemini/local/minimal）。
+2. preset 具备统一注册与版本标识。
+3. 每个 preset 生成后可直接 `validate`。
+4. README/docs 提供初始化示例。
+
+## T-055 V0.7-P2-FinerGrainedConflictLock (Pending)
+
+任务：将并发冲突控制从仓库级串行收敛到更细粒度路径级。  
+验收标准：
+
+1. 冲突任务互斥，非冲突任务可并行。
+2. 锁粒度至少可表达到目录或文件集合。
+3. 异常退出可安全释放锁。
+4. 并发测试覆盖冲突与非冲突路径。
+
+## T-056 V0.7-P2-DoctorJsonIdeOutput (Pending)
+
+任务：增强 `doctor --json` 稳定输出，方便 IDE/CI 消费。  
+验收标准：
+
+1. `doctor --json` 输出 schema 稳定且可测试。
+2. 输出覆盖 provider 可用性、映射提示与修复建议。
+3. exit code 对 CI 友好。
+4. 提供样例与解析测试。
+
+## T-057 V0.7-P2-ProviderVersionPinCompatibilityReport (Pending)
+
+任务：引入 provider 版本 pin 与兼容性报告。  
+验收标准：
+
+1. 支持 provider version pin 配置。
+2. `doctor` 输出版本兼容性报告（当前版本 vs 支持矩阵）。
+3. 不兼容时输出可执行修复建议。
+4. 测试覆盖 pin 命中、版本漂移、禁用 pin 三类路径。

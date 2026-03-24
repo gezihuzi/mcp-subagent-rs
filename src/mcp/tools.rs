@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     mcp::{
+        archive::apply_archive_hook,
         artifacts::{
             build_runtime_artifacts, read_artifact_from_disk, sanitize_relative_artifact_path,
         },
@@ -105,6 +106,18 @@ impl McpSubagentServer {
             &result.stderr,
             Some(&workspace.workspace_path),
         );
+        let mut artifact_index = artifact_index;
+        let mut artifacts = artifacts;
+        apply_archive_hook(
+            &loaded.spec,
+            &request,
+            &result.metadata.status,
+            &handle_id,
+            &workspace,
+            &result.summary,
+            &mut artifact_index,
+            &mut artifacts,
+        );
         let output = RunAgentOutput {
             handle_id: handle_id.clone(),
             status: format!("{:?}", result.metadata.status),
@@ -192,6 +205,18 @@ impl McpSubagentServer {
                         &dispatch_result.stdout,
                         &dispatch_result.stderr,
                         Some(&workspace.workspace_path),
+                    );
+                    let mut artifact_index = artifact_index;
+                    let mut artifacts = artifacts;
+                    apply_archive_hook(
+                        &loaded.spec,
+                        &request,
+                        &dispatch_result.metadata.status,
+                        &task_handle_id,
+                        &workspace,
+                        &dispatch_result.summary,
+                        &mut artifact_index,
+                        &mut artifacts,
                     );
                     record.status = dispatch_result.metadata.status;
                     record.updated_at = OffsetDateTime::now_utc();

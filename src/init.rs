@@ -108,7 +108,7 @@ fn init_claude_opus_supervisor(root: &Path, force: bool) -> Result<InitReport> {
         LOCAL_FALLBACK_CODER_AGENT,
     )?;
 
-    let generated = load_agent_specs_from_dirs(&[agents_dir.clone()])?;
+    let generated = load_agent_specs_from_dirs(std::slice::from_ref(&agents_dir))?;
 
     Ok(InitReport {
         preset: InitPreset::ClaudeOpusSupervisor.as_str().to_string(),

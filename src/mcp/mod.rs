@@ -1,3 +1,4 @@
+pub(crate) mod archive;
 pub(crate) mod artifacts;
 pub mod dto;
 pub(crate) mod persistence;
