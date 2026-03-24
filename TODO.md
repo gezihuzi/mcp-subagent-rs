@@ -1119,3 +1119,34 @@
   - `cargo test -q`（108 passed + 7 passed + 3 integration passed）
   - `cargo run -- --agents-dir examples/agents validate`
   - `./scripts/smoke_v06.sh`
+
+## T-048 V0.7-P1-StageAwareRouting (Completed 2026-03-24)
+
+任务：落地 stage-aware routing 的最小执行约束，避免 Plan/Research 被任意 agent 乱用，并在 Review 阶段优先 reviewer agent。
+验收标准：
+
+1. `Research` / `Plan` 阶段要求 agent 具备 planning/research 角色信号（名称/描述/指令/tags）。
+2. `Review` 阶段对明显 builder 型 agent 给出拒绝（提示应优先 reviewer agent）。
+3. `Review` 阶段 reviewer 型 agent 可正常通过。
+4. 新增测试覆盖上述放行/拒绝路径。
+5. 回归链路（test/validate/smoke）通过。
+完成记录：
+
+- 已更新 `src/runtime/dispatcher.rs`：
+  - `enforce_workflow_gate()` 增加 `enforce_stage_agent_routing()` 前置校验；
+  - 新增角色信号判定：
+    - `agent_stage_profile()`
+    - `contains_any_keyword()`
+    - `enforce_stage_agent_routing()`
+  - `Research/Plan` 阶段校验 planning/research 信号；
+  - `Review` 阶段校验 reviewer 优先，对 builder 型 profile 拒绝。
+- 已新增单测：
+  - `research_stage_rejects_non_planning_agent`
+  - `plan_stage_allows_research_agent_profile`
+  - `review_stage_rejects_builder_agent_profile`
+  - `review_stage_allows_reviewer_agent_profile`
+- 已通过：
+  - `cargo fmt`
+  - `cargo test -q`（112 passed + 7 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`

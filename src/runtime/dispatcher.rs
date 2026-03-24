@@ -178,6 +178,7 @@ fn enforce_workflow_gate(spec: &crate::spec::AgentSpec, request: &RunRequest) ->
             "workflow stage `{stage_raw}` is not in workflow.allowed_stages"
         )));
     }
+    enforce_stage_agent_routing(spec, &stage, stage_raw)?;
 
     if !matches!(stage, WorkflowStageKind::Build | WorkflowStageKind::Review) {
         return Ok(());
@@ -260,6 +261,98 @@ fn has_plan_file(request: &RunRequest) -> bool {
 
     request.working_dir.join("PLAN.md").is_file()
         || request.working_dir.join(".mcp-subagent/PLAN.md").is_file()
+}
+
+fn enforce_stage_agent_routing(
+    spec: &crate::spec::AgentSpec,
+    stage: &WorkflowStageKind,
+    stage_raw: &str,
+) -> Result<()> {
+    let profile = agent_stage_profile(spec);
+    let stage_signal_is_planning = contains_any_keyword(
+        &profile,
+        &[
+            "research",
+            "investigat",
+            "analy",
+            "scan",
+            "plan",
+            "planner",
+            "strategy",
+            "study",
+            "survey",
+        ],
+    );
+    let stage_signal_is_reviewer = contains_any_keyword(
+        &profile,
+        &[
+            "review",
+            "reviewer",
+            "audit",
+            "correctness",
+            "style",
+            "maintainability",
+            "quality",
+            "verification",
+            "validate",
+            "lint",
+        ],
+    );
+    let stage_signal_is_builder = contains_any_keyword(
+        &profile,
+        &[
+            "build",
+            "builder",
+            "coder",
+            "implement",
+            "write code",
+            "frontend",
+            "backend",
+            "patch",
+            "fix",
+            "refactor",
+        ],
+    );
+
+    match stage {
+        WorkflowStageKind::Research | WorkflowStageKind::Plan => {
+            if stage_signal_is_planning {
+                return Ok(());
+            }
+            Err(McpSubagentError::SpecValidation(format!(
+                "workflow stage `{stage_raw}` should use a planning/research agent (agent=`{}` tags={:?})",
+                spec.core.name, spec.core.tags
+            )))
+        }
+        WorkflowStageKind::Review => {
+            if stage_signal_is_reviewer {
+                return Ok(());
+            }
+            if stage_signal_is_builder {
+                return Err(McpSubagentError::SpecValidation(format!(
+                    "workflow stage `{stage_raw}` should prioritize reviewer agents (agent=`{}` tags={:?})",
+                    spec.core.name, spec.core.tags
+                )));
+            }
+            Ok(())
+        }
+        WorkflowStageKind::Build | WorkflowStageKind::Archive => Ok(()),
+    }
+}
+
+fn agent_stage_profile(spec: &crate::spec::AgentSpec) -> String {
+    let mut profile = String::new();
+    profile.push_str(&spec.core.name);
+    profile.push('\n');
+    profile.push_str(&spec.core.description);
+    profile.push('\n');
+    profile.push_str(&spec.core.instructions);
+    profile.push('\n');
+    for tag in &spec.core.tags {
+        profile.push_str(tag);
+        profile.push('\n');
+    }
+    profile.to_lowercase()
 }
 
 fn collect_plan_gate_triggered_reasons(
@@ -562,6 +655,34 @@ mod tests {
         if let Some(workflow) = spec.workflow.as_mut() {
             workflow.max_runtime_depth = max_runtime_depth;
         }
+        spec
+    }
+
+    fn sample_spec_for_stage_routing(
+        name: &str,
+        tags: &[&str],
+        stages: Vec<WorkflowStageKind>,
+    ) -> AgentSpec {
+        let mut spec = sample_spec();
+        spec.core.name = name.to_string();
+        spec.core.description = format!("agent profile {name}");
+        spec.core.instructions = tags.join(" ");
+        spec.core.tags = tags.iter().map(|tag| tag.to_string()).collect();
+        spec.workflow = Some(WorkflowSpec {
+            enabled: true,
+            require_plan_when: WorkflowGatePolicy {
+                require_plan_if_touched_files_ge: None,
+                require_plan_if_cross_module: false,
+                require_plan_if_parallel_agents: false,
+                require_plan_if_new_interface: false,
+                require_plan_if_migration: false,
+                require_plan_if_human_approval_point: false,
+                require_plan_if_estimated_runtime_minutes_ge: None,
+            },
+            stages: stages.clone(),
+            allowed_stages: stages,
+            ..WorkflowSpec::default()
+        });
         spec
     }
 
@@ -931,5 +1052,97 @@ mod tests {
             err.to_string().contains("runtime depth exceeded"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn research_stage_rejects_non_planning_agent() {
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Succeeded {
+                summary: success_summary(),
+            }),
+        );
+        let mut request = sample_request();
+        request.stage = Some("Research".to_string());
+
+        let spec = sample_spec_for_stage_routing(
+            "backend-coder",
+            &["build", "backend", "codex"],
+            vec![WorkflowStageKind::Research],
+        );
+        let err = dispatcher
+            .run(&spec, &request, ResolvedMemory::default())
+            .await
+            .expect_err("research stage should reject non-planning agent");
+        assert!(err.to_string().contains("planning/research agent"));
+    }
+
+    #[tokio::test]
+    async fn plan_stage_allows_research_agent_profile() {
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Succeeded {
+                summary: success_summary(),
+            }),
+        );
+        let mut request = sample_request();
+        request.stage = Some("Plan".to_string());
+
+        let spec = sample_spec_for_stage_routing(
+            "fast-researcher",
+            &["research", "read-only"],
+            vec![WorkflowStageKind::Plan],
+        );
+        let result = dispatcher
+            .run(&spec, &request, ResolvedMemory::default())
+            .await
+            .expect("plan stage should allow research agent profile");
+        assert_eq!(result.metadata.status, RunStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn review_stage_rejects_builder_agent_profile() {
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Succeeded {
+                summary: success_summary(),
+            }),
+        );
+        let mut request = sample_request();
+        request.stage = Some("Review".to_string());
+
+        let spec = sample_spec_for_stage_routing(
+            "frontend-builder",
+            &["build", "frontend", "ui"],
+            vec![WorkflowStageKind::Review],
+        );
+        let err = dispatcher
+            .run(&spec, &request, ResolvedMemory::default())
+            .await
+            .expect_err("review stage should reject builder-like agent");
+        assert!(err.to_string().contains("prioritize reviewer agents"));
+    }
+
+    #[tokio::test]
+    async fn review_stage_allows_reviewer_agent_profile() {
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Succeeded {
+                summary: success_summary(),
+            }),
+        );
+        let mut request = sample_request();
+        request.stage = Some("Review".to_string());
+
+        let spec = sample_spec_for_stage_routing(
+            "correctness-reviewer",
+            &["review", "correctness"],
+            vec![WorkflowStageKind::Review],
+        );
+        let result = dispatcher
+            .run(&spec, &request, ResolvedMemory::default())
+            .await
+            .expect("review stage should allow reviewer agent");
+        assert_eq!(result.metadata.status, RunStatus::Succeeded);
     }
 }
