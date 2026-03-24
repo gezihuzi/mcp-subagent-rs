@@ -90,13 +90,17 @@ impl McpSubagentServer {
             lock_key.clone(),
         )
         .await?;
-        let result = dispatch.result;
+        let crate::mcp::service::DispatchEnvelope {
+            result,
+            workspace,
+            _workspace_cleanup,
+        } = dispatch;
 
         let (artifact_index, artifacts) = build_runtime_artifacts(
             &result.summary,
             &result.stdout,
             &result.stderr,
-            Some(&dispatch.workspace.workspace_path),
+            Some(&workspace.workspace_path),
         );
         let output = RunAgentOutput {
             handle_id: handle_id.clone(),
@@ -118,7 +122,7 @@ impl McpSubagentServer {
             request_snapshot: Some(request_snapshot),
             spec_snapshot: Some(spec_snapshot),
             probe_result: Some(probe_snapshot),
-            workspace: Some(dispatch.workspace),
+            workspace: Some(workspace),
         };
         self.upsert_and_persist_run(&handle_id, record).await?;
 
@@ -170,13 +174,17 @@ impl McpSubagentServer {
             }
 
             match dispatch {
-                Ok(result) => {
-                    let dispatch_result = result.result;
+                Ok(dispatch) => {
+                    let crate::mcp::service::DispatchEnvelope {
+                        result: dispatch_result,
+                        workspace,
+                        _workspace_cleanup,
+                    } = dispatch;
                     let (artifact_index, artifacts) = build_runtime_artifacts(
                         &dispatch_result.summary,
                         &dispatch_result.stdout,
                         &dispatch_result.stderr,
-                        Some(&result.workspace.workspace_path),
+                        Some(&workspace.workspace_path),
                     );
                     record.status = dispatch_result.metadata.status;
                     record.updated_at = OffsetDateTime::now_utc();
@@ -185,7 +193,7 @@ impl McpSubagentServer {
                     record.summary = Some(dispatch_result.summary);
                     record.artifact_index = artifact_index;
                     record.artifacts = artifacts;
-                    record.workspace = Some(result.workspace);
+                    record.workspace = Some(workspace);
                 }
                 Err(err) => {
                     let summary = failed_summary(err.message.clone().into_owned());

@@ -910,7 +910,10 @@ sandbox = "WorkspaceWrite"
         let workspace_path = run_obj["workspace"]["workspace_path"]
             .as_str()
             .expect("workspace path");
-        assert!(Path::new(workspace_path).join("hello.txt").exists());
+        assert!(
+            !Path::new(workspace_path).exists(),
+            "workspace should be cleaned after run completion"
+        );
         assert!(run_obj["workspace"]["lock_key"]
             .as_str()
             .expect("lock key")

@@ -7,6 +7,7 @@ use crate::{
     mcp::state::WorkspaceRecord,
     runtime::{
         claude_runner::claude_runner_from_env,
+        cleanup::WorkspaceCleanupGuard,
         codex_runner::codex_runner_from_env,
         context::DefaultContextCompiler,
         dispatcher::{DispatchResult, Dispatcher},
@@ -20,10 +21,11 @@ use crate::{
     types::RunRequest,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct DispatchEnvelope {
     pub(crate) result: DispatchResult,
     pub(crate) workspace: WorkspaceRecord,
+    pub(crate) _workspace_cleanup: Option<WorkspaceCleanupGuard>,
 }
 
 pub(crate) async fn run_dispatch(
@@ -35,6 +37,7 @@ pub(crate) async fn run_dispatch(
 ) -> std::result::Result<DispatchEnvelope, ErrorData> {
     let prepared_workspace = prepare_workspace(spec, request, state_dir, handle_id)
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+    let workspace_cleanup = WorkspaceCleanupGuard::for_workspace(&prepared_workspace);
     let workspace_record = to_workspace_record(&prepared_workspace, lock_key);
 
     let mut effective_request = request.clone();
@@ -54,6 +57,7 @@ pub(crate) async fn run_dispatch(
     Ok(DispatchEnvelope {
         result,
         workspace: workspace_record,
+        _workspace_cleanup: workspace_cleanup,
     })
 }
 
@@ -84,4 +88,117 @@ fn to_workspace_record(prepared: &PreparedWorkspace, lock_key: Option<String>) -
 
 fn parse_handle_id(handle_id: &str) -> Uuid {
     Uuid::parse_str(handle_id).unwrap_or_else(|_| Uuid::now_v7())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, fs};
+
+    use tempfile::tempdir;
+
+    use crate::{
+        mcp::service::run_dispatch,
+        spec::{
+            core::{AgentSpecCore, Provider},
+            runtime_policy::{
+                ContextMode, FileConflictPolicy, MemorySource, RuntimePolicy, SandboxPolicy,
+                WorkingDirPolicy,
+            },
+            AgentSpec,
+        },
+        types::{RunMode, RunRequest},
+    };
+
+    fn sample_spec(
+        working_dir_policy: WorkingDirPolicy,
+        memory_sources: Vec<MemorySource>,
+    ) -> AgentSpec {
+        AgentSpec {
+            core: AgentSpecCore {
+                name: "writer".to_string(),
+                description: "write code".to_string(),
+                provider: Provider::Ollama,
+                model: None,
+                instructions: "write".to_string(),
+                allowed_tools: Vec::new(),
+                disallowed_tools: Vec::new(),
+                skills: Vec::new(),
+                tags: Vec::new(),
+                metadata: HashMap::new(),
+            },
+            runtime: RuntimePolicy {
+                context_mode: ContextMode::Isolated,
+                memory_sources,
+                working_dir_policy,
+                file_conflict_policy: FileConflictPolicy::Serialize,
+                sandbox: SandboxPolicy::WorkspaceWrite,
+                ..RuntimePolicy::default()
+            },
+            provider_overrides: Default::default(),
+        }
+    }
+
+    fn sample_request(working_dir: std::path::PathBuf) -> RunRequest {
+        RunRequest {
+            task: "task".to_string(),
+            task_brief: None,
+            parent_summary: None,
+            selected_files: Vec::new(),
+            working_dir,
+            run_mode: RunMode::Sync,
+            acceptance_criteria: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_dispatch_cleans_temp_workspace_after_success() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        fs::create_dir_all(&source).expect("create source");
+        fs::write(source.join("a.txt"), "hello").expect("write source");
+
+        let spec = sample_spec(
+            WorkingDirPolicy::TempCopy,
+            vec![MemorySource::AutoProjectMemory],
+        );
+        let request = sample_request(source);
+        let handle = "run-success-cleanup";
+        let state_dir = temp.path().join("state");
+
+        let dispatch = run_dispatch(&spec, &request, handle, &state_dir, None)
+            .await
+            .expect("dispatch succeeds");
+        let workspace_path = dispatch.workspace.workspace_path.clone();
+        assert!(workspace_path.exists());
+
+        drop(dispatch);
+        assert!(!workspace_path.exists());
+    }
+
+    #[tokio::test]
+    async fn run_dispatch_error_path_cleans_temp_workspace() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        fs::create_dir_all(&source).expect("create source");
+        fs::write(source.join("a.txt"), "hello").expect("write source");
+
+        let spec = sample_spec(
+            WorkingDirPolicy::TempCopy,
+            vec![MemorySource::Glob("missing/**/*.md".to_string())],
+        );
+        let request = sample_request(source);
+        let handle = "run-error-cleanup";
+        let state_dir = temp.path().join("state");
+
+        let err = run_dispatch(&spec, &request, handle, &state_dir, None)
+            .await
+            .expect_err("dispatch should fail at memory resolve");
+        assert!(err
+            .message
+            .as_ref()
+            .contains("Glob memory source did not match any files"));
+
+        let workspace_path = state_dir.join("runs").join(handle).join("workspace");
+        assert!(!workspace_path.exists());
+    }
 }

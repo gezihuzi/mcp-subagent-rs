@@ -525,3 +525,33 @@
   - `gemini_runner_rejects_unvalidated_approval_policy`
   - `doctor` 渲染断言覆盖 `validated_flags`
 - 已通过 `cargo fmt && cargo test`（65 passed）与 `cargo run -- validate`（summary contract template: ok）。
+
+## T-028 V0.6-P0-5-WorkspaceLifecycleCleanup (Completed 2026-03-24)
+
+任务：推进 v0.6 P0-5，补齐 temp/worktree 生命周期清理闭环，确保成功和失败路径都不会遗留悬挂 workspace。
+验收标准：
+
+1. 新增 `runtime/cleanup` 清理模块，并接入 dispatch 生命周期。
+2. `TempCopy` 与 `GitWorktree`（含 fallback）在运行结束后自动清理 workspace。
+3. dispatch 失败路径（如 memory resolve 失败）同样触发补偿清理。
+4. `runtime/workspace` 在准备失败时执行 best-effort 回滚，避免半创建目录残留。
+5. 新增测试覆盖成功清理、失败补偿清理与 git worktree 降级清理。
+6. `cargo test` 与 `cargo run -- validate` 通过。
+完成记录：
+
+- 已新增 `src/runtime/cleanup.rs`：
+  - `WorkspaceCleanupGuard`（基于 Drop 的生命周期清理）
+  - `TempCopy/GitWorktreeFallbackTempCopy` 目录删除
+  - `GitWorktree` 优先 `git worktree remove --force`，失败后回退 `remove_dir_all`
+- `src/mcp/service.rs` 的 `run_dispatch` 已接入 cleanup guard，确保：
+  - 正常完成后在产物采集后自动清理
+  - dispatch 错误返回前自动触发清理
+  - 异步任务被中断时 guard drop 也能触发清理
+- `src/mcp/tools.rs` 已调整 envelope 解构，显式持有 cleanup guard 到 artifact materialization 完成。
+- `src/runtime/workspace.rs` 已补准备阶段失败补偿：复制失败时 best-effort 清理半创建 workspace 目录。
+- 已新增/更新测试：
+  - `runtime::cleanup::tests::*`（in-place 无 guard、temp 清理、git fallback 清理）
+  - `mcp::service::tests::run_dispatch_cleans_temp_workspace_after_success`
+  - `mcp::service::tests::run_dispatch_error_path_cleans_temp_workspace`
+  - `mcp::server::tests::run_agent_tempcopy_persists_workspace_metadata`（断言 run 后 workspace 已清理）
+- 已通过 `cargo test`（70 passed）与 `cargo run -- validate`（summary contract template: ok）。

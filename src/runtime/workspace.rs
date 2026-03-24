@@ -81,7 +81,10 @@ fn prepare_temp_copy_workspace(
     if workspace_path.exists() {
         fs::remove_dir_all(&workspace_path)?;
     }
-    copy_dir_recursively(&source_path, &workspace_path)?;
+    if let Err(err) = copy_dir_recursively(&source_path, &workspace_path) {
+        remove_dir_if_exists_best_effort(&workspace_path);
+        return Err(err);
+    }
     Ok(PreparedWorkspace {
         source_path,
         workspace_path,
@@ -108,7 +111,10 @@ fn prepare_git_worktree_workspace(
             notes: Vec::new(),
         }),
         Err(reason) => {
-            copy_dir_recursively(&source_path, &workspace_path)?;
+            if let Err(err) = copy_dir_recursively(&source_path, &workspace_path) {
+                remove_dir_if_exists_best_effort(&workspace_path);
+                return Err(err);
+            }
             Ok(PreparedWorkspace {
                 source_path,
                 workspace_path,
@@ -188,6 +194,13 @@ fn copy_dir_recursively(source_path: &Path, destination_path: &Path) -> Result<(
         fs::copy(src, &dst)?;
     }
     Ok(())
+}
+
+fn remove_dir_if_exists_best_effort(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    let _ = fs::remove_dir_all(path);
 }
 
 #[cfg(test)]
