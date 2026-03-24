@@ -62,6 +62,10 @@ enum Commands {
         task_brief: Option<String>,
         #[arg(long)]
         parent_summary: Option<String>,
+        #[arg(long)]
+        stage: Option<String>,
+        #[arg(long = "plan")]
+        plan_ref: Option<String>,
         #[arg(long = "selected-file")]
         selected_files: Vec<PathBuf>,
         #[arg(long)]
@@ -77,6 +81,10 @@ enum Commands {
         task_brief: Option<String>,
         #[arg(long)]
         parent_summary: Option<String>,
+        #[arg(long)]
+        stage: Option<String>,
+        #[arg(long = "plan")]
+        plan_ref: Option<String>,
         #[arg(long = "selected-file")]
         selected_files: Vec<PathBuf>,
         #[arg(long)]
@@ -195,6 +203,8 @@ async fn main() -> ExitCode {
             task,
             task_brief,
             parent_summary,
+            stage,
+            plan_ref,
             selected_files,
             working_dir,
             json,
@@ -219,6 +229,8 @@ async fn main() -> ExitCode {
                 task,
                 task_brief,
                 parent_summary,
+                stage,
+                plan_ref,
                 selected_files,
                 working_dir,
                 json,
@@ -230,6 +242,8 @@ async fn main() -> ExitCode {
             task,
             task_brief,
             parent_summary,
+            stage,
+            plan_ref,
             selected_files,
             working_dir,
             json,
@@ -254,6 +268,8 @@ async fn main() -> ExitCode {
                 task,
                 task_brief,
                 parent_summary,
+                stage,
+                plan_ref,
                 selected_files,
                 working_dir,
                 json,
@@ -443,6 +459,8 @@ async fn run_agent(
     task: String,
     task_brief: Option<String>,
     parent_summary: Option<String>,
+    stage: Option<String>,
+    plan_ref: Option<String>,
     selected_files: Vec<PathBuf>,
     working_dir: Option<PathBuf>,
     json: bool,
@@ -454,6 +472,8 @@ async fn run_agent(
         task_brief,
         parent_summary,
         selected_files: selected_file_inputs(selected_files),
+        stage,
+        plan_ref,
         working_dir: working_dir.map(|path| path.display().to_string()),
     };
 
@@ -489,6 +509,8 @@ async fn spawn_agent(
     task: String,
     task_brief: Option<String>,
     parent_summary: Option<String>,
+    stage: Option<String>,
+    plan_ref: Option<String>,
     selected_files: Vec<PathBuf>,
     working_dir: Option<PathBuf>,
     json: bool,
@@ -500,6 +522,8 @@ async fn spawn_agent(
         task_brief,
         parent_summary,
         selected_files: selected_file_inputs(selected_files),
+        stage,
+        plan_ref,
         working_dir: working_dir.map(|path| path.display().to_string()),
     };
 

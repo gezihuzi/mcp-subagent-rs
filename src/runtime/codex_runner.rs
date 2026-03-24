@@ -48,6 +48,13 @@ impl CodexRunner {
             "mcp-subagent-codex-last-message-{}.txt",
             uuid::Uuid::now_v7()
         ));
+        let schema_file = std::env::temp_dir().join(format!(
+            "mcp-subagent-summary-schema-{}.json",
+            uuid::Uuid::now_v7()
+        ));
+        let schema = schemars::schema_for!(crate::runtime::summary::SummaryEnvelope);
+        let schema_json = serde_json::to_string_pretty(&schema).map_err(McpSubagentError::Json)?;
+        fs::write(&schema_file, schema_json).map_err(McpSubagentError::Io)?;
         let timeout = Duration::from_secs(spec.runtime.timeout_secs.max(1));
         let approval_mode = resolve_approval_mode(spec)?;
 
@@ -63,6 +70,8 @@ impl CodexRunner {
             .arg(&request.working_dir)
             .arg("--output-last-message")
             .arg(&output_file)
+            .arg("--output-schema")
+            .arg(&schema_file)
             .arg("-")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -95,6 +104,8 @@ impl CodexRunner {
         let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Ok(waited) => waited.map_err(McpSubagentError::Io)?,
             Err(_) => {
+                let _ = fs::remove_file(&output_file);
+                let _ = fs::remove_file(&schema_file);
                 return Ok(RunnerExecution {
                     terminal_state: RunnerTerminalState::TimedOut,
                     stdout: String::new(),
@@ -114,6 +125,7 @@ impl CodexRunner {
             }
         }
         let _ = fs::remove_file(&output_file);
+        let _ = fs::remove_file(&schema_file);
 
         let terminal_state = if output.status.success() {
             RunnerTerminalState::Succeeded
@@ -250,6 +262,7 @@ mod tests {
                 ..RuntimePolicy::default()
             },
             provider_overrides: Default::default(),
+            workflow: None,
         }
     }
 
@@ -259,6 +272,8 @@ mod tests {
             task_brief: None,
             parent_summary: None,
             selected_files: Vec::new(),
+            stage: None,
+            plan_ref: None,
             working_dir,
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
@@ -322,6 +337,71 @@ exit 0
 
         assert_eq!(execution.terminal_state, RunnerTerminalState::Succeeded);
         assert!(execution.stdout.contains("MCP_SUBAGENT_SUMMARY_JSON_START"));
+    }
+
+    #[tokio::test]
+    async fn codex_runner_passes_output_schema_flag() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("fake-codex-schema.sh");
+        let script = r#"#!/bin/sh
+set -eu
+output_file=""
+schema_file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output-last-message)
+      output_file="$2"
+      shift 2
+      ;;
+    --output-schema)
+      schema_file="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+[ -n "$schema_file" ] || { echo "missing --output-schema" >&2; exit 12; }
+[ -f "$schema_file" ] || { echo "schema file not found" >&2; exit 13; }
+cat >/dev/null
+cat >"$output_file" <<'EOF'
+<<<MCP_SUBAGENT_SUMMARY_JSON_START>>>
+{
+  "summary": "ok",
+  "key_findings": ["a"],
+  "artifacts": [],
+  "open_questions": [],
+  "next_steps": ["next"],
+  "exit_code": 0,
+  "verification_status": "Passed",
+  "touched_files": ["src/lib.rs"],
+  "plan_refs": []
+}
+<<<MCP_SUBAGENT_SUMMARY_JSON_END>>>
+EOF
+exit 0
+"#;
+        fs::write(&script_path, script).expect("write script");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod");
+
+        let runner = CodexRunner::new(script_path);
+        let execution = runner
+            .execute(
+                &sample_spec(),
+                &sample_request(dir.path().to_path_buf()),
+                &CompiledContext {
+                    system_prefix: "sys".to_string(),
+                    injected_prompt: "prompt".to_string(),
+                    source_manifest: Vec::new(),
+                },
+            )
+            .await
+            .expect("execute");
+
+        assert_eq!(execution.terminal_state, RunnerTerminalState::Succeeded);
     }
 
     #[tokio::test]

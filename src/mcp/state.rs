@@ -7,7 +7,7 @@ use tokio::{sync::Mutex, task::JoinHandle};
 use crate::{
     mcp::dto::ArtifactOutput,
     probe::ProviderProbe,
-    runtime::{dispatcher::RunStatus, summary::StructuredSummary},
+    runtime::{dispatcher::RunStatus, summary::SummaryEnvelope},
     spec::{
         runtime_policy::{
             ApprovalPolicy, ContextMode, FileConflictPolicy, MemorySource, SandboxPolicy,
@@ -15,7 +15,7 @@ use crate::{
         },
         AgentSpec,
     },
-    types::{RunMode, RunRequest},
+    types::{ResolvedMemory, RunMode, RunRequest},
 };
 
 #[derive(Debug, Default)]
@@ -31,7 +31,7 @@ pub(crate) struct RunRecord {
     pub(crate) created_at: OffsetDateTime,
     pub(crate) updated_at: OffsetDateTime,
     pub(crate) status_history: Vec<RunStatus>,
-    pub(crate) summary: Option<StructuredSummary>,
+    pub(crate) summary: Option<SummaryEnvelope>,
     pub(crate) artifact_index: Vec<ArtifactOutput>,
     pub(crate) artifacts: HashMap<String, String>,
     pub(crate) error_message: Option<String>,
@@ -39,7 +39,9 @@ pub(crate) struct RunRecord {
     pub(crate) request_snapshot: Option<RunRequestSnapshot>,
     pub(crate) spec_snapshot: Option<RunSpecSnapshot>,
     pub(crate) probe_result: Option<ProbeResultRecord>,
+    pub(crate) memory_resolution: Option<MemoryResolutionRecord>,
     pub(crate) workspace: Option<WorkspaceRecord>,
+    pub(crate) compiled_context_markdown: Option<String>,
 }
 
 impl RunRecord {
@@ -68,7 +70,9 @@ impl RunRecord {
             request_snapshot,
             spec_snapshot,
             probe_result,
+            memory_resolution: None,
             workspace: None,
+            compiled_context_markdown: None,
         }
     }
 }
@@ -87,51 +91,69 @@ pub(crate) struct WorkspaceRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SelectedFileSnapshot {
-    path: PathBuf,
+pub(crate) struct SelectedFileSnapshot {
+    pub(crate) path: PathBuf,
     #[serde(default)]
-    rationale: Option<String>,
-    has_inlined_content: bool,
+    pub(crate) rationale: Option<String>,
+    pub(crate) has_inlined_content: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RunRequestSnapshot {
-    task: String,
+    pub(crate) task: String,
     #[serde(default)]
-    task_brief: Option<String>,
-    parent_summary_present: bool,
-    selected_files: Vec<SelectedFileSnapshot>,
-    working_dir: PathBuf,
-    run_mode: RunMode,
-    acceptance_criteria: Vec<String>,
+    pub(crate) task_brief: Option<String>,
+    pub(crate) parent_summary_present: bool,
+    pub(crate) selected_files: Vec<SelectedFileSnapshot>,
+    #[serde(default)]
+    pub(crate) stage: Option<String>,
+    #[serde(default)]
+    pub(crate) plan_ref: Option<String>,
+    pub(crate) working_dir: PathBuf,
+    pub(crate) run_mode: RunMode,
+    pub(crate) acceptance_criteria: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RunSpecSnapshot {
-    name: String,
-    provider: String,
+    pub(crate) name: String,
+    pub(crate) provider: String,
     #[serde(default)]
-    model: Option<String>,
-    context_mode: String,
-    working_dir_policy: String,
-    file_conflict_policy: String,
-    sandbox: String,
-    approval: String,
-    timeout_secs: u64,
-    memory_sources: Vec<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) context_mode: String,
+    pub(crate) working_dir_policy: String,
+    pub(crate) file_conflict_policy: String,
+    pub(crate) sandbox: String,
+    pub(crate) approval: String,
+    pub(crate) timeout_secs: u64,
+    pub(crate) memory_sources: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProbeResultRecord {
-    provider: String,
-    executable: PathBuf,
+    pub(crate) provider: String,
+    pub(crate) executable: PathBuf,
     #[serde(default)]
-    version: Option<String>,
-    status: String,
-    notes: Vec<String>,
+    pub(crate) version: Option<String>,
+    pub(crate) status: String,
+    pub(crate) notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MemoryResolutionRecord {
+    pub(crate) project_memory_count: usize,
+    pub(crate) additional_memory_count: usize,
+    pub(crate) native_passthrough_count: usize,
+    #[serde(default)]
+    pub(crate) project_memory_labels: Vec<String>,
+    #[serde(default)]
+    pub(crate) additional_memory_labels: Vec<String>,
+    #[serde(default)]
+    pub(crate) native_passthrough_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,7 +165,7 @@ pub(crate) struct PersistedRunRecord {
     pub(crate) updated_at: OffsetDateTime,
     #[serde(default)]
     pub(crate) status_history: Vec<RunStatus>,
-    pub(crate) summary: Option<StructuredSummary>,
+    pub(crate) summary: Option<SummaryEnvelope>,
     pub(crate) artifact_index: Vec<ArtifactOutput>,
     pub(crate) error_message: Option<String>,
     pub(crate) task: String,
@@ -154,7 +176,11 @@ pub(crate) struct PersistedRunRecord {
     #[serde(default)]
     pub(crate) probe_result: Option<ProbeResultRecord>,
     #[serde(default)]
+    pub(crate) memory_resolution: Option<MemoryResolutionRecord>,
+    #[serde(default)]
     pub(crate) workspace: Option<WorkspaceRecord>,
+    #[serde(default)]
+    pub(crate) compiled_context_markdown: Option<String>,
 }
 
 impl From<&RunRecord> for PersistedRunRecord {
@@ -171,7 +197,9 @@ impl From<&RunRecord> for PersistedRunRecord {
             request_snapshot: value.request_snapshot.clone(),
             spec_snapshot: value.spec_snapshot.clone(),
             probe_result: value.probe_result.clone(),
+            memory_resolution: value.memory_resolution.clone(),
             workspace: value.workspace.clone(),
+            compiled_context_markdown: value.compiled_context_markdown.clone(),
         }
     }
 }
@@ -190,6 +218,8 @@ pub(crate) fn build_run_request_snapshot(request: &RunRequest) -> RunRequestSnap
                 has_inlined_content: selected.content.is_some(),
             })
             .collect(),
+        stage: request.stage.clone(),
+        plan_ref: request.plan_ref.clone(),
         working_dir: request.working_dir.clone(),
         run_mode: request.run_mode.clone(),
         acceptance_criteria: request.acceptance_criteria.clone(),
@@ -226,6 +256,25 @@ pub(crate) fn build_probe_result_snapshot(probe: &ProviderProbe) -> ProbeResultR
     }
 }
 
+pub(crate) fn build_memory_resolution_snapshot(memory: &ResolvedMemory) -> MemoryResolutionRecord {
+    MemoryResolutionRecord {
+        project_memory_count: memory.project_memories.len(),
+        additional_memory_count: memory.additional_memories.len(),
+        native_passthrough_count: memory.native_passthrough_paths.len(),
+        project_memory_labels: memory
+            .project_memories
+            .iter()
+            .map(|item| item.label.clone())
+            .collect(),
+        additional_memory_labels: memory
+            .additional_memories
+            .iter()
+            .map(|item| item.label.clone())
+            .collect(),
+        native_passthrough_paths: memory.native_passthrough_paths.clone(),
+    }
+}
+
 pub(crate) fn append_status_if_terminal(status_history: &mut Vec<RunStatus>, status: RunStatus) {
     if status_history.last().is_some_and(|last| *last == status) {
         return;
@@ -244,6 +293,7 @@ fn context_mode_to_str(mode: &ContextMode) -> String {
 
 fn working_dir_policy_to_str(policy: &WorkingDirPolicy) -> String {
     match policy {
+        WorkingDirPolicy::Auto => "Auto".to_string(),
         WorkingDirPolicy::InPlace => "InPlace".to_string(),
         WorkingDirPolicy::TempCopy => "TempCopy".to_string(),
         WorkingDirPolicy::GitWorktree => "GitWorktree".to_string(),
@@ -278,6 +328,8 @@ fn approval_policy_to_str(policy: &ApprovalPolicy) -> String {
 fn memory_source_to_str(source: &MemorySource) -> String {
     match source {
         MemorySource::AutoProjectMemory => "AutoProjectMemory".to_string(),
+        MemorySource::ActivePlan => "ActivePlan".to_string(),
+        MemorySource::ArchivedPlans => "ArchivedPlans".to_string(),
         MemorySource::File(path) => format!("File({path})"),
         MemorySource::Glob(pattern) => format!("Glob({pattern})"),
         MemorySource::Inline(_) => "Inline(<content>)".to_string(),

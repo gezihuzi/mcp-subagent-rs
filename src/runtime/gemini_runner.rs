@@ -196,6 +196,7 @@ mod tests {
                 ..RuntimePolicy::default()
             },
             provider_overrides: Default::default(),
+            workflow: None,
         }
     }
 
@@ -205,6 +206,8 @@ mod tests {
             task_brief: None,
             parent_summary: None,
             selected_files: Vec::new(),
+            stage: None,
+            plan_ref: None,
             working_dir,
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),

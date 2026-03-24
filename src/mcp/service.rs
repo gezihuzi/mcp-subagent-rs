@@ -4,7 +4,7 @@ use rmcp::ErrorData;
 use uuid::Uuid;
 
 use crate::{
-    mcp::state::WorkspaceRecord,
+    mcp::state::{build_memory_resolution_snapshot, MemoryResolutionRecord, WorkspaceRecord},
     runtime::{
         claude_runner::claude_runner_from_env,
         cleanup::WorkspaceCleanupGuard,
@@ -25,6 +25,7 @@ use crate::{
 pub(crate) struct DispatchEnvelope {
     pub(crate) result: DispatchResult,
     pub(crate) workspace: WorkspaceRecord,
+    pub(crate) memory_resolution: MemoryResolutionRecord,
     pub(crate) _workspace_cleanup: Option<WorkspaceCleanupGuard>,
 }
 
@@ -44,6 +45,7 @@ pub(crate) async fn run_dispatch(
     effective_request.working_dir = prepared_workspace.workspace_path;
     let resolved_memory = resolve_memory(spec, &effective_request)
         .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
+    let memory_resolution = build_memory_resolution_snapshot(&resolved_memory);
 
     let runner = select_runner(&spec.core.provider);
     let dispatcher = Dispatcher::new(DefaultContextCompiler, runner);
@@ -57,16 +59,22 @@ pub(crate) async fn run_dispatch(
     Ok(DispatchEnvelope {
         result,
         workspace: workspace_record,
+        memory_resolution,
         _workspace_cleanup: workspace_cleanup,
     })
 }
 
 fn select_runner(provider: &Provider) -> Box<dyn AgentRunner> {
     match provider {
+        Provider::Mock => Box::new(MockRunner::new(MockRunPlan::SucceededFromRequest)),
         Provider::Claude => Box::new(claude_runner_from_env()),
         Provider::Codex => Box::new(codex_runner_from_env()),
         Provider::Gemini => Box::new(gemini_runner_from_env()),
-        Provider::Ollama => Box::new(MockRunner::new(MockRunPlan::SucceededFromRequest)),
+        Provider::Ollama => Box::new(MockRunner::new(MockRunPlan::Failed {
+            message: "provider `Ollama` is reserved in current build".to_string(),
+            stdout: String::new(),
+            stderr: "ollama runner is not enabled".to_string(),
+        })),
     }
 }
 
@@ -117,7 +125,7 @@ mod tests {
             core: AgentSpecCore {
                 name: "writer".to_string(),
                 description: "write code".to_string(),
-                provider: Provider::Ollama,
+                provider: Provider::Mock,
                 model: None,
                 instructions: "write".to_string(),
                 allowed_tools: Vec::new(),
@@ -135,6 +143,7 @@ mod tests {
                 ..RuntimePolicy::default()
             },
             provider_overrides: Default::default(),
+            workflow: None,
         }
     }
 
@@ -144,6 +153,8 @@ mod tests {
             task_brief: None,
             parent_summary: None,
             selected_files: Vec::new(),
+            stage: None,
+            plan_ref: None,
             working_dir,
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),

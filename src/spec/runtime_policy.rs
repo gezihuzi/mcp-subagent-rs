@@ -13,6 +13,8 @@ pub enum ContextMode {
 #[serde(rename_all = "PascalCase")]
 pub enum MemorySource {
     AutoProjectMemory,
+    ActivePlan,
+    ArchivedPlans,
     File(String),
     Glob(String),
     Inline(String),
@@ -21,6 +23,7 @@ pub enum MemorySource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum WorkingDirPolicy {
+    Auto,
     InPlace,
     TempCopy,
     GitWorktree,
@@ -151,11 +154,11 @@ fn default_context_mode() -> ContextMode {
 }
 
 fn default_memory_sources() -> Vec<MemorySource> {
-    vec![MemorySource::AutoProjectMemory]
+    vec![MemorySource::AutoProjectMemory, MemorySource::ActivePlan]
 }
 
 fn default_working_dir_policy() -> WorkingDirPolicy {
-    WorkingDirPolicy::TempCopy
+    WorkingDirPolicy::Auto
 }
 
 fn default_file_conflict_policy() -> FileConflictPolicy {

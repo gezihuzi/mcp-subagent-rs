@@ -14,6 +14,9 @@ use crate::{
 
 const MAX_MEMORY_SNIPPET_BYTES: usize = 32 * 1024;
 const PROJECT_MEMORY_CANDIDATES: [&str; 2] = ["PROJECT.md", ".mcp-subagent/PROJECT.md"];
+const ACTIVE_PLAN_CANDIDATES: [&str; 2] = ["PLAN.md", ".mcp-subagent/PLAN.md"];
+const ARCHIVED_PLAN_GLOB_PATTERNS: [&str; 3] =
+    ["docs/plans/*.md", "archive/*.md", "plans/archive/*.md"];
 
 pub fn resolve_memory(spec: &AgentSpec, request: &RunRequest) -> Result<ResolvedMemory> {
     let mut resolver = MemoryResolver::new(&request.working_dir);
@@ -21,6 +24,12 @@ pub fn resolve_memory(spec: &AgentSpec, request: &RunRequest) -> Result<Resolved
         match source {
             MemorySource::AutoProjectMemory => {
                 resolver.resolve_auto_project_memory(&spec.core.provider)?;
+            }
+            MemorySource::ActivePlan => {
+                resolver.resolve_active_plan()?;
+            }
+            MemorySource::ArchivedPlans => {
+                resolver.resolve_archived_plans()?;
             }
             MemorySource::File(path) => {
                 resolver.resolve_file_source(path)?;
@@ -75,6 +84,45 @@ impl<'a> MemoryResolver<'a> {
             }
             self.add_native_passthrough(full_path);
         }
+        Ok(())
+    }
+
+    fn resolve_active_plan(&mut self) -> Result<()> {
+        for relative in ACTIVE_PLAN_CANDIDATES {
+            let full_path = self.workspace_root.join(relative);
+            if !full_path.is_file() {
+                continue;
+            }
+            self.add_inline_file(&full_path, &format!("active_plan:{relative}"), false)?;
+            return Ok(());
+        }
+
+        Ok(())
+    }
+
+    fn resolve_archived_plans(&mut self) -> Result<()> {
+        for pattern in ARCHIVED_PLAN_GLOB_PATTERNS {
+            let absolute_pattern = self.workspace_root.join(pattern);
+            let pattern_text = absolute_pattern.to_string_lossy().to_string();
+            let entries = glob(&pattern_text).map_err(|err| {
+                McpSubagentError::SpecValidation(format!(
+                    "invalid archived plan glob pattern `{pattern}`: {err}"
+                ))
+            })?;
+
+            for entry in entries {
+                let path = entry.map_err(|err| {
+                    McpSubagentError::SpecValidation(format!(
+                        "invalid path matched by archived plan glob `{pattern}`: {err}"
+                    ))
+                })?;
+                if !path.is_file() {
+                    continue;
+                }
+                self.add_inline_file(&path, &format!("archived_plan:{pattern}"), false)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -179,6 +227,7 @@ impl<'a> MemoryResolver<'a> {
 
 fn provider_native_memory_candidates(provider: &Provider) -> &'static [&'static str] {
     match provider {
+        Provider::Mock => &[],
         Provider::Claude => &["CLAUDE.md", ".claude/CLAUDE.md"],
         Provider::Codex => &["AGENTS.md", "AGENTS.override.md"],
         Provider::Gemini => &["GEMINI.md"],
@@ -240,6 +289,7 @@ mod tests {
             },
             runtime,
             provider_overrides: Default::default(),
+            workflow: None,
         }
     }
 
@@ -249,6 +299,8 @@ mod tests {
             task_brief: None,
             parent_summary: None,
             selected_files: Vec::new(),
+            stage: None,
+            plan_ref: None,
             working_dir,
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
@@ -331,5 +383,51 @@ mod tests {
             err.to_string().contains("did not match any files"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn active_plan_source_is_noop_when_plan_missing() {
+        let temp = tempdir().expect("tempdir");
+        let spec = sample_spec(Provider::Codex, vec![MemorySource::ActivePlan]);
+        let request = sample_request(temp.path().to_path_buf());
+
+        let resolved = resolve_memory(&spec, &request).expect("resolve");
+        assert!(resolved.additional_memories.is_empty());
+    }
+
+    #[test]
+    fn active_plan_source_inlines_plan_content() {
+        let temp = tempdir().expect("tempdir");
+        fs::write(temp.path().join("PLAN.md"), "# Goal\nship feature").expect("write plan");
+        let spec = sample_spec(Provider::Codex, vec![MemorySource::ActivePlan]);
+        let request = sample_request(temp.path().to_path_buf());
+
+        let resolved = resolve_memory(&spec, &request).expect("resolve");
+        assert_eq!(resolved.additional_memories.len(), 1);
+        assert!(resolved.additional_memories[0]
+            .label
+            .contains("active_plan"));
+        assert!(resolved.additional_memories[0]
+            .content
+            .contains("ship feature"));
+    }
+
+    #[test]
+    fn archived_plans_source_inlines_existing_archives() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("docs/plans")).expect("create plans dir");
+        fs::write(
+            temp.path().join("docs/plans/2026-03-24-demo.md"),
+            "archived plan",
+        )
+        .expect("write archived");
+        let spec = sample_spec(Provider::Codex, vec![MemorySource::ArchivedPlans]);
+        let request = sample_request(temp.path().to_path_buf());
+
+        let resolved = resolve_memory(&spec, &request).expect("resolve");
+        assert_eq!(resolved.additional_memories.len(), 1);
+        assert!(resolved.additional_memories[0]
+            .label
+            .contains("archived_plan"));
     }
 }

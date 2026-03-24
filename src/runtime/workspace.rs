@@ -9,7 +9,10 @@ use walkdir::WalkDir;
 
 use crate::{
     error::{McpSubagentError, Result},
-    spec::{runtime_policy::WorkingDirPolicy, AgentSpec},
+    spec::{
+        runtime_policy::{SandboxPolicy, WorkingDirPolicy},
+        AgentSpec,
+    },
     types::RunRequest,
 };
 
@@ -39,6 +42,9 @@ pub fn prepare_workspace(
 ) -> Result<PreparedWorkspace> {
     let source_path = resolve_source_path(&request.working_dir)?;
     match spec.runtime.working_dir_policy {
+        WorkingDirPolicy::Auto => {
+            prepare_auto_workspace(spec, request, source_path, state_dir, handle_id)
+        }
         WorkingDirPolicy::InPlace => Ok(PreparedWorkspace {
             source_path: source_path.clone(),
             workspace_path: source_path,
@@ -52,6 +58,43 @@ pub fn prepare_workspace(
             prepare_git_worktree_workspace(source_path, state_dir, handle_id)
         }
     }
+}
+
+fn prepare_auto_workspace(
+    spec: &AgentSpec,
+    request: &RunRequest,
+    source_path: PathBuf,
+    state_dir: &Path,
+    handle_id: &str,
+) -> Result<PreparedWorkspace> {
+    let stage = request
+        .stage
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let read_stage = matches!(stage.as_str(), "research" | "plan");
+    let read_only = matches!(spec.runtime.sandbox, SandboxPolicy::ReadOnly);
+
+    if read_only || read_stage {
+        let mut notes = Vec::new();
+        if read_only {
+            notes.push("auto policy selected in-place workspace for read-only sandbox".to_string());
+        }
+        if read_stage {
+            notes.push(format!(
+                "auto policy selected in-place workspace for stage `{}`",
+                request.stage.as_deref().unwrap_or_default()
+            ));
+        }
+        return Ok(PreparedWorkspace {
+            source_path: source_path.clone(),
+            workspace_path: source_path,
+            mode: WorkspaceMode::InPlace,
+            notes,
+        });
+    }
+
+    prepare_git_worktree_workspace(source_path, state_dir, handle_id)
 }
 
 pub fn resolve_source_path(path: &Path) -> Result<PathBuf> {
@@ -220,11 +263,15 @@ mod tests {
     };
 
     fn sample_spec(policy: WorkingDirPolicy) -> AgentSpec {
+        sample_spec_with_sandbox(policy, SandboxPolicy::WorkspaceWrite)
+    }
+
+    fn sample_spec_with_sandbox(policy: WorkingDirPolicy, sandbox: SandboxPolicy) -> AgentSpec {
         AgentSpec {
             core: AgentSpecCore {
                 name: "writer".to_string(),
                 description: "write code".to_string(),
-                provider: Provider::Ollama,
+                provider: Provider::Mock,
                 model: None,
                 instructions: "do work".to_string(),
                 allowed_tools: Vec::new(),
@@ -236,10 +283,11 @@ mod tests {
             runtime: RuntimePolicy {
                 working_dir_policy: policy,
                 file_conflict_policy: FileConflictPolicy::Serialize,
-                sandbox: SandboxPolicy::WorkspaceWrite,
+                sandbox,
                 ..RuntimePolicy::default()
             },
             provider_overrides: Default::default(),
+            workflow: None,
         }
     }
 
@@ -251,6 +299,8 @@ mod tests {
             task_brief: None,
             parent_summary: None,
             selected_files: Vec::new(),
+            stage: None,
+            plan_ref: None,
             working_dir: temp.path().to_path_buf(),
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
@@ -281,6 +331,8 @@ mod tests {
             task_brief: None,
             parent_summary: None,
             selected_files: Vec::new(),
+            stage: None,
+            plan_ref: None,
             working_dir: source.clone(),
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
@@ -307,6 +359,8 @@ mod tests {
             task_brief: None,
             parent_summary: None,
             selected_files: Vec::new(),
+            stage: None,
+            plan_ref: None,
             working_dir: source,
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
@@ -321,5 +375,66 @@ mod tests {
         .expect("prepare");
         assert_eq!(prepared.mode, WorkspaceMode::GitWorktreeFallbackTempCopy);
         assert!(!prepared.notes.is_empty());
+    }
+
+    #[test]
+    fn auto_policy_uses_in_place_for_read_only_task() {
+        let temp = tempdir().expect("tempdir");
+        let request = RunRequest {
+            task: "task".to_string(),
+            task_brief: None,
+            parent_summary: None,
+            selected_files: Vec::new(),
+            stage: Some("Research".to_string()),
+            plan_ref: None,
+            working_dir: temp.path().to_path_buf(),
+            run_mode: RunMode::Sync,
+            acceptance_criteria: Vec::new(),
+        };
+
+        let prepared = prepare_workspace(
+            &sample_spec_with_sandbox(WorkingDirPolicy::Auto, SandboxPolicy::ReadOnly),
+            &request,
+            temp.path(),
+            "h4",
+        )
+        .expect("prepare");
+
+        assert_eq!(prepared.mode, WorkspaceMode::InPlace);
+        assert!(prepared
+            .notes
+            .iter()
+            .any(|note| note.contains("read-only sandbox")));
+    }
+
+    #[test]
+    fn auto_policy_prefers_worktree_for_write_task() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&source).expect("create source");
+        let request = RunRequest {
+            task: "task".to_string(),
+            task_brief: None,
+            parent_summary: None,
+            selected_files: Vec::new(),
+            stage: Some("Build".to_string()),
+            plan_ref: None,
+            working_dir: source,
+            run_mode: RunMode::Sync,
+            acceptance_criteria: Vec::new(),
+        };
+
+        let prepared = prepare_workspace(
+            &sample_spec_with_sandbox(WorkingDirPolicy::Auto, SandboxPolicy::WorkspaceWrite),
+            &request,
+            temp.path(),
+            "h5",
+        )
+        .expect("prepare");
+
+        assert!(matches!(
+            prepared.mode,
+            WorkspaceMode::GitWorktree | WorkspaceMode::GitWorktreeFallbackTempCopy
+        ));
     }
 }

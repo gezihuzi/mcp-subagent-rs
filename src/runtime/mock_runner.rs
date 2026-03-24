@@ -111,6 +111,7 @@ fn build_mock_summary_from_request(spec: &AgentSpec, request: &RunRequest) -> St
         exit_code: 0,
         verification_status: crate::runtime::summary::VerificationStatus::Passed,
         touched_files,
+        plan_refs: Vec::new(),
     }
 }
 
@@ -152,6 +153,7 @@ mod tests {
                 ..RuntimePolicy::default()
             },
             provider_overrides: Default::default(),
+            workflow: None,
         }
     }
 
@@ -161,6 +163,8 @@ mod tests {
             task_brief: None,
             parent_summary: None,
             selected_files: Vec::new(),
+            stage: None,
+            plan_ref: None,
             working_dir: PathBuf::from("."),
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
@@ -179,6 +183,7 @@ mod tests {
                 exit_code: 0,
                 verification_status: VerificationStatus::Passed,
                 touched_files: Vec::new(),
+                plan_refs: Vec::new(),
             },
         });
 

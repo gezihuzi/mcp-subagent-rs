@@ -30,6 +30,10 @@ pub struct RunRequest {
     pub parent_summary: Option<String>,
     #[serde(default)]
     pub selected_files: Vec<SelectedFile>,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub plan_ref: Option<String>,
     pub working_dir: PathBuf,
     #[serde(default)]
     pub run_mode: RunMode,

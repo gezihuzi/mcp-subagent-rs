@@ -1,11 +1,26 @@
-use std::path::PathBuf;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
+
+use glob::glob;
+use serde::Serialize;
 
 use crate::{
     probe::{ProviderProbe, ProviderProber},
-    spec::{registry::load_agent_specs_from_dirs, Provider},
+    spec::{
+        registry::{load_agent_specs_from_dirs, LoadedAgentSpec},
+        runtime_policy::WorkingDirPolicy,
+        Provider,
+    },
 };
 
-#[derive(Debug, Clone)]
+const PROJECT_MEMORY_CANDIDATES: [&str; 2] = ["PROJECT.md", ".mcp-subagent/PROJECT.md"];
+const ACTIVE_PLAN_CANDIDATES: [&str; 2] = ["PLAN.md", ".mcp-subagent/PLAN.md"];
+const ARCHIVED_PLAN_GLOB_PATTERNS: [&str; 3] =
+    ["docs/plans/*.md", "archive/*.md", "plans/archive/*.md"];
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
     pub cwd: PathBuf,
     pub agents_dirs: Vec<PathBuf>,
@@ -13,6 +28,25 @@ pub struct DoctorReport {
     pub agents_loaded: Option<usize>,
     pub agents_error: Option<String>,
     pub probes: Vec<ProviderProbe>,
+    pub workspace_policy_hints: Vec<WorkspacePolicyHint>,
+    pub knowledge_layout: KnowledgeLayoutHealth,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspacePolicyHint {
+    pub policy: String,
+    pub usage_count: usize,
+    pub cost_hint: String,
+    pub recommendation: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct KnowledgeLayoutHealth {
+    pub root: PathBuf,
+    pub active_plan_path: Option<PathBuf>,
+    pub project_memory_paths: Vec<PathBuf>,
+    pub archived_plan_paths: Vec<PathBuf>,
+    pub warnings: Vec<String>,
 }
 
 pub fn build_doctor_report(
@@ -21,11 +55,23 @@ pub fn build_doctor_report(
     prober: &dyn ProviderProber,
 ) -> DoctorReport {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let (agents_loaded, agents_error) = match load_agent_specs_from_dirs(&agents_dirs) {
-        Ok(loaded) => (Some(loaded.len()), None),
-        Err(err) => (None, Some(err.to_string())),
+    build_doctor_report_for_cwd(cwd, agents_dirs, state_dir, prober)
+}
+
+fn build_doctor_report_for_cwd(
+    cwd: PathBuf,
+    agents_dirs: Vec<PathBuf>,
+    state_dir: PathBuf,
+    prober: &dyn ProviderProber,
+) -> DoctorReport {
+    let (agents_loaded, agents_error, loaded_specs) = match load_agent_specs_from_dirs(&agents_dirs)
+    {
+        Ok(loaded) => (Some(loaded.len()), None, loaded),
+        Err(err) => (None, Some(err.to_string()), Vec::new()),
     };
 
+    let workspace_policy_hints = build_workspace_policy_hints(&loaded_specs);
+    let knowledge_layout = build_knowledge_layout_health(&cwd);
     let probes = all_providers()
         .into_iter()
         .map(|provider| prober.probe(&provider))
@@ -38,6 +84,104 @@ pub fn build_doctor_report(
         agents_loaded,
         agents_error,
         probes,
+        workspace_policy_hints,
+        knowledge_layout,
+    }
+}
+
+fn build_workspace_policy_hints(loaded_specs: &[LoadedAgentSpec]) -> Vec<WorkspacePolicyHint> {
+    let mut usage = BTreeMap::new();
+    for loaded in loaded_specs {
+        let key = format!("{:?}", loaded.spec.runtime.working_dir_policy);
+        *usage.entry(key).or_insert(0usize) += 1;
+    }
+
+    [
+        WorkingDirPolicy::Auto,
+        WorkingDirPolicy::InPlace,
+        WorkingDirPolicy::GitWorktree,
+        WorkingDirPolicy::TempCopy,
+    ]
+    .into_iter()
+    .map(|policy| {
+        let policy_name = format!("{policy:?}");
+        WorkspacePolicyHint {
+            policy: policy_name.clone(),
+            usage_count: usage.get(&policy_name).copied().unwrap_or(0),
+            cost_hint: workspace_policy_cost_hint(&policy).to_string(),
+            recommendation: workspace_policy_recommendation(&policy).to_string(),
+        }
+    })
+    .collect()
+}
+
+fn workspace_policy_cost_hint(policy: &WorkingDirPolicy) -> &'static str {
+    match policy {
+        WorkingDirPolicy::Auto => "balanced: read tasks stay in-place, write tasks prefer worktree",
+        WorkingDirPolicy::InPlace => "lowest setup cost, highest repo pollution risk",
+        WorkingDirPolicy::GitWorktree => "moderate setup cost, strong isolation for write tasks",
+        WorkingDirPolicy::TempCopy => "highest I/O and disk cost, strongest isolation",
+    }
+}
+
+fn workspace_policy_recommendation(policy: &WorkingDirPolicy) -> &'static str {
+    match policy {
+        WorkingDirPolicy::Auto => "recommended default for mixed read/write workloads",
+        WorkingDirPolicy::InPlace => "use for read-only or very small safe edits",
+        WorkingDirPolicy::GitWorktree => "use for parallel write-heavy task isolation",
+        WorkingDirPolicy::TempCopy => "use when worktree is unavailable or full clone is required",
+    }
+}
+
+fn build_knowledge_layout_health(root: &Path) -> KnowledgeLayoutHealth {
+    let active_plan_path = ACTIVE_PLAN_CANDIDATES
+        .iter()
+        .map(|candidate| root.join(candidate))
+        .find(|path| path.is_file());
+
+    let project_memory_paths = PROJECT_MEMORY_CANDIDATES
+        .iter()
+        .map(|candidate| root.join(candidate))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+
+    let mut archived_plan_paths = Vec::new();
+    for pattern in ARCHIVED_PLAN_GLOB_PATTERNS {
+        let absolute_pattern = root.join(pattern);
+        let pattern_text = absolute_pattern.to_string_lossy().to_string();
+        if let Ok(entries) = glob(&pattern_text) {
+            for entry in entries.flatten() {
+                if entry.is_file() {
+                    archived_plan_paths.push(entry);
+                }
+            }
+        }
+    }
+    archived_plan_paths.sort();
+    archived_plan_paths.dedup();
+
+    let mut warnings = Vec::new();
+    if active_plan_path.is_none() {
+        warnings.push("active plan missing: expected PLAN.md or .mcp-subagent/PLAN.md".to_string());
+    }
+    if project_memory_paths.is_empty() {
+        warnings.push(
+            "project memory missing: expected PROJECT.md or .mcp-subagent/PROJECT.md".to_string(),
+        );
+    }
+    if archived_plan_paths.is_empty() {
+        warnings.push(
+            "archive plans missing: expected docs/plans/*.md, archive/*.md or plans/archive/*.md"
+                .to_string(),
+        );
+    }
+
+    KnowledgeLayoutHealth {
+        root: root.to_path_buf(),
+        active_plan_path,
+        project_memory_paths,
+        archived_plan_paths,
+        warnings,
     }
 }
 
@@ -59,7 +203,7 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
         out.push_str(&format!("agents_error: {error}\n"));
     }
 
-    out.push_str("\nprovider_probe:\n");
+    out.push_str("\nprovider_matrix:\n");
     for probe in &report.probes {
         out.push_str(&format!(
             "- provider: {}\n  status: {}\n  executable: {}\n",
@@ -70,6 +214,19 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
         out.push_str(&format!(
             "  version: {}\n",
             probe.version.as_deref().unwrap_or("unknown")
+        ));
+        out.push_str("  capabilities:\n");
+        out.push_str(&format!(
+            "    - supports_background_native: {}\n",
+            probe.capabilities.supports_background_native
+        ));
+        out.push_str(&format!(
+            "    - supports_native_project_memory: {}\n",
+            probe.capabilities.supports_native_project_memory
+        ));
+        out.push_str(&format!(
+            "    - experimental: {}\n",
+            probe.capabilities.experimental
         ));
         if probe.validated_flags.is_empty() {
             out.push_str("  validated_flags: []\n");
@@ -89,11 +246,62 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
         }
     }
 
+    out.push_str("\nworkspace_policy_hints:\n");
+    for hint in &report.workspace_policy_hints {
+        out.push_str(&format!(
+            "- policy: {}\n  usage_count: {}\n  cost_hint: {}\n  recommendation: {}\n",
+            hint.policy, hint.usage_count, hint.cost_hint, hint.recommendation
+        ));
+    }
+
+    out.push_str("\nknowledge_layout_health:\n");
+    out.push_str(&format!(
+        "  root: {}\n",
+        report.knowledge_layout.root.display()
+    ));
+    out.push_str(&format!(
+        "  active_plan_path: {}\n",
+        report
+            .knowledge_layout
+            .active_plan_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "missing".to_string())
+    ));
+
+    if report.knowledge_layout.project_memory_paths.is_empty() {
+        out.push_str("  project_memory_paths: []\n");
+    } else {
+        out.push_str("  project_memory_paths:\n");
+        for path in &report.knowledge_layout.project_memory_paths {
+            out.push_str(&format!("    - {}\n", path.display()));
+        }
+    }
+
+    if report.knowledge_layout.archived_plan_paths.is_empty() {
+        out.push_str("  archived_plan_paths: []\n");
+    } else {
+        out.push_str("  archived_plan_paths:\n");
+        for path in &report.knowledge_layout.archived_plan_paths {
+            out.push_str(&format!("    - {}\n", path.display()));
+        }
+    }
+
+    if report.knowledge_layout.warnings.is_empty() {
+        out.push_str("  warnings: []\n");
+    } else {
+        out.push_str("  warnings:\n");
+        for warning in &report.knowledge_layout.warnings {
+            out.push_str(&format!("    - {warning}\n"));
+        }
+    }
+
     out
 }
 
 fn all_providers() -> Vec<Provider> {
     vec![
+        Provider::Mock,
         Provider::Claude,
         Provider::Codex,
         Provider::Gemini,
@@ -109,7 +317,7 @@ mod tests {
 
     use crate::probe::{ProbeStatus, ProviderCapabilities, ProviderProbe, ProviderProber};
 
-    use super::{build_doctor_report, render_doctor_report};
+    use super::{build_doctor_report, build_doctor_report_for_cwd, render_doctor_report};
 
     #[derive(Debug, Clone, Default)]
     struct FakeProber {
@@ -159,7 +367,7 @@ mod tests {
 [core]
 name = "reviewer"
 description = "review code"
-provider = "Ollama"
+provider = "Mock"
 instructions = "review"
 "#,
         )
@@ -182,14 +390,68 @@ instructions = "review"
             build_doctor_report(vec![agents_dir.clone()], temp.path().join("state"), &prober);
 
         assert_eq!(report.agents_loaded, Some(1));
-        assert_eq!(report.probes.len(), 4);
+        assert_eq!(report.probes.len(), 5);
         let rendered = render_doctor_report(&report);
         assert!(rendered.contains("mcp-subagent doctor"));
         assert!(rendered.contains("agents_loaded: 1"));
+        assert!(rendered.contains("provider: Mock"));
+        assert!(rendered.contains("provider: Ollama"));
         assert!(rendered.contains("provider: Codex"));
         assert!(rendered.contains("status: MissingBinary"));
+        assert!(rendered.contains("supports_native_project_memory: true"));
         assert!(rendered.contains("validated_flags"));
         assert!(rendered.contains("--ask-for-approval"));
         assert!(rendered.contains("binary missing"));
+        assert!(rendered.contains("workspace_policy_hints"));
+        assert!(rendered.contains("knowledge_layout_health"));
+    }
+
+    #[test]
+    fn checks_knowledge_layout_and_policy_usage() {
+        let temp = tempdir().expect("tempdir");
+        let agents_dir = temp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("create agents");
+        std::fs::create_dir_all(temp.path().join("docs").join("plans"))
+            .expect("create archived plans dir");
+        std::fs::write(temp.path().join("PLAN.md"), "# plan").expect("write plan");
+        std::fs::write(temp.path().join("PROJECT.md"), "# project").expect("write project");
+        std::fs::write(temp.path().join("docs").join("plans").join("p1.md"), "# p1")
+            .expect("write archive");
+        std::fs::write(
+            agents_dir.join("writer.agent.toml"),
+            r#"
+[core]
+name = "writer"
+description = "write code"
+provider = "Mock"
+instructions = "write"
+
+[runtime]
+working_dir_policy = "GitWorktree"
+sandbox = "WorkspaceWrite"
+"#,
+        )
+        .expect("write agent");
+
+        let report = build_doctor_report_for_cwd(
+            temp.path().to_path_buf(),
+            vec![agents_dir],
+            temp.path().join("state"),
+            &FakeProber::default(),
+        );
+
+        assert_eq!(report.agents_loaded, Some(1));
+        assert!(report.knowledge_layout.active_plan_path.is_some());
+        assert_eq!(report.knowledge_layout.project_memory_paths.len(), 1);
+        assert_eq!(report.knowledge_layout.archived_plan_paths.len(), 1);
+        assert!(report.knowledge_layout.warnings.is_empty());
+        assert_eq!(
+            report
+                .workspace_policy_hints
+                .iter()
+                .find(|hint| hint.policy == "GitWorktree")
+                .map(|hint| hint.usage_count),
+            Some(1)
+        );
     }
 }

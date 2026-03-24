@@ -51,6 +51,11 @@ pub struct ProviderCapabilities {
 impl ProviderCapabilities {
     fn for_provider(provider: &Provider) -> Self {
         match provider {
+            Provider::Mock => Self {
+                supports_background_native: false,
+                supports_native_project_memory: false,
+                experimental: false,
+            },
             Provider::Claude => Self {
                 supports_background_native: true,
                 supports_native_project_memory: true,
@@ -105,11 +110,26 @@ pub struct SystemProviderProber;
 
 impl ProviderProber for SystemProviderProber {
     fn probe(&self, provider: &Provider) -> ProviderProbe {
+        if matches!(provider, Provider::Mock) {
+            return ProviderProbe {
+                provider: provider.clone(),
+                executable: PathBuf::from("<builtin:mock>"),
+                version: Some("builtin".to_string()),
+                status: ProbeStatus::Ready,
+                capabilities: ProviderCapabilities::for_provider(provider),
+                validated_flags: Vec::new(),
+                notes: vec![
+                    provider_tier_note(provider).to_string(),
+                    "built-in mock runner".to_string(),
+                ],
+            };
+        }
+
         let executable = default_executable(provider);
         let capabilities = ProviderCapabilities::for_provider(provider);
         let validated_flags = validated_flags_for_provider(provider);
 
-        let mut notes = Vec::new();
+        let mut notes = vec![provider_tier_note(provider).to_string()];
         if capabilities.experimental {
             notes
                 .push("provider support is experimental and may change across CLI versions".into());
@@ -219,6 +239,7 @@ impl ProviderProber for SystemProviderProber {
 
 fn validated_flags_for_provider(provider: &Provider) -> Vec<String> {
     let flags: &[&str] = match provider {
+        Provider::Mock => &[],
         Provider::Claude => &[
             "--permission-mode",
             "--add-dir",
@@ -242,8 +263,19 @@ fn validated_flags_for_provider(provider: &Provider) -> Vec<String> {
     flags.iter().map(|flag| flag.to_string()).collect()
 }
 
+fn provider_tier_note(provider: &Provider) -> &'static str {
+    match provider {
+        Provider::Mock => "provider_tier: mock (stable local debug path)",
+        Provider::Claude => "provider_tier: beta",
+        Provider::Codex => "provider_tier: primary",
+        Provider::Gemini => "provider_tier: experimental",
+        Provider::Ollama => "provider_tier: reserved (real runner not enabled in current build)",
+    }
+}
+
 fn default_executable(provider: &Provider) -> PathBuf {
     match provider {
+        Provider::Mock => PathBuf::from("<builtin:mock>"),
         Provider::Claude => PathBuf::from("claude"),
         Provider::Codex => PathBuf::from("codex"),
         Provider::Gemini => PathBuf::from("gemini"),

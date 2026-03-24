@@ -18,7 +18,10 @@ use crate::{
     mcp::tools::build_tool_router,
     probe::{ProbeStatus, ProviderProbe, ProviderProber, SystemProviderProber},
     runtime::{
-        summary::{StructuredSummary, VerificationStatus},
+        summary::{
+            StructuredSummary, SummaryEnvelope, SummaryParseStatus, VerificationStatus,
+            SUMMARY_CONTRACT_VERSION,
+        },
         workspace::resolve_source_path,
     },
     spec::{
@@ -126,13 +129,15 @@ impl McpSubagentServer {
                     content: file.content,
                 })
                 .collect(),
+            stage: input.stage,
+            plan_ref: input.plan_ref,
             working_dir: input
                 .working_dir
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(".")),
             run_mode: RunMode::Sync,
             acceptance_criteria: vec![
-                "Return sentinel-wrapped StructuredSummary JSON.".to_string(),
+                "Return sentinel-wrapped SummaryEnvelope JSON.".to_string(),
                 "Keep findings concise and actionable.".to_string(),
             ],
         };
@@ -148,6 +153,14 @@ impl McpSubagentServer {
         &self,
         provider: &Provider,
     ) -> std::result::Result<ProviderProbe, ErrorData> {
+        if matches!(provider, Provider::Ollama) {
+            return Err(ErrorData::invalid_params(
+                "provider `Ollama` is reserved in current build; use `Mock` for local test runs"
+                    .to_string(),
+                None,
+            ));
+        }
+
         let probe = self.probe_provider(provider);
         if probe.is_available() {
             return Ok(probe);
@@ -259,8 +272,19 @@ fn default_state_dir() -> PathBuf {
     PathBuf::from(".mcp-subagent/state")
 }
 
+pub(crate) fn provider_tier_note(provider: &Provider) -> &'static str {
+    match provider {
+        Provider::Mock => "provider_tier: mock (stable local debug path)",
+        Provider::Claude => "provider_tier: beta",
+        Provider::Codex => "provider_tier: primary",
+        Provider::Gemini => "provider_tier: experimental",
+        Provider::Ollama => "provider_tier: reserved (real runner not enabled in current build)",
+    }
+}
+
 pub(crate) fn build_capability_notes(probe: &ProviderProbe) -> Vec<String> {
     let mut notes = Vec::new();
+    notes.push(provider_tier_note(&probe.provider).to_string());
     notes.push(format!("probe_status: {}", probe.status));
     if let Some(version) = &probe.version {
         notes.push(format!("detected_version: {version}"));
@@ -271,45 +295,64 @@ pub(crate) fn build_capability_notes(probe: &ProviderProbe) -> Vec<String> {
             probe.executable.display()
         ));
     }
-    notes.extend(probe.notes.clone());
+    for note in &probe.notes {
+        if !notes.iter().any(|existing| existing == note) {
+            notes.push(note.clone());
+        }
+    }
     notes
 }
 
-pub(crate) fn map_summary_output(summary: &StructuredSummary) -> SummaryOutput {
+pub(crate) fn map_summary_output(summary: &SummaryEnvelope) -> SummaryOutput {
     SummaryOutput {
-        summary: summary.summary.clone(),
-        key_findings: summary.key_findings.clone(),
-        open_questions: summary.open_questions.clone(),
-        next_steps: summary.next_steps.clone(),
-        exit_code: summary.exit_code,
-        verification_status: format!("{:?}", summary.verification_status),
-        touched_files: summary.touched_files.clone(),
+        contract_version: summary.contract_version.clone(),
+        parse_status: format!("{:?}", summary.parse_status),
+        summary: summary.summary.summary.clone(),
+        key_findings: summary.summary.key_findings.clone(),
+        open_questions: summary.summary.open_questions.clone(),
+        next_steps: summary.summary.next_steps.clone(),
+        exit_code: summary.summary.exit_code,
+        verification_status: format!("{:?}", summary.summary.verification_status),
+        touched_files: summary.summary.touched_files.clone(),
+        plan_refs: summary.summary.plan_refs.clone(),
     }
 }
 
-pub(crate) fn failed_summary(message: String) -> StructuredSummary {
-    StructuredSummary {
-        summary: "Run failed before structured output was collected.".to_string(),
-        key_findings: vec![message],
-        artifacts: Vec::new(),
-        open_questions: vec!["Inspect server logs for failure details.".to_string()],
-        next_steps: vec!["Retry the run with corrected configuration.".to_string()],
-        exit_code: 1,
-        verification_status: VerificationStatus::NotRun,
-        touched_files: Vec::new(),
+pub(crate) fn failed_summary(message: String) -> SummaryEnvelope {
+    SummaryEnvelope {
+        contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
+        parse_status: SummaryParseStatus::Invalid,
+        summary: StructuredSummary {
+            summary: "Run failed before structured output was collected.".to_string(),
+            key_findings: vec![message.clone()],
+            artifacts: Vec::new(),
+            open_questions: vec!["Inspect server logs for failure details.".to_string()],
+            next_steps: vec!["Retry the run with corrected configuration.".to_string()],
+            exit_code: 1,
+            verification_status: VerificationStatus::NotRun,
+            touched_files: Vec::new(),
+            plan_refs: Vec::new(),
+        },
+        raw_fallback_text: Some(message),
     }
 }
 
-pub(crate) fn cancelled_summary(task: String) -> StructuredSummary {
-    StructuredSummary {
-        summary: format!("Run cancelled before completion for task: {task}"),
-        key_findings: vec!["User requested cancellation".to_string()],
-        artifacts: Vec::new(),
-        open_questions: Vec::new(),
-        next_steps: vec!["Re-run the task if cancellation was accidental.".to_string()],
-        exit_code: 130,
-        verification_status: VerificationStatus::NotRun,
-        touched_files: Vec::new(),
+pub(crate) fn cancelled_summary(task: String) -> SummaryEnvelope {
+    SummaryEnvelope {
+        contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
+        parse_status: SummaryParseStatus::Degraded,
+        summary: StructuredSummary {
+            summary: format!("Run cancelled before completion for task: {task}"),
+            key_findings: vec!["User requested cancellation".to_string()],
+            artifacts: Vec::new(),
+            open_questions: Vec::new(),
+            next_steps: vec!["Re-run the task if cancellation was accidental.".to_string()],
+            exit_code: 130,
+            verification_status: VerificationStatus::NotRun,
+            touched_files: Vec::new(),
+            plan_refs: Vec::new(),
+        },
+        raw_fallback_text: None,
     }
 }
 
@@ -337,7 +380,10 @@ mod tests {
 
     use crate::{
         probe::{ProbeStatus, ProviderCapabilities, ProviderProbe, ProviderProber},
-        runtime::summary::{ArtifactKind, ArtifactRef, StructuredSummary, VerificationStatus},
+        runtime::summary::{
+            ArtifactKind, ArtifactRef, StructuredSummary, SummaryEnvelope, SummaryParseStatus,
+            VerificationStatus, SUMMARY_CONTRACT_VERSION,
+        },
         spec::Provider,
     };
 
@@ -348,7 +394,7 @@ mod tests {
     use crate::{mcp::artifacts::build_runtime_artifacts, mcp::state::RuntimeState};
 
     fn write_agent_spec(dir: &Path) {
-        write_agent_spec_with_provider(dir, "Ollama");
+        write_agent_spec_with_provider(dir, "Mock");
     }
 
     fn write_codex_agent_spec(dir: &Path) {
@@ -424,6 +470,7 @@ sandbox = "ReadOnly"
 
     fn provider_binary(provider: &Provider) -> std::path::PathBuf {
         match provider {
+            Provider::Mock => "mock",
             Provider::Claude => "claude",
             Provider::Codex => "codex",
             Provider::Gemini => "gemini",
@@ -434,6 +481,11 @@ sandbox = "ReadOnly"
 
     fn provider_capabilities(provider: &Provider) -> ProviderCapabilities {
         match provider {
+            Provider::Mock => ProviderCapabilities {
+                supports_background_native: false,
+                supports_native_project_memory: false,
+                experimental: false,
+            },
             Provider::Claude => ProviderCapabilities {
                 supports_background_native: true,
                 supports_native_project_memory: true,
@@ -459,15 +511,18 @@ sandbox = "ReadOnly"
 
     fn provider_validated_flags(provider: &Provider) -> Vec<String> {
         match provider {
+            Provider::Mock => Vec::new(),
             Provider::Claude => vec![
                 "--permission-mode".to_string(),
                 "--add-dir".to_string(),
                 "--output-format".to_string(),
+                "--json-schema".to_string(),
             ],
             Provider::Codex => vec![
                 "--sandbox".to_string(),
                 "--ask-for-approval".to_string(),
                 "--output-last-message".to_string(),
+                "--output-schema".to_string(),
             ],
             Provider::Gemini => vec![
                 "--approval-mode".to_string(),
@@ -531,6 +586,24 @@ sandbox = "ReadOnly"
     }
 
     #[tokio::test]
+    async fn list_agents_marks_ollama_reserved() {
+        let temp = tempdir().expect("temp");
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        write_agent_spec_with_provider(&agents_dir, "Ollama");
+        let server = make_server(agents_dir, state_dir);
+
+        let out = server.list_agents().await.expect("list").0;
+        assert_eq!(out.agents.len(), 1);
+        assert!(!out.agents[0].available);
+        assert!(out.agents[0]
+            .capability_notes
+            .iter()
+            .any(|note| note.contains("provider_tier: reserved")));
+    }
+
+    #[tokio::test]
     async fn run_agent_tool_returns_structured_summary() {
         let temp = tempdir().expect("temp");
         let agents_dir = temp.path().join("agents");
@@ -549,6 +622,8 @@ sandbox = "ReadOnly"
                 rationale: Some("hotspot".to_string()),
                 content: None,
             }],
+            stage: None,
+            plan_ref: None,
             working_dir: None,
         };
         let out = server
@@ -590,6 +665,8 @@ sandbox = "ReadOnly"
                 task_brief: None,
                 parent_summary: None,
                 selected_files: Vec::new(),
+                stage: None,
+                plan_ref: None,
                 working_dir: None,
             }))
             .await
@@ -601,6 +678,38 @@ sandbox = "ReadOnly"
             .message
             .as_ref()
             .contains("provider `Codex` is unavailable"));
+    }
+
+    #[tokio::test]
+    async fn run_agent_rejects_reserved_ollama_provider() {
+        let temp = tempdir().expect("temp");
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        write_agent_spec_with_provider(&agents_dir, "Ollama");
+        let server = make_server(agents_dir, state_dir);
+
+        let err = match server
+            .run_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
+                agent_name: "reviewer".to_string(),
+                task: "review parser".to_string(),
+                task_brief: None,
+                parent_summary: None,
+                selected_files: Vec::new(),
+                stage: None,
+                plan_ref: None,
+                working_dir: None,
+            }))
+            .await
+        {
+            Ok(_) => panic!("run should fail when provider is reserved"),
+            Err(err) => err,
+        };
+
+        assert!(err
+            .message
+            .as_ref()
+            .contains("provider `Ollama` is reserved"));
     }
 
     #[derive(Debug, Clone, Default)]
@@ -624,20 +733,26 @@ sandbox = "ReadOnly"
         let temp = tempdir().expect("tempdir");
         fs::write(temp.path().join("report.md"), "# report").expect("write report");
 
-        let summary = StructuredSummary {
-            summary: "done".to_string(),
-            key_findings: vec!["one".to_string()],
-            artifacts: vec![ArtifactRef {
-                path: PathBuf::from("report.md"),
-                kind: ArtifactKind::ReportMarkdown,
-                description: "markdown report".to_string(),
-                media_type: Some("text/markdown".to_string()),
-            }],
-            open_questions: Vec::new(),
-            next_steps: Vec::new(),
-            exit_code: 0,
-            verification_status: VerificationStatus::Passed,
-            touched_files: Vec::new(),
+        let summary = SummaryEnvelope {
+            contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
+            parse_status: SummaryParseStatus::Validated,
+            summary: StructuredSummary {
+                summary: "done".to_string(),
+                key_findings: vec!["one".to_string()],
+                artifacts: vec![ArtifactRef {
+                    path: PathBuf::from("report.md"),
+                    kind: ArtifactKind::ReportMarkdown,
+                    description: "markdown report".to_string(),
+                    media_type: Some("text/markdown".to_string()),
+                }],
+                open_questions: Vec::new(),
+                next_steps: Vec::new(),
+                exit_code: 0,
+                verification_status: VerificationStatus::Passed,
+                touched_files: Vec::new(),
+                plan_refs: Vec::new(),
+            },
+            raw_fallback_text: None,
         };
 
         let (index, payloads) = build_runtime_artifacts(&summary, "", "", Some(temp.path()));
@@ -808,6 +923,8 @@ sandbox = "ReadOnly"
                     rationale: None,
                     content: None,
                 }],
+                stage: None,
+                plan_ref: None,
                 working_dir: None,
             }))
             .await
@@ -867,7 +984,7 @@ sandbox = "ReadOnly"
 [core]
 name = "writer"
 description = "write code"
-provider = "Ollama"
+provider = "Mock"
 instructions = "write"
 
 [runtime]
@@ -885,6 +1002,8 @@ sandbox = "WorkspaceWrite"
                 task_brief: None,
                 parent_summary: None,
                 selected_files: Vec::new(),
+                stage: None,
+                plan_ref: None,
                 working_dir: Some(project_dir.display().to_string()),
             }))
             .await
@@ -895,6 +1014,7 @@ sandbox = "WorkspaceWrite"
             fs::read_to_string(state_dir.join("runs").join(&out.handle_id).join("run.json"))
                 .expect("read run json");
         let run_obj: serde_json::Value = serde_json::from_str(&run_json).expect("parse run json");
+        let run_dir = state_dir.join("runs").join(&out.handle_id);
         assert!(!run_obj["created_at"].is_null());
         assert!(!run_obj["updated_at"].is_null());
         assert!(run_obj["status_history"].is_array());
@@ -905,7 +1025,8 @@ sandbox = "WorkspaceWrite"
         );
         assert_eq!(run_obj["spec_snapshot"]["name"], "writer");
         assert_eq!(run_obj["spec_snapshot"]["working_dir_policy"], "TempCopy");
-        assert_eq!(run_obj["probe_result"]["provider"], "Ollama");
+        assert_eq!(run_obj["probe_result"]["provider"], "Mock");
+        assert!(!run_obj["memory_resolution"].is_null());
         assert_eq!(run_obj["workspace"]["mode"], "TempCopy");
         let workspace_path = run_obj["workspace"]["workspace_path"]
             .as_str()
@@ -918,7 +1039,55 @@ sandbox = "WorkspaceWrite"
             .as_str()
             .expect("lock key")
             .contains("project"));
-        let run_dir = state_dir.join("runs").join(&out.handle_id);
+        assert!(run_obj["compiled_context_markdown"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ROLE"));
+
+        assert!(run_dir.join("request.json").exists());
+        assert!(run_dir.join("resolved-spec.json").exists());
+        assert!(run_dir.join("compiled-context.md").exists());
+        assert!(run_dir.join("status.json").exists());
+        assert!(run_dir.join("summary.json").exists());
+        assert!(run_dir.join("summary.raw.txt").exists());
+        assert!(run_dir.join("workspace.meta.json").exists());
+        assert!(run_dir.join("events.ndjson").exists());
+        assert!(run_dir.join("artifacts").join("index.json").exists());
+
+        let artifact_index_json = fs::read_to_string(run_dir.join("artifacts").join("index.json"))
+            .expect("read artifact index");
+        let artifact_index: serde_json::Value =
+            serde_json::from_str(&artifact_index_json).expect("parse artifact index");
+        let first = artifact_index
+            .as_array()
+            .and_then(|items| items.first())
+            .expect("artifact index item");
+        assert!(first.get("kind").is_some());
+        assert!(first.get("path").is_some());
+        assert!(first.get("media_type").is_some());
+        assert!(first.get("producer").is_some());
+        assert!(first.get("created_at").is_some());
+        assert!(first.get("description").is_some());
+
+        let events_text =
+            fs::read_to_string(run_dir.join("events.ndjson")).expect("read events file");
+        let event_names = events_text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|event| {
+                event
+                    .get("event")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        for required in ["probe", "gate", "workspace", "memory", "parse", "cleanup"] {
+            assert!(
+                event_names.iter().any(|event| event == required),
+                "missing event `{required}` in {event_names:?}"
+            );
+        }
+
         assert!(run_dir.join("stdout.log").exists());
         assert!(run_dir.join("stderr.log").exists());
         assert!(run_dir.join("temp").exists());

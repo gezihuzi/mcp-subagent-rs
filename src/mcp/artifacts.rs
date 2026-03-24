@@ -5,10 +5,11 @@ use std::{
 };
 
 use rmcp::ErrorData;
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::{
     mcp::dto::ArtifactOutput,
-    runtime::summary::{ArtifactKind, ArtifactRef, StructuredSummary},
+    runtime::summary::{ArtifactKind, ArtifactRef, SummaryEnvelope},
 };
 
 pub(crate) fn run_root_dir(state_dir: &Path) -> PathBuf {
@@ -65,21 +66,22 @@ pub(crate) fn read_artifact_from_disk(
 }
 
 pub(crate) fn build_runtime_artifacts(
-    summary: &StructuredSummary,
+    summary: &SummaryEnvelope,
     stdout: &str,
     stderr: &str,
     workspace_root: Option<&Path>,
 ) -> (Vec<ArtifactOutput>, HashMap<String, String>) {
+    let created_at = now_rfc3339();
     let mut index = Vec::new();
     let mut payloads = HashMap::new();
 
     if let Some(root) = workspace_root {
-        for artifact in &summary.artifacts {
+        for artifact in &summary.summary.artifacts {
             let Some(content) = read_declared_artifact_content(root, &artifact.path) else {
                 continue;
             };
             let artifact_path = artifact.path.display().to_string();
-            index.push(map_artifact_output(artifact));
+            index.push(map_artifact_output(artifact, &created_at));
             payloads.insert(artifact_path, content);
         }
     }
@@ -90,8 +92,24 @@ pub(crate) fn build_runtime_artifacts(
             kind: format!("{:?}", ArtifactKind::SummaryJson),
             description: "Structured summary JSON".to_string(),
             media_type: Some("application/json".to_string()),
+            producer: Some("runtime".to_string()),
+            created_at: Some(created_at.clone()),
         });
         payloads.insert("summary.json".to_string(), summary_json);
+    }
+
+    if let Some(raw_text) = &summary.raw_fallback_text {
+        if !raw_text.trim().is_empty() {
+            index.push(ArtifactOutput {
+                path: "summary.raw.txt".to_string(),
+                kind: format!("{:?}", ArtifactKind::StderrText),
+                description: "Raw summary fallback text".to_string(),
+                media_type: Some("text/plain".to_string()),
+                producer: Some("runtime".to_string()),
+                created_at: Some(created_at.clone()),
+            });
+            payloads.insert("summary.raw.txt".to_string(), raw_text.clone());
+        }
     }
 
     if !stdout.is_empty() {
@@ -100,6 +118,8 @@ pub(crate) fn build_runtime_artifacts(
             kind: format!("{:?}", ArtifactKind::StdoutText),
             description: "Captured stdout".to_string(),
             media_type: Some("text/plain".to_string()),
+            producer: Some("runtime".to_string()),
+            created_at: Some(created_at.clone()),
         });
         payloads.insert("stdout.txt".to_string(), stdout.to_string());
     }
@@ -110,6 +130,8 @@ pub(crate) fn build_runtime_artifacts(
             kind: format!("{:?}", ArtifactKind::StderrText),
             description: "Captured stderr".to_string(),
             media_type: Some("text/plain".to_string()),
+            producer: Some("runtime".to_string()),
+            created_at: Some(created_at),
         });
         payloads.insert("stderr.txt".to_string(), stderr.to_string());
     }
@@ -117,13 +139,21 @@ pub(crate) fn build_runtime_artifacts(
     (index, payloads)
 }
 
-fn map_artifact_output(artifact: &ArtifactRef) -> ArtifactOutput {
+fn map_artifact_output(artifact: &ArtifactRef, created_at: &str) -> ArtifactOutput {
     ArtifactOutput {
         path: artifact.path.display().to_string(),
         kind: format!("{:?}", artifact.kind),
         description: artifact.description.clone(),
         media_type: artifact.media_type.clone(),
+        producer: Some("agent".to_string()),
+        created_at: Some(created_at.to_string()),
     }
+}
+
+fn now_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| OffsetDateTime::now_utc().to_string())
 }
 
 fn read_declared_artifact_content(workspace_root: &Path, artifact_path: &Path) -> Option<String> {

@@ -3,7 +3,7 @@ use std::fmt::Write;
 use crate::{
     error::{McpSubagentError, Result},
     runtime::summary::{
-        parse_structured_summary, StructuredSummary, SUMMARY_END_SENTINEL, SUMMARY_START_SENTINEL,
+        parse_summary_envelope, SummaryEnvelope, SUMMARY_END_SENTINEL, SUMMARY_START_SENTINEL,
     },
     spec::{
         core::{AgentSpecCore, Provider},
@@ -35,7 +35,7 @@ pub trait ContextCompiler: Send + Sync {
         memory: ResolvedMemory,
     ) -> Result<CompiledContext>;
 
-    fn parse_summary(&self, raw_stdout: &str, raw_stderr: &str) -> Result<StructuredSummary>;
+    fn parse_summary(&self, raw_stdout: &str, raw_stderr: &str) -> Result<SummaryEnvelope>;
 }
 
 #[derive(Debug, Default)]
@@ -146,7 +146,7 @@ impl ContextCompiler for DefaultContextCompiler {
         };
 
         let response_contract = format!(
-            "Return a machine-readable JSON block only inside sentinels. The JSON must match StructuredSummary.\n{}\n{{...valid json...}}\n{}",
+            "Return a machine-readable JSON block only inside sentinels. The JSON must match SummaryEnvelope.\n{}\n{{...valid json...}}\n{}",
             SUMMARY_START_SENTINEL, SUMMARY_END_SENTINEL
         );
 
@@ -156,7 +156,7 @@ impl ContextCompiler for DefaultContextCompiler {
             provider = spec.core.provider.as_str(),
             task = task_line,
             objective = request.task,
-            constraints = compile_constraints(spec),
+            constraints = compile_constraints(spec, request),
             acceptance = acceptance,
             context = selected_context.trim(),
             contract = response_contract,
@@ -171,8 +171,8 @@ impl ContextCompiler for DefaultContextCompiler {
         })
     }
 
-    fn parse_summary(&self, raw_stdout: &str, raw_stderr: &str) -> Result<StructuredSummary> {
-        Ok(parse_structured_summary(raw_stdout, raw_stderr))
+    fn parse_summary(&self, raw_stdout: &str, raw_stderr: &str) -> Result<SummaryEnvelope> {
+        Ok(parse_summary_envelope(raw_stdout, raw_stderr))
     }
 }
 
@@ -193,9 +193,9 @@ pub fn validate_compiled_prompt_template(injected_prompt: &str) -> Result<()> {
         ));
     }
 
-    if !injected_prompt.contains("StructuredSummary") {
+    if !injected_prompt.contains("SummaryEnvelope") {
         return Err(McpSubagentError::SpecValidation(
-            "summary contract template must reference StructuredSummary JSON contract".to_string(),
+            "summary contract template must reference SummaryEnvelope JSON contract".to_string(),
         ));
     }
 
@@ -219,17 +219,20 @@ pub fn validate_default_summary_contract_template() -> Result<()> {
         },
         runtime: RuntimePolicy::default(),
         provider_overrides: Default::default(),
+        workflow: None,
     };
     let sample_request = RunRequest {
         task: "Validate context compiler output contract".to_string(),
         task_brief: Some("Validate summary contract".to_string()),
         parent_summary: None,
         selected_files: Vec::new(),
+        stage: None,
+        plan_ref: None,
         working_dir: ".".into(),
         run_mode: RunMode::Sync,
         acceptance_criteria: vec![
             "Keep fixed sections in compiled template".to_string(),
-            "Keep sentinel-wrapped StructuredSummary JSON contract".to_string(),
+            "Keep sentinel-wrapped SummaryEnvelope JSON contract".to_string(),
         ],
     };
 
@@ -265,13 +268,34 @@ fn inject_memory_sources(
     }
 }
 
-fn compile_constraints(spec: &AgentSpec) -> String {
-    format!(
+fn compile_constraints(spec: &AgentSpec, request: &RunRequest) -> String {
+    let mut constraints = format!(
         "Do not request or rely on parent raw transcript.\nFollow agent instructions:\n{}\nProvider: {}\nContextMode: {:?}",
         spec.core.instructions,
         spec.core.provider.as_str(),
         spec.runtime.context_mode
-    )
+    );
+    if let Some(stage) = request.stage.as_deref() {
+        constraints.push('\n');
+        constraints.push_str(&format!("WorkflowStage: {stage}"));
+        constraints.push('\n');
+        constraints.push_str(&format!(
+            "StageRolePriority: {}",
+            stage_role_priority(stage)
+        ));
+    }
+    constraints
+}
+
+fn stage_role_priority(stage: &str) -> &'static str {
+    match stage.to_ascii_lowercase().as_str() {
+        "research" => "Researcher -> Planner -> Builder -> Reviewer",
+        "plan" => "Planner -> Researcher -> Builder -> Reviewer",
+        "build" => "Builder -> Reviewer -> Planner",
+        "review" => "CorrectnessReviewer -> StyleReviewer -> Builder",
+        "archive" => "Archivist -> Planner -> Reviewer",
+        _ => "Generalist",
+    }
 }
 
 #[derive(Debug)]
@@ -390,6 +414,7 @@ mod tests {
             },
             runtime,
             provider_overrides: Default::default(),
+            workflow: None,
         }
     }
 
@@ -408,6 +433,8 @@ mod tests {
                 rationale: Some("target file".to_string()),
                 content: Some("fn parse() {}".to_string()),
             }],
+            stage: None,
+            plan_ref: None,
             working_dir: PathBuf::from("."),
             run_mode: RunMode::Sync,
             acceptance_criteria: vec!["Provide key findings".to_string()],
@@ -454,6 +481,8 @@ mod tests {
                 rationale: None,
                 content: Some("fn a() {}".to_string()),
             }],
+            stage: None,
+            plan_ref: None,
             working_dir: PathBuf::from("."),
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
@@ -479,6 +508,8 @@ mod tests {
                 rationale: None,
                 content: Some("fn a() {}".to_string()),
             }],
+            stage: None,
+            plan_ref: None,
             working_dir: PathBuf::from("."),
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
@@ -511,6 +542,8 @@ mod tests {
                     content: Some("fn drop() {}".to_string()),
                 },
             ],
+            stage: None,
+            plan_ref: None,
             working_dir: PathBuf::from("."),
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
@@ -541,6 +574,8 @@ mod tests {
                 rationale: None,
                 content: Some("fn ignored() {}".to_string()),
             }],
+            stage: None,
+            plan_ref: None,
             working_dir: PathBuf::from("."),
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
@@ -564,6 +599,8 @@ mod tests {
             task_brief: None,
             parent_summary: Some("User: hi\nAssistant: hello".to_string()),
             selected_files: Vec::new(),
+            stage: None,
+            plan_ref: None,
             working_dir: PathBuf::from("."),
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
@@ -593,5 +630,30 @@ mod tests {
             err.to_string().contains("missing section"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn includes_stage_role_priority_when_stage_present() {
+        let compiler = DefaultContextCompiler;
+        let spec = sample_spec(ContextMode::Isolated);
+        let req = RunRequest {
+            task: "task".to_string(),
+            task_brief: None,
+            parent_summary: None,
+            selected_files: Vec::new(),
+            stage: Some("Build".to_string()),
+            plan_ref: None,
+            working_dir: PathBuf::from("."),
+            run_mode: RunMode::Sync,
+            acceptance_criteria: Vec::new(),
+        };
+
+        let compiled = compiler
+            .compile(&spec, &req, ResolvedMemory::default())
+            .expect("compile");
+        assert!(compiled.injected_prompt.contains("WorkflowStage: Build"));
+        assert!(compiled
+            .injected_prompt
+            .contains("StageRolePriority: Builder -> Reviewer -> Planner"));
     }
 }

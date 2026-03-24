@@ -29,6 +29,7 @@ use crate::{
         },
     },
     runtime::dispatcher::RunStatus,
+    spec::Provider,
 };
 
 pub(crate) fn build_tool_router() -> ToolRouter<McpSubagentServer> {
@@ -50,18 +51,24 @@ impl McpSubagentServer {
                     .entry(provider.clone())
                     .or_insert_with(|| self.probe_provider(&provider))
                     .clone();
+                let capability_notes = build_capability_notes(&probe);
+                let available = if matches!(provider, Provider::Ollama) {
+                    false
+                } else {
+                    probe.is_available()
+                };
                 AgentListing {
                     name: loaded.spec.core.name,
                     description: loaded.spec.core.description,
                     provider: provider.as_str().to_string(),
-                    available: probe.is_available(),
+                    available,
                     runtime_policy: RuntimePolicySummary {
                         context_mode: format!("{:?}", runtime.context_mode),
                         working_dir_policy: format!("{:?}", runtime.working_dir_policy),
                         sandbox: format!("{:?}", runtime.sandbox),
                         timeout_secs: runtime.timeout_secs,
                     },
-                    capability_notes: build_capability_notes(&probe),
+                    capability_notes,
                 }
             })
             .collect();
@@ -93,7 +100,8 @@ impl McpSubagentServer {
         let crate::mcp::service::DispatchEnvelope {
             result,
             workspace,
-            _workspace_cleanup,
+            memory_resolution,
+            _workspace_cleanup: workspace_cleanup,
         } = dispatch;
 
         let (artifact_index, artifacts) = build_runtime_artifacts(
@@ -122,8 +130,11 @@ impl McpSubagentServer {
             request_snapshot: Some(request_snapshot),
             spec_snapshot: Some(spec_snapshot),
             probe_result: Some(probe_snapshot),
+            memory_resolution: Some(memory_resolution),
             workspace: Some(workspace),
+            compiled_context_markdown: Some(result.compiled_context_markdown),
         };
+        drop(workspace_cleanup);
         self.upsert_and_persist_run(&handle_id, record).await?;
 
         Ok(Json(output))
@@ -178,7 +189,8 @@ impl McpSubagentServer {
                     let crate::mcp::service::DispatchEnvelope {
                         result: dispatch_result,
                         workspace,
-                        _workspace_cleanup,
+                        memory_resolution,
+                        _workspace_cleanup: workspace_cleanup,
                     } = dispatch;
                     let (artifact_index, artifacts) = build_runtime_artifacts(
                         &dispatch_result.summary,
@@ -193,7 +205,11 @@ impl McpSubagentServer {
                     record.summary = Some(dispatch_result.summary);
                     record.artifact_index = artifact_index;
                     record.artifacts = artifacts;
+                    record.memory_resolution = Some(memory_resolution);
                     record.workspace = Some(workspace);
+                    record.compiled_context_markdown =
+                        Some(dispatch_result.compiled_context_markdown);
+                    drop(workspace_cleanup);
                 }
                 Err(err) => {
                     let summary = failed_summary(err.message.clone().into_owned());
@@ -206,7 +222,9 @@ impl McpSubagentServer {
                     record.summary = Some(summary);
                     record.artifact_index = artifact_index;
                     record.artifacts = artifacts;
+                    record.memory_resolution = None;
                     record.workspace = None;
+                    record.compiled_context_markdown = None;
                 }
             }
 

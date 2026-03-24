@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "PascalCase")]
 pub enum Provider {
+    Mock,
     Claude,
     Codex,
     Gemini,
@@ -14,6 +15,7 @@ pub enum Provider {
 impl Provider {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Mock => "Mock",
             Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::Gemini => "Gemini",
