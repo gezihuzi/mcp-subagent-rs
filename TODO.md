@@ -1081,3 +1081,9 @@
 - 已更新 `README.md`：
   - 命令面新增 `--selected-file-inline`；
   - 增加 `--selected-file` 与 `--selected-file-inline` 行为说明。
+- 已通过：
+  - `cargo fmt`
+  - `cargo test -q`（104 passed + 7 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`
+  - `cargo run -- run <agent> --selected-file-inline <path> --json` + `jq .request_snapshot.selected_files`（`has_inlined_content=true`）
