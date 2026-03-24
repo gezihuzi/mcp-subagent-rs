@@ -5,3 +5,4 @@ pub mod dispatcher;
 pub mod gemini_runner;
 pub mod mock_runner;
 pub mod summary;
+pub mod workspace;

@@ -172,3 +172,23 @@
 - 已补充“成功 + 非致命权限告警”回退规则：若检测到有效版本行则保持 `Ready` 并追加说明 note。
 - 已新增 `probe::tests::*` 单测覆盖权限/认证/实验特性/成功版本行等路径。
 - 已通过 `cargo fmt && cargo test`（36 passed），并验证 `doctor` 输出状态分类符合预期。
+
+## T-013 Phase3-WorkspacePolicyAndConflictControl (Completed 2026-03-24)
+任务：落地 `working_dir_policy` 与 `file_conflict_policy=Serialize` 的运行时执行逻辑，并把 workspace 元信息写入 run 状态。
+验收标准：
+1. 新增 workspace manager，支持 `InPlace/TempCopy/GitWorktree`（GitWorktree 失败时回退 TempCopy 并记录原因）。
+2. `run_agent/spawn_agent` 在执行前按 policy 准备 workspace，并将实际 workspace 路径用于 runner 执行。
+3. 对 `file_conflict_policy=Serialize` + 写权限任务启用同仓库串行锁，避免并发写冲突。
+4. `run.json` 增加 workspace 元信息（mode/source/workspace/notes/lock_key）。
+5. 新增测试覆盖 workspace 策略、run metadata 持久化、串行锁阻塞行为。
+6. `cargo test` 全量通过。
+完成记录：
+- 已新增 `runtime::workspace` 模块，实现 `prepare_workspace` 与 `resolve_source_path`，覆盖 `InPlace/TempCopy/GitWorktreeFallback`。
+- MCP server 的 `run_dispatch` 已改为先准备 workspace，再按 provider 执行；执行请求的 `working_dir` 使用实际 workspace 路径。
+- 已新增 serialize lock（按源仓库路径 key）并接入 `run_agent/spawn_agent`，对写任务生效。
+- `PersistedRunRecord` 已新增 `workspace` 字段并在 `run.json` 持久化（mode/source/workspace/notes/lock_key），重启后可加载。
+- 已新增测试：
+  - `runtime::workspace::*`（策略行为）
+  - `mcp::server::run_agent_tempcopy_persists_workspace_metadata`
+  - `mcp::server::serialize_lock_blocks_until_guard_released`
+- 已通过 `cargo fmt && cargo test`（41 passed），并验证 `cargo run -- doctor` 与 `cargo run -- validate`。

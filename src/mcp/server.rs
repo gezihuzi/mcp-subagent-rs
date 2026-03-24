@@ -13,7 +13,10 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::{
+    sync::{Mutex, OwnedMutexGuard},
+    task::JoinHandle,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -27,9 +30,11 @@ use crate::{
         gemini_runner::{gemini_runner_from_env, supports_provider as gemini_supports_provider},
         mock_runner::{MockRunPlan, MockRunner, RunnerTerminalState},
         summary::{ArtifactKind, ArtifactRef, StructuredSummary, VerificationStatus},
+        workspace::{prepare_workspace, resolve_source_path, PreparedWorkspace, WorkspaceMode},
     },
     spec::{
         registry::{load_agent_specs_from_dirs, LoadedAgentSpec},
+        runtime_policy::{FileConflictPolicy, SandboxPolicy},
         validate::validate_agent_spec,
         Provider,
     },
@@ -40,6 +45,7 @@ use crate::{
 struct RuntimeState {
     runs: HashMap<String, RunRecord>,
     tasks: HashMap<String, JoinHandle<()>>,
+    serialize_locks: HashMap<String, Arc<Mutex<()>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +57,7 @@ struct RunRecord {
     artifacts: HashMap<String, String>,
     error_message: Option<String>,
     task: String,
+    workspace: Option<WorkspaceRecord>,
 }
 
 impl RunRecord {
@@ -63,8 +70,21 @@ impl RunRecord {
             artifacts: HashMap::new(),
             error_message: None,
             task,
+            workspace: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceRecord {
+    mode: String,
+    source_path: PathBuf,
+    workspace_path: PathBuf,
+    #[serde(default)]
+    notes: Vec<String>,
+    #[serde(default)]
+    lock_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +96,8 @@ struct PersistedRunRecord {
     artifact_index: Vec<ArtifactOutput>,
     error_message: Option<String>,
     task: String,
+    #[serde(default)]
+    workspace: Option<WorkspaceRecord>,
 }
 
 impl From<&RunRecord> for PersistedRunRecord {
@@ -87,6 +109,7 @@ impl From<&RunRecord> for PersistedRunRecord {
             artifact_index: value.artifact_index.clone(),
             error_message: value.error_message.clone(),
             task: value.task.clone(),
+            workspace: value.workspace.clone(),
         }
     }
 }
@@ -257,6 +280,46 @@ impl McpSubagentServer {
         }
         persist_run_record(&self.state_dir, handle_id, &record)
     }
+
+    fn conflict_lock_key(
+        &self,
+        spec: &crate::spec::AgentSpec,
+        request: &RunRequest,
+    ) -> std::result::Result<Option<String>, ErrorData> {
+        if !matches!(
+            spec.runtime.file_conflict_policy,
+            FileConflictPolicy::Serialize
+        ) || matches!(spec.runtime.sandbox, SandboxPolicy::ReadOnly)
+        {
+            return Ok(None);
+        }
+        let source = resolve_source_path(&request.working_dir)
+            .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
+        Ok(Some(source.display().to_string()))
+    }
+
+    async fn acquire_serialize_lock(
+        &self,
+        lock_key: Option<String>,
+    ) -> Option<OwnedMutexGuard<()>> {
+        acquire_serialize_lock_from_state(&self.runtime_state, lock_key).await
+    }
+}
+
+async fn acquire_serialize_lock_from_state(
+    state: &Arc<Mutex<RuntimeState>>,
+    lock_key: Option<String>,
+) -> Option<OwnedMutexGuard<()>> {
+    let key = lock_key?;
+    let lock = {
+        let mut guard = state.lock().await;
+        guard
+            .serialize_locks
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    Some(lock.lock_owned().await)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -407,11 +470,21 @@ impl McpSubagentServer {
         Parameters(input): Parameters<RunAgentInput>,
     ) -> std::result::Result<Json<RunAgentOutput>, ErrorData> {
         let (loaded, request) = self.prepare_run(input)?;
-        let result = run_dispatch(&loaded.spec, &request).await?;
+        let handle_id = Uuid::now_v7().to_string();
+        let lock_key = self.conflict_lock_key(&loaded.spec, &request)?;
+        let _serialize_guard = self.acquire_serialize_lock(lock_key.clone()).await;
+        let dispatch = run_dispatch(
+            &loaded.spec,
+            &request,
+            &handle_id,
+            &self.state_dir,
+            lock_key.clone(),
+        )
+        .await?;
+        let result = dispatch.result;
 
         let (artifact_index, artifacts) =
             build_runtime_artifacts(&result.summary, &result.stdout, &result.stderr);
-        let handle_id = result.metadata.handle_id.to_string();
         let output = RunAgentOutput {
             handle_id: handle_id.clone(),
             status: format!("{:?}", result.metadata.status),
@@ -427,6 +500,7 @@ impl McpSubagentServer {
             artifacts,
             error_message: result.metadata.error_message,
             task: request.task,
+            workspace: Some(dispatch.workspace),
         };
         self.upsert_and_persist_run(&handle_id, record).await?;
 
@@ -441,6 +515,7 @@ impl McpSubagentServer {
         let (loaded, request) = self.prepare_run(input)?;
         let handle_id = Uuid::now_v7().to_string();
         let running_record = RunRecord::running(request.task.clone());
+        let lock_key = self.conflict_lock_key(&loaded.spec, &request)?;
 
         self.upsert_and_persist_run(&handle_id, running_record)
             .await?;
@@ -450,7 +525,16 @@ impl McpSubagentServer {
         let task_handle_id = handle_id.clone();
         let task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(120)).await;
-            let dispatch = run_dispatch(&loaded.spec, &request).await;
+            let _serialize_guard =
+                acquire_serialize_lock_from_state(&state, lock_key.clone()).await;
+            let dispatch = run_dispatch(
+                &loaded.spec,
+                &request,
+                &task_handle_id,
+                &state_dir,
+                lock_key.clone(),
+            )
+            .await;
 
             let mut guard = state.lock().await;
             guard.tasks.remove(&task_handle_id);
@@ -464,14 +548,19 @@ impl McpSubagentServer {
 
             match dispatch {
                 Ok(result) => {
-                    let (artifact_index, artifacts) =
-                        build_runtime_artifacts(&result.summary, &result.stdout, &result.stderr);
-                    record.status = result.metadata.status;
+                    let dispatch_result = result.result;
+                    let (artifact_index, artifacts) = build_runtime_artifacts(
+                        &dispatch_result.summary,
+                        &dispatch_result.stdout,
+                        &dispatch_result.stderr,
+                    );
+                    record.status = dispatch_result.metadata.status;
                     record.updated_at = OffsetDateTime::now_utc();
-                    record.error_message = result.metadata.error_message;
-                    record.summary = Some(result.summary);
+                    record.error_message = dispatch_result.metadata.error_message;
+                    record.summary = Some(dispatch_result.summary);
                     record.artifact_index = artifact_index;
                     record.artifacts = artifacts;
+                    record.workspace = Some(result.workspace);
                 }
                 Err(err) => {
                     let summary = failed_summary(err.message.clone().into_owned());
@@ -482,6 +571,7 @@ impl McpSubagentServer {
                     record.summary = Some(summary);
                     record.artifact_index = artifact_index;
                     record.artifacts = artifacts;
+                    record.workspace = None;
                 }
             }
 
@@ -758,6 +848,7 @@ fn load_run_record_from_disk(
         artifacts,
         error_message: persisted.error_message,
         task: persisted.task,
+        workspace: persisted.workspace,
     }))
 }
 
@@ -820,25 +911,65 @@ fn map_artifact_output(artifact: &ArtifactRef) -> ArtifactOutput {
     }
 }
 
+#[derive(Debug, Clone)]
+struct DispatchEnvelope {
+    result: DispatchResult,
+    workspace: WorkspaceRecord,
+}
+
 async fn run_dispatch(
     spec: &crate::spec::AgentSpec,
     request: &RunRequest,
-) -> std::result::Result<DispatchResult, ErrorData> {
-    if claude_supports_provider(&spec.core.provider) {
-        return run_dispatch_claude(spec, request).await;
+    handle_id: &str,
+    state_dir: &Path,
+    lock_key: Option<String>,
+) -> std::result::Result<DispatchEnvelope, ErrorData> {
+    let prepared_workspace = prepare_workspace(spec, request, state_dir, handle_id)
+        .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+    let workspace_record = to_workspace_record(&prepared_workspace, lock_key);
+    let mut effective_request = request.clone();
+    effective_request.working_dir = prepared_workspace.workspace_path;
+
+    let result = if claude_supports_provider(&spec.core.provider) {
+        run_dispatch_claude(spec, &effective_request, handle_id).await
+    } else if codex_supports_provider(&spec.core.provider) {
+        run_dispatch_codex(spec, &effective_request, handle_id).await
+    } else if gemini_supports_provider(&spec.core.provider) {
+        run_dispatch_gemini(spec, &effective_request, handle_id).await
+    } else {
+        run_dispatch_mock(spec, &effective_request, handle_id)
+    }?;
+
+    Ok(DispatchEnvelope {
+        result,
+        workspace: workspace_record,
+    })
+}
+
+fn to_workspace_record(prepared: &PreparedWorkspace, lock_key: Option<String>) -> WorkspaceRecord {
+    WorkspaceRecord {
+        mode: match prepared.mode {
+            WorkspaceMode::InPlace => "InPlace",
+            WorkspaceMode::TempCopy => "TempCopy",
+            WorkspaceMode::GitWorktree => "GitWorktree",
+            WorkspaceMode::GitWorktreeFallbackTempCopy => "GitWorktreeFallbackTempCopy",
+        }
+        .to_string(),
+        source_path: prepared.source_path.clone(),
+        workspace_path: prepared.workspace_path.clone(),
+        notes: prepared.notes.clone(),
+        lock_key,
     }
-    if codex_supports_provider(&spec.core.provider) {
-        return run_dispatch_codex(spec, request).await;
-    }
-    if gemini_supports_provider(&spec.core.provider) {
-        return run_dispatch_gemini(spec, request).await;
-    }
-    run_dispatch_mock(spec, request)
+}
+
+fn parse_handle_id(handle_id: &str) -> Uuid {
+    Uuid::parse_str(handle_id).unwrap_or_else(|_| Uuid::now_v7())
 }
 
 fn run_dispatch_mock(
     spec: &crate::spec::AgentSpec,
     request: &RunRequest,
+    handle_id: &str,
 ) -> std::result::Result<DispatchResult, ErrorData> {
     let mock_summary = build_mock_summary(&spec.core.name, request);
     let dispatcher = Dispatcher::new(
@@ -848,14 +979,18 @@ fn run_dispatch_mock(
         }),
     );
 
-    dispatcher
+    let mut dispatched = dispatcher
         .run(spec, request, ResolvedMemory::default())
-        .map_err(|err| ErrorData::internal_error(err.to_string(), None))
+        .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+    dispatched.metadata.handle_id = parse_handle_id(handle_id);
+    dispatched.metadata.workspace_path = request.working_dir.clone();
+    Ok(dispatched)
 }
 
 async fn run_dispatch_codex(
     spec: &crate::spec::AgentSpec,
     request: &RunRequest,
+    handle_id: &str,
 ) -> std::result::Result<DispatchResult, ErrorData> {
     validate_agent_spec(spec).map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     let compiler = DefaultContextCompiler;
@@ -882,7 +1017,7 @@ async fn run_dispatch_codex(
             Some("runner cancelled by request".to_string()),
         ),
     };
-    let metadata = build_terminal_metadata(spec, request, status, error_message);
+    let metadata = build_terminal_metadata(spec, request, handle_id, status, error_message);
 
     Ok(DispatchResult {
         metadata,
@@ -895,6 +1030,7 @@ async fn run_dispatch_codex(
 async fn run_dispatch_claude(
     spec: &crate::spec::AgentSpec,
     request: &RunRequest,
+    handle_id: &str,
 ) -> std::result::Result<DispatchResult, ErrorData> {
     validate_agent_spec(spec).map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     let compiler = DefaultContextCompiler;
@@ -921,7 +1057,7 @@ async fn run_dispatch_claude(
             Some("runner cancelled by request".to_string()),
         ),
     };
-    let metadata = build_terminal_metadata(spec, request, status, error_message);
+    let metadata = build_terminal_metadata(spec, request, handle_id, status, error_message);
 
     Ok(DispatchResult {
         metadata,
@@ -934,6 +1070,7 @@ async fn run_dispatch_claude(
 async fn run_dispatch_gemini(
     spec: &crate::spec::AgentSpec,
     request: &RunRequest,
+    handle_id: &str,
 ) -> std::result::Result<DispatchResult, ErrorData> {
     validate_agent_spec(spec).map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     let compiler = DefaultContextCompiler;
@@ -960,7 +1097,7 @@ async fn run_dispatch_gemini(
             Some("runner cancelled by request".to_string()),
         ),
     };
-    let metadata = build_terminal_metadata(spec, request, status, error_message);
+    let metadata = build_terminal_metadata(spec, request, handle_id, status, error_message);
 
     Ok(DispatchResult {
         metadata,
@@ -973,12 +1110,13 @@ async fn run_dispatch_gemini(
 fn build_terminal_metadata(
     spec: &crate::spec::AgentSpec,
     request: &RunRequest,
+    handle_id: &str,
     status: RunStatus,
     error_message: Option<String>,
 ) -> RunMetadata {
     let now = OffsetDateTime::now_utc();
     RunMetadata {
-        handle_id: Uuid::now_v7(),
+        handle_id: parse_handle_id(handle_id),
         created_at: now,
         updated_at: now,
         status: status.clone(),
@@ -1104,7 +1242,13 @@ fn format_time(value: OffsetDateTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs, path::Path, sync::Arc, time::Duration};
+    use std::{
+        collections::HashMap,
+        fs,
+        path::Path,
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     use rmcp::{
         model::{CallToolRequestParams, ClientInfo},
@@ -1112,6 +1256,7 @@ mod tests {
     };
     use serde_json::json;
     use tempfile::tempdir;
+    use tokio::sync::Mutex;
 
     use crate::{
         probe::{ProbeStatus, ProviderCapabilities, ProviderProbe, ProviderProber},
@@ -1119,8 +1264,8 @@ mod tests {
     };
 
     use super::{
-        HandleInput, McpSubagentServer, ReadAgentArtifactInput, RunAgentInput,
-        RunAgentSelectedFileInput,
+        acquire_serialize_lock_from_state, HandleInput, McpSubagentServer, ReadAgentArtifactInput,
+        RunAgentInput, RunAgentSelectedFileInput, RuntimeState,
     };
 
     fn write_agent_spec(dir: &Path) {
@@ -1575,5 +1720,91 @@ sandbox = "ReadOnly"
             Err(err) => err,
         };
         assert!(invalid.message.as_ref().contains("invalid artifact path"));
+    }
+
+    #[tokio::test]
+    async fn run_agent_tempcopy_persists_workspace_metadata() {
+        let temp = tempdir().expect("temp");
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        fs::create_dir_all(&project_dir).expect("create project");
+        fs::write(project_dir.join("hello.txt"), "workspace source").expect("write source");
+
+        let agent = r#"
+[core]
+name = "writer"
+description = "write code"
+provider = "Ollama"
+instructions = "write"
+
+[runtime]
+working_dir_policy = "TempCopy"
+file_conflict_policy = "Serialize"
+sandbox = "WorkspaceWrite"
+"#;
+        fs::write(agents_dir.join("writer.agent.toml"), agent).expect("write agent");
+        let server = make_server(agents_dir, state_dir.clone());
+
+        let out = server
+            .run_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
+                agent_name: "writer".to_string(),
+                task: "copy workspace".to_string(),
+                task_brief: None,
+                parent_summary: None,
+                selected_files: Vec::new(),
+                working_dir: Some(project_dir.display().to_string()),
+            }))
+            .await
+            .expect("run")
+            .0;
+
+        let run_json =
+            fs::read_to_string(state_dir.join("runs").join(&out.handle_id).join("run.json"))
+                .expect("read run json");
+        let run_obj: serde_json::Value = serde_json::from_str(&run_json).expect("parse run json");
+        assert_eq!(run_obj["workspace"]["mode"], "TempCopy");
+        let workspace_path = run_obj["workspace"]["workspace_path"]
+            .as_str()
+            .expect("workspace path");
+        assert!(Path::new(workspace_path).join("hello.txt").exists());
+        assert!(run_obj["workspace"]["lock_key"]
+            .as_str()
+            .expect("lock key")
+            .contains("project"));
+    }
+
+    #[tokio::test]
+    async fn serialize_lock_blocks_until_guard_released() {
+        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        let first_guard = acquire_serialize_lock_from_state(&state, Some("repo-key".to_string()))
+            .await
+            .expect("first guard");
+
+        let state_clone = Arc::clone(&state);
+        let waiter = tokio::spawn(async move {
+            let start = Instant::now();
+            let guard =
+                acquire_serialize_lock_from_state(&state_clone, Some("repo-key".to_string()))
+                    .await
+                    .expect("second guard");
+            let elapsed = start.elapsed();
+            drop(guard);
+            elapsed
+        });
+
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        assert!(
+            !waiter.is_finished(),
+            "second guard should still be waiting"
+        );
+
+        drop(first_guard);
+        let elapsed = waiter.await.expect("waiter join");
+        assert!(
+            elapsed >= Duration::from_millis(80),
+            "lock wait should be observable, elapsed={elapsed:?}"
+        );
     }
 }
