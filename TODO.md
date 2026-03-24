@@ -350,3 +350,21 @@
 - `src/mcp/mod.rs` 已注册 `pub(crate) mod state;`。
 - `src/mcp/server.rs` 已改为引用 `mcp::state`，并移除本地重复定义与转换函数。
 - 已通过 `cargo test`（61 passed）与 `cargo run -- validate`（summary contract template: ok）。
+
+## T-023 V0.6-P0-2d-McpServerPersistenceSplit (Completed 2026-03-24)
+任务：推进 v0.6 P0-2 的第四步，将 run 持久化读写职责从 `mcp/server.rs` 抽离到独立模块，继续收缩 server 文件职责。
+验收标准：
+1. 新增 `src/mcp/persistence.rs`，集中承载 run metadata/artifact 的持久化写入与重启后加载逻辑。
+2. `src/mcp/server.rs` 不再定义 `persist/load` 相关函数，统一复用 `mcp::persistence`。
+3. 持久化格式与兼容行为不回退（`run.json`、artifacts、stdout/stderr log、历史 run 加载）。
+4. 现有覆盖重启查询/artifact 读取的 MCP 单测保持通过。
+5. `cargo test` 与 `cargo run -- validate` 通过。
+完成记录：
+- 已新增 `src/mcp/persistence.rs`，迁移：
+  - `persist_run_record`
+  - `load_run_record_from_disk`
+  - `write_run_log_file`
+  - 内部 `run_meta_path`
+- `src/mcp/mod.rs` 已注册 `pub(crate) mod persistence;`。
+- `src/mcp/server.rs` 已移除本地持久化函数，改为引用 `mcp::persistence::{persist_run_record, load_run_record_from_disk}`。
+- 已通过 `cargo fmt && cargo test`（61 passed）与 `cargo run -- validate`（summary contract template: ok）。
