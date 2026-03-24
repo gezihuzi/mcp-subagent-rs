@@ -1,5 +1,6 @@
 pub mod error;
 pub mod mcp;
+pub mod probe;
 pub mod runtime;
 pub mod spec;
 pub mod types;

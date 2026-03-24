@@ -66,3 +66,18 @@
 - `get_agent_status/read_agent_artifact` 支持按 handle_id 从磁盘懒加载历史 run，实现重启后可查。
 - 已实现 artifact 路径安全校验，拒绝绝对路径与目录穿越。
 - 已新增测试 `restart_can_query_persisted_runs_and_reject_invalid_path`，全量 `cargo test` 通过（18 passed）。
+
+## T-006 Phase2-ProviderProbeAvailability (Completed 2026-03-24)
+任务：实现最小 provider probe，并将可用性接入 MCP `list_agents` 与运行前校验。
+验收标准：
+1. 新增 provider probe 抽象，至少覆盖 `Ready/MissingBinary/ProbeFailed/ExperimentalUnavailable` 状态。
+2. `list_agents` 返回每个 agent 的真实 `available` 与 `capability_notes`（含 probe 状态说明）。
+3. `run_agent/spawn_agent` 在 provider 不可用时直接拒绝启动并返回清晰错误。
+4. 新增单测覆盖“provider 可用可运行”和“provider 不可用被拒绝”路径。
+5. `cargo test` 全量通过。
+完成记录：
+- 已新增 `probe` 模块：`ProviderProber` 抽象、`SystemProviderProber` 实现、`ProviderProbe/ProbeStatus` 结构与状态语义。
+- `McpSubagentServer` 已接入 provider probe：`list_agents` 根据探测结果返回 `available` 与 `capability_notes`。
+- `run_agent/spawn_agent` 已新增 provider 可用性前置校验，不可用时返回明确错误。
+- 已新增测试 `list_agents_marks_provider_unavailable` 与 `run_agent_rejects_unavailable_provider`，并将现有 MCP 测试切到可控 probe。
+- 已通过 `cargo fmt && cargo test`（20 passed）与 `cargo run -- validate`。

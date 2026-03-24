@@ -18,13 +18,17 @@ use uuid::Uuid;
 
 use crate::{
     error::McpSubagentError,
+    probe::{ProbeStatus, ProviderProbe, ProviderProber, SystemProviderProber},
     runtime::{
         context::DefaultContextCompiler,
         dispatcher::{DispatchResult, Dispatcher, RunStatus},
         mock_runner::{MockRunPlan, MockRunner},
         summary::{ArtifactKind, ArtifactRef, StructuredSummary, VerificationStatus},
     },
-    spec::registry::{load_agent_specs_from_dirs, LoadedAgentSpec},
+    spec::{
+        registry::{load_agent_specs_from_dirs, LoadedAgentSpec},
+        Provider,
+    },
     types::{ResolvedMemory, RunMode, RunRequest, SelectedFile},
 };
 
@@ -96,19 +100,33 @@ pub struct McpSubagentServer {
     tool_router: ToolRouter<Self>,
     agents_dirs: Vec<PathBuf>,
     state_dir: PathBuf,
+    provider_prober: Arc<dyn ProviderProber>,
     runtime_state: Arc<Mutex<RuntimeState>>,
 }
 
 impl McpSubagentServer {
     pub fn new(agents_dirs: Vec<PathBuf>) -> Self {
-        Self::new_with_state_dir(agents_dirs, default_state_dir())
+        Self::new_with_state_dir_and_prober(
+            agents_dirs,
+            default_state_dir(),
+            Arc::new(SystemProviderProber),
+        )
     }
 
     pub fn new_with_state_dir(agents_dirs: Vec<PathBuf>, state_dir: PathBuf) -> Self {
+        Self::new_with_state_dir_and_prober(agents_dirs, state_dir, Arc::new(SystemProviderProber))
+    }
+
+    pub fn new_with_state_dir_and_prober(
+        agents_dirs: Vec<PathBuf>,
+        state_dir: PathBuf,
+        provider_prober: Arc<dyn ProviderProber>,
+    ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             agents_dirs,
             state_dir,
+            provider_prober,
             runtime_state: Arc::new(Mutex::new(RuntimeState::default())),
         }
     }
@@ -144,6 +162,7 @@ impl McpSubagentServer {
                     None,
                 )
             })?;
+        self.ensure_provider_ready(&loaded.spec.core.provider)?;
 
         let request = RunRequest {
             task: input.task,
@@ -170,6 +189,33 @@ impl McpSubagentServer {
         };
 
         Ok((loaded, request))
+    }
+
+    fn probe_provider(&self, provider: &Provider) -> ProviderProbe {
+        self.provider_prober.probe(provider)
+    }
+
+    fn ensure_provider_ready(&self, provider: &Provider) -> std::result::Result<(), ErrorData> {
+        let probe = self.probe_provider(provider);
+        if probe.is_available() {
+            return Ok(());
+        }
+
+        let mut details = Vec::new();
+        details.push(format!("status={}", probe.status));
+        if let Some(version) = &probe.version {
+            details.push(format!("version={version}"));
+        }
+        details.extend(probe.notes);
+
+        Err(ErrorData::invalid_params(
+            format!(
+                "provider `{}` is unavailable ({})",
+                provider.as_str(),
+                details.join("; ")
+            ),
+            None,
+        ))
     }
 
     async fn get_or_load_run_record(
@@ -322,22 +368,28 @@ impl McpSubagentServer {
     #[tool(description = "List all available mcp-subagent agent specs.")]
     pub async fn list_agents(&self) -> std::result::Result<Json<ListAgentsOutput>, ErrorData> {
         let loaded = self.load_specs()?;
+        let mut probe_cache: HashMap<Provider, ProviderProbe> = HashMap::new();
         let agents = loaded
             .into_iter()
             .map(|loaded| {
+                let provider = loaded.spec.core.provider.clone();
                 let runtime = loaded.spec.runtime;
+                let probe = probe_cache
+                    .entry(provider.clone())
+                    .or_insert_with(|| self.probe_provider(&provider))
+                    .clone();
                 AgentListing {
                     name: loaded.spec.core.name,
                     description: loaded.spec.core.description,
-                    provider: loaded.spec.core.provider.as_str().to_string(),
-                    available: true,
+                    provider: provider.as_str().to_string(),
+                    available: probe.is_available(),
                     runtime_policy: RuntimePolicySummary {
                         context_mode: format!("{:?}", runtime.context_mode),
                         working_dir_policy: format!("{:?}", runtime.working_dir_policy),
                         sandbox: format!("{:?}", runtime.sandbox),
                         timeout_secs: runtime.timeout_secs,
                     },
-                    capability_notes: Vec::new(),
+                    capability_notes: build_capability_notes(&probe),
                 }
             })
             .collect();
@@ -727,6 +779,22 @@ fn read_artifact_from_disk(
     Ok(Some(content))
 }
 
+fn build_capability_notes(probe: &ProviderProbe) -> Vec<String> {
+    let mut notes = Vec::new();
+    notes.push(format!("probe_status: {}", probe.status));
+    if let Some(version) = &probe.version {
+        notes.push(format!("detected_version: {version}"));
+    }
+    if matches!(probe.status, ProbeStatus::MissingBinary) {
+        notes.push(format!(
+            "install `{}` and ensure it is in PATH",
+            probe.executable.display()
+        ));
+    }
+    notes.extend(probe.notes.clone());
+    notes
+}
+
 fn map_summary_output(summary: &StructuredSummary) -> SummaryOutput {
     SummaryOutput {
         summary: summary.summary.clone(),
@@ -866,7 +934,7 @@ fn format_time(value: OffsetDateTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, time::Duration};
+    use std::{collections::HashMap, fs, path::Path, sync::Arc, time::Duration};
 
     use rmcp::{
         model::{CallToolRequestParams, ClientInfo},
@@ -874,6 +942,11 @@ mod tests {
     };
     use serde_json::json;
     use tempfile::tempdir;
+
+    use crate::{
+        probe::{ProbeStatus, ProviderCapabilities, ProviderProbe, ProviderProber},
+        spec::Provider,
+    };
 
     use super::{
         HandleInput, McpSubagentServer, ReadAgentArtifactInput, RunAgentInput,
@@ -895,6 +968,96 @@ sandbox = "ReadOnly"
         fs::write(dir.join("reviewer.agent.toml"), agent).expect("write agent");
     }
 
+    #[derive(Debug, Clone)]
+    struct TestProviderProber {
+        probes: HashMap<Provider, ProviderProbe>,
+    }
+
+    impl TestProviderProber {
+        fn ready() -> Self {
+            Self {
+                probes: HashMap::new(),
+            }
+        }
+
+        fn with_status(mut self, provider: Provider, status: ProbeStatus, note: &str) -> Self {
+            self.probes.insert(
+                provider.clone(),
+                ProviderProbe {
+                    provider: provider.clone(),
+                    executable: provider_binary(&provider),
+                    version: Some("test-version".to_string()),
+                    status,
+                    capabilities: provider_capabilities(&provider),
+                    notes: vec![note.to_string()],
+                },
+            );
+            self
+        }
+    }
+
+    impl ProviderProber for TestProviderProber {
+        fn probe(&self, provider: &Provider) -> ProviderProbe {
+            self.probes
+                .get(provider)
+                .cloned()
+                .unwrap_or_else(|| ProviderProbe {
+                    provider: provider.clone(),
+                    executable: provider_binary(provider),
+                    version: Some("test-version".to_string()),
+                    status: ProbeStatus::Ready,
+                    capabilities: provider_capabilities(provider),
+                    notes: Vec::new(),
+                })
+        }
+    }
+
+    fn provider_binary(provider: &Provider) -> std::path::PathBuf {
+        match provider {
+            Provider::Claude => "claude",
+            Provider::Codex => "codex",
+            Provider::Gemini => "gemini",
+            Provider::Ollama => "ollama",
+        }
+        .into()
+    }
+
+    fn provider_capabilities(provider: &Provider) -> ProviderCapabilities {
+        match provider {
+            Provider::Claude => ProviderCapabilities {
+                supports_background_native: true,
+                supports_native_project_memory: true,
+                experimental: false,
+            },
+            Provider::Codex => ProviderCapabilities {
+                supports_background_native: false,
+                supports_native_project_memory: true,
+                experimental: false,
+            },
+            Provider::Gemini => ProviderCapabilities {
+                supports_background_native: false,
+                supports_native_project_memory: true,
+                experimental: true,
+            },
+            Provider::Ollama => ProviderCapabilities {
+                supports_background_native: false,
+                supports_native_project_memory: false,
+                experimental: false,
+            },
+        }
+    }
+
+    fn make_server(
+        agents_dir: std::path::PathBuf,
+        state_dir: std::path::PathBuf,
+    ) -> McpSubagentServer {
+        McpSubagentServer::new_with_state_dir_and_prober(
+            vec![agents_dir],
+            state_dir,
+            Arc::new(TestProviderProber::ready()),
+        )
+    }
+
     #[tokio::test]
     async fn list_agents_tool_returns_agent() {
         let temp = tempdir().expect("temp");
@@ -902,11 +1065,38 @@ sandbox = "ReadOnly"
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&agents_dir).expect("create agents");
         write_agent_spec(&agents_dir);
-        let server = McpSubagentServer::new_with_state_dir(vec![agents_dir], state_dir);
+        let server = make_server(agents_dir, state_dir);
 
         let out = server.list_agents().await.expect("list").0;
         assert_eq!(out.agents.len(), 1);
         assert_eq!(out.agents[0].name, "reviewer");
+    }
+
+    #[tokio::test]
+    async fn list_agents_marks_provider_unavailable() {
+        let temp = tempdir().expect("temp");
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        write_agent_spec(&agents_dir);
+
+        let server = McpSubagentServer::new_with_state_dir_and_prober(
+            vec![agents_dir],
+            state_dir,
+            Arc::new(TestProviderProber::ready().with_status(
+                Provider::Codex,
+                ProbeStatus::MissingBinary,
+                "codex CLI not installed",
+            )),
+        );
+
+        let out = server.list_agents().await.expect("list").0;
+        assert_eq!(out.agents.len(), 1);
+        assert!(!out.agents[0].available);
+        assert!(out.agents[0]
+            .capability_notes
+            .iter()
+            .any(|note| note.contains("MissingBinary")));
     }
 
     #[tokio::test]
@@ -916,7 +1106,7 @@ sandbox = "ReadOnly"
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&agents_dir).expect("create agents");
         write_agent_spec(&agents_dir);
-        let server = McpSubagentServer::new_with_state_dir(vec![agents_dir], state_dir);
+        let server = make_server(agents_dir, state_dir);
 
         let input = RunAgentInput {
             agent_name: "reviewer".to_string(),
@@ -944,6 +1134,44 @@ sandbox = "ReadOnly"
         assert_eq!(out.structured_summary.verification_status, "Passed");
     }
 
+    #[tokio::test]
+    async fn run_agent_rejects_unavailable_provider() {
+        let temp = tempdir().expect("temp");
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        write_agent_spec(&agents_dir);
+
+        let server = McpSubagentServer::new_with_state_dir_and_prober(
+            vec![agents_dir],
+            state_dir,
+            Arc::new(TestProviderProber::ready().with_status(
+                Provider::Codex,
+                ProbeStatus::MissingBinary,
+                "codex CLI not installed",
+            )),
+        );
+
+        let err = match server
+            .run_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
+                agent_name: "reviewer".to_string(),
+                task: "review parser".to_string(),
+                task_brief: None,
+                parent_summary: None,
+                selected_files: Vec::new(),
+                working_dir: None,
+            }))
+            .await
+        {
+            Ok(_) => panic!("run should fail when provider is unavailable"),
+            Err(err) => err,
+        };
+        assert!(err
+            .message
+            .as_ref()
+            .contains("provider `Codex` is unavailable"));
+    }
+
     #[derive(Debug, Clone, Default)]
     struct DummyClient;
 
@@ -969,7 +1197,7 @@ sandbox = "ReadOnly"
         write_agent_spec(&agents_dir);
 
         let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
-        let server = McpSubagentServer::new_with_state_dir(vec![agents_dir], state_dir);
+        let server = make_server(agents_dir, state_dir);
         let server_handle = tokio::spawn(async move {
             let running = server.serve(server_transport).await.expect("server init");
             let _ = running.waiting().await.expect("server wait");
@@ -1108,8 +1336,7 @@ sandbox = "ReadOnly"
         fs::create_dir_all(&agents_dir).expect("create agents");
         write_agent_spec(&agents_dir);
 
-        let server =
-            McpSubagentServer::new_with_state_dir(vec![agents_dir.clone()], state_dir.clone());
+        let server = make_server(agents_dir.clone(), state_dir.clone());
         let run_out = server
             .run_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
                 agent_name: "reviewer".to_string(),
@@ -1129,7 +1356,7 @@ sandbox = "ReadOnly"
         let handle_id = run_out.handle_id;
         drop(server);
 
-        let restarted = McpSubagentServer::new_with_state_dir(vec![agents_dir], state_dir);
+        let restarted = make_server(agents_dir, state_dir);
         let status = restarted
             .get_agent_status(rmcp::handler::server::wrapper::Parameters(HandleInput {
                 handle_id: handle_id.clone(),
