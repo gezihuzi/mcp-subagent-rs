@@ -1,0 +1,26 @@
+[core]
+name = "workflow_builder"
+description = "Example builder agent with explicit workflow gates"
+provider = "Mock"
+instructions = "Implement requested changes according to stage and active plan."
+
+[runtime]
+context_mode = "Isolated"
+working_dir_policy = "Auto"
+sandbox = "ReadOnly"
+timeout_secs = 600
+
+[workflow]
+enabled = true
+max_runtime_depth = 2
+stages = ["Research", "Plan", "Build", "Review", "Archive"]
+allowed_stages = ["Research", "Plan", "Build", "Review", "Archive"]
+
+[workflow.require_plan_when]
+require_plan_if_touched_files_ge = 1
+require_plan_if_cross_module = false
+require_plan_if_parallel_agents = false
+require_plan_if_new_interface = false
+require_plan_if_migration = false
+require_plan_if_human_approval_point = false
+require_plan_if_estimated_runtime_minutes_ge = 10

@@ -867,3 +867,56 @@
   - `./scripts/smoke_v06.sh`
   - `cargo fmt && cargo test`（89 passed + 3 passed）
   - `cargo run -- validate`
+
+## T-039 PostV0.6-CI-Automation (Completed 2026-03-24)
+
+任务：把本地验收链路接入 CI，避免手工漏检。
+验收标准：
+
+1. 新增 CI workflow，触发 push/pull_request。
+2. CI 至少执行 `cargo fmt --check`、`cargo test`、`validate`、`smoke`。
+3. 示例 specs 可在 CI 中被 validate。
+完成记录：
+
+- 已新增 `.github/workflows/ci.yml`。
+- 已接入步骤：
+  - `cargo fmt --check`
+  - `cargo test --all-targets --locked`
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`
+
+## T-040 PostV0.6-Examples-And-E2E-Regression (Completed 2026-03-24)
+
+任务：补齐真实 workflow 示例并落地端到端回归测试。
+验收标准：
+
+1. 新增示例 agent spec，覆盖 `workflow + stage + plan_ref`。
+2. 新增示例 workspace，包含 `PLAN.md/PROJECT.md/archived plans`。
+3. 新增 e2e 测试覆盖 build pass/fail 和 depth guard。
+完成记录：
+
+- 已新增示例：
+  - `examples/agents/workflow_builder.agent.toml`
+  - `examples/workspaces/workflow_demo/PLAN.md`
+  - `examples/workspaces/workflow_demo/PROJECT.md`
+  - `examples/workspaces/workflow_demo/docs/plans/2026-03-24-bootstrap.md`
+  - `examples/workspaces/workflow_demo/src/lib.rs`
+- 已新增 `tests/e2e_workflow_examples.rs`，覆盖：
+  - build stage + plan_ref 成功
+  - plan gate 缺失失败
+  - `max_runtime_depth` 超限失败
+
+## T-041 PostV0.6-Release-Cutpoint (Completed 2026-03-24)
+
+任务：收口发布文档与版本切点。
+验收标准：
+
+1. 版本号更新到 `0.6.0`。
+2. 新增 changelog 与发布说明文档。
+3. README 补齐示例与发布后使用入口。
+完成记录：
+
+- 已更新 `Cargo.toml` 版本为 `0.6.0`（同步更新 `Cargo.lock`）。
+- 已新增 `CHANGELOG.md`（v0.6.0 版本摘要与 provider 状态）。
+- 已新增 `docs/release_v0.6.0.md`（发布切点和打 tag 清单）。
+- 已更新 `README.md`（标注 v0.6.0，并补充 examples validate 用法）。

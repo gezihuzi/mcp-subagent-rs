@@ -1,4 +1,4 @@
-# mcp-subagent-rs
+# mcp-subagent-rs (v0.6.0)
 
 Rust implementation of an MCP subagent runtime aligned to `docs/mcp-subagent_tech_design_v0.6.md`.
 
@@ -60,3 +60,16 @@ This script validates:
 3. `list-agents`
 4. `run` on `Mock` (and `Codex` if available)
 5. `mcp` boot via short-lived `timeout`
+
+## Example Workflow Specs
+
+Repository examples used by CI and regression tests:
+
+- `examples/agents/workflow_builder.agent.toml`
+- `examples/workspaces/workflow_demo/`
+
+Quick validation against example specs:
+
+```bash
+cargo run -- --agents-dir examples/agents validate
+```
