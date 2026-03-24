@@ -1,14 +1,12 @@
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::router::tool::ToolRouter,
     model::{ServerCapabilities, ServerInfo},
-    tool, tool_handler, tool_router, ErrorData, Json, ServerHandler, ServiceExt,
+    tool_handler, ErrorData, ServerHandler, ServiceExt,
 };
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::{Mutex, OwnedMutexGuard};
@@ -16,14 +14,9 @@ use uuid::Uuid;
 
 use crate::{
     error::McpSubagentError,
-    mcp::artifacts::{
-        build_runtime_artifacts, read_artifact_from_disk, sanitize_relative_artifact_path,
-    },
     mcp::persistence::{load_run_record_from_disk, persist_run_record},
-    mcp::state::{
-        append_status_if_terminal, build_probe_result_snapshot, build_run_request_snapshot,
-        build_run_spec_snapshot, RunRecord, RuntimeState, WorkspaceRecord,
-    },
+    mcp::state::{RunRecord, RuntimeState, WorkspaceRecord},
+    mcp::tools::build_tool_router,
     probe::{ProbeStatus, ProviderProbe, ProviderProber, SystemProviderProber},
     runtime::{
         claude_runner::{claude_runner_from_env, supports_provider as claude_supports_provider},
@@ -88,7 +81,7 @@ impl McpSubagentServer {
         provider_prober: Arc<dyn ProviderProber>,
     ) -> Self {
         Self {
-            tool_router: Self::tool_router(),
+            tool_router: build_tool_router(),
             agents_dirs,
             state_dir,
             provider_prober,
@@ -108,12 +101,12 @@ impl McpSubagentServer {
         Ok(())
     }
 
-    fn load_specs(&self) -> std::result::Result<Vec<LoadedAgentSpec>, ErrorData> {
+    pub(crate) fn load_specs(&self) -> std::result::Result<Vec<LoadedAgentSpec>, ErrorData> {
         load_agent_specs_from_dirs(&self.agents_dirs)
             .map_err(|err| ErrorData::internal_error(err.to_string(), None))
     }
 
-    fn prepare_run(
+    pub(crate) fn prepare_run(
         &self,
         input: RunAgentInput,
     ) -> std::result::Result<(LoadedAgentSpec, RunRequest, ProviderProbe), ErrorData> {
@@ -156,11 +149,11 @@ impl McpSubagentServer {
         Ok((loaded, request, probe_result))
     }
 
-    fn probe_provider(&self, provider: &Provider) -> ProviderProbe {
+    pub(crate) fn probe_provider(&self, provider: &Provider) -> ProviderProbe {
         self.provider_prober.probe(provider)
     }
 
-    fn ensure_provider_ready(
+    pub(crate) fn ensure_provider_ready(
         &self,
         provider: &Provider,
     ) -> std::result::Result<ProviderProbe, ErrorData> {
@@ -186,7 +179,7 @@ impl McpSubagentServer {
         ))
     }
 
-    async fn get_or_load_run_record(
+    pub(crate) async fn get_or_load_run_record(
         &self,
         handle_id: &str,
     ) -> std::result::Result<RunRecord, ErrorData> {
@@ -210,7 +203,7 @@ impl McpSubagentServer {
         Ok(record)
     }
 
-    async fn upsert_and_persist_run(
+    pub(crate) async fn upsert_and_persist_run(
         &self,
         handle_id: &str,
         record: RunRecord,
@@ -222,7 +215,7 @@ impl McpSubagentServer {
         persist_run_record(&self.state_dir, handle_id, &record)
     }
 
-    fn conflict_lock_key(
+    pub(crate) fn conflict_lock_key(
         &self,
         spec: &crate::spec::AgentSpec,
         request: &RunRequest,
@@ -239,15 +232,23 @@ impl McpSubagentServer {
         Ok(Some(source.display().to_string()))
     }
 
-    async fn acquire_serialize_lock(
+    pub(crate) async fn acquire_serialize_lock(
         &self,
         lock_key: Option<String>,
     ) -> Option<OwnedMutexGuard<()>> {
         acquire_serialize_lock_from_state(&self.runtime_state, lock_key).await
     }
+
+    pub(crate) fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
+    pub(crate) fn runtime_state(&self) -> Arc<Mutex<RuntimeState>> {
+        Arc::clone(&self.runtime_state)
+    }
 }
 
-async fn acquire_serialize_lock_from_state(
+pub(crate) async fn acquire_serialize_lock_from_state(
     state: &Arc<Mutex<RuntimeState>>,
     lock_key: Option<String>,
 ) -> Option<OwnedMutexGuard<()>> {
@@ -263,309 +264,11 @@ async fn acquire_serialize_lock_from_state(
     Some(lock.lock_owned().await)
 }
 
-#[tool_router]
-impl McpSubagentServer {
-    #[tool(description = "List all available mcp-subagent agent specs.")]
-    pub async fn list_agents(&self) -> std::result::Result<Json<ListAgentsOutput>, ErrorData> {
-        let loaded = self.load_specs()?;
-        let mut probe_cache: HashMap<Provider, ProviderProbe> = HashMap::new();
-        let agents = loaded
-            .into_iter()
-            .map(|loaded| {
-                let provider = loaded.spec.core.provider.clone();
-                let runtime = loaded.spec.runtime;
-                let probe = probe_cache
-                    .entry(provider.clone())
-                    .or_insert_with(|| self.probe_provider(&provider))
-                    .clone();
-                AgentListing {
-                    name: loaded.spec.core.name,
-                    description: loaded.spec.core.description,
-                    provider: provider.as_str().to_string(),
-                    available: probe.is_available(),
-                    runtime_policy: RuntimePolicySummary {
-                        context_mode: format!("{:?}", runtime.context_mode),
-                        working_dir_policy: format!("{:?}", runtime.working_dir_policy),
-                        sandbox: format!("{:?}", runtime.sandbox),
-                        timeout_secs: runtime.timeout_secs,
-                    },
-                    capability_notes: build_capability_notes(&probe),
-                }
-            })
-            .collect();
-
-        Ok(Json(ListAgentsOutput { agents }))
-    }
-
-    #[tool(description = "Run an agent synchronously and return structured summary.")]
-    pub async fn run_agent(
-        &self,
-        Parameters(input): Parameters<RunAgentInput>,
-    ) -> std::result::Result<Json<RunAgentOutput>, ErrorData> {
-        let (loaded, request, probe_result) = self.prepare_run(input)?;
-        let request_snapshot = build_run_request_snapshot(&request);
-        let spec_snapshot = build_run_spec_snapshot(&loaded.spec);
-        let probe_snapshot = build_probe_result_snapshot(&probe_result);
-        let run_created_at = OffsetDateTime::now_utc();
-        let handle_id = Uuid::now_v7().to_string();
-        let lock_key = self.conflict_lock_key(&loaded.spec, &request)?;
-        let _serialize_guard = self.acquire_serialize_lock(lock_key.clone()).await;
-        let dispatch = run_dispatch(
-            &loaded.spec,
-            &request,
-            &handle_id,
-            &self.state_dir,
-            lock_key.clone(),
-        )
-        .await?;
-        let result = dispatch.result;
-
-        let (artifact_index, artifacts) = build_runtime_artifacts(
-            &result.summary,
-            &result.stdout,
-            &result.stderr,
-            Some(&dispatch.workspace.workspace_path),
-        );
-        let output = RunAgentOutput {
-            handle_id: handle_id.clone(),
-            status: format!("{:?}", result.metadata.status),
-            structured_summary: map_summary_output(&result.summary),
-            artifact_index: artifact_index.clone(),
-        };
-
-        let record = RunRecord {
-            status: result.metadata.status,
-            created_at: run_created_at,
-            updated_at: OffsetDateTime::now_utc(),
-            status_history: result.metadata.status_history,
-            summary: Some(result.summary),
-            artifact_index,
-            artifacts,
-            error_message: result.metadata.error_message,
-            task: request.task,
-            request_snapshot: Some(request_snapshot),
-            spec_snapshot: Some(spec_snapshot),
-            probe_result: Some(probe_snapshot),
-            workspace: Some(dispatch.workspace),
-        };
-        self.upsert_and_persist_run(&handle_id, record).await?;
-
-        Ok(Json(output))
-    }
-
-    #[tool(description = "Spawn an agent asynchronously and return handle_id immediately.")]
-    pub async fn spawn_agent(
-        &self,
-        Parameters(input): Parameters<RunAgentInput>,
-    ) -> std::result::Result<Json<SpawnAgentOutput>, ErrorData> {
-        let (loaded, request, probe_result) = self.prepare_run(input)?;
-        let handle_id = Uuid::now_v7().to_string();
-        let running_record = RunRecord::running(
-            request.task.clone(),
-            Some(build_run_request_snapshot(&request)),
-            Some(build_run_spec_snapshot(&loaded.spec)),
-            Some(build_probe_result_snapshot(&probe_result)),
-        );
-        let lock_key = self.conflict_lock_key(&loaded.spec, &request)?;
-
-        self.upsert_and_persist_run(&handle_id, running_record)
-            .await?;
-
-        let state = Arc::clone(&self.runtime_state);
-        let state_dir = self.state_dir.clone();
-        let task_handle_id = handle_id.clone();
-        let task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            let _serialize_guard =
-                acquire_serialize_lock_from_state(&state, lock_key.clone()).await;
-            let dispatch = run_dispatch(
-                &loaded.spec,
-                &request,
-                &task_handle_id,
-                &state_dir,
-                lock_key.clone(),
-            )
-            .await;
-
-            let mut guard = state.lock().await;
-            guard.tasks.remove(&task_handle_id);
-            let Some(record) = guard.runs.get_mut(&task_handle_id) else {
-                return;
-            };
-
-            if matches!(record.status, RunStatus::Cancelled) {
-                return;
-            }
-
-            match dispatch {
-                Ok(result) => {
-                    let dispatch_result = result.result;
-                    let (artifact_index, artifacts) = build_runtime_artifacts(
-                        &dispatch_result.summary,
-                        &dispatch_result.stdout,
-                        &dispatch_result.stderr,
-                        Some(&result.workspace.workspace_path),
-                    );
-                    record.status = dispatch_result.metadata.status;
-                    record.updated_at = OffsetDateTime::now_utc();
-                    record.status_history = dispatch_result.metadata.status_history;
-                    record.error_message = dispatch_result.metadata.error_message;
-                    record.summary = Some(dispatch_result.summary);
-                    record.artifact_index = artifact_index;
-                    record.artifacts = artifacts;
-                    record.workspace = Some(result.workspace);
-                }
-                Err(err) => {
-                    let summary = failed_summary(err.message.clone().into_owned());
-                    let (artifact_index, artifacts) =
-                        build_runtime_artifacts(&summary, "", "", None);
-                    record.status = RunStatus::Failed;
-                    record.updated_at = OffsetDateTime::now_utc();
-                    append_status_if_terminal(&mut record.status_history, RunStatus::Failed);
-                    record.error_message = Some(err.to_string());
-                    record.summary = Some(summary);
-                    record.artifact_index = artifact_index;
-                    record.artifacts = artifacts;
-                    record.workspace = None;
-                }
-            }
-
-            if let Err(err) = persist_run_record(&state_dir, &task_handle_id, record) {
-                record.error_message = Some(format!("failed to persist run state: {err}"));
-            }
-        });
-
-        {
-            let mut state = self.runtime_state.lock().await;
-            state.tasks.insert(handle_id.clone(), task);
-        }
-
-        Ok(Json(SpawnAgentOutput {
-            handle_id,
-            status: format!("{:?}", RunStatus::Running),
-        }))
-    }
-
-    #[tool(description = "Get current status for an async agent run.")]
-    pub async fn get_agent_status(
-        &self,
-        Parameters(input): Parameters<HandleInput>,
-    ) -> std::result::Result<Json<AgentStatusOutput>, ErrorData> {
-        let record = self.get_or_load_run_record(&input.handle_id).await?;
-        let structured_summary = record.summary.as_ref().map(map_summary_output);
-
-        Ok(Json(AgentStatusOutput {
-            handle_id: input.handle_id,
-            status: format!("{:?}", record.status),
-            updated_at: format_time(record.updated_at),
-            error_message: record.error_message,
-            structured_summary,
-            artifact_index: record.artifact_index,
-        }))
-    }
-
-    #[tool(description = "Cancel an async agent run if still in progress.")]
-    pub async fn cancel_agent(
-        &self,
-        Parameters(input): Parameters<HandleInput>,
-    ) -> std::result::Result<Json<CancelAgentOutput>, ErrorData> {
-        let mut state = self.runtime_state.lock().await;
-
-        let existing_status = state
-            .runs
-            .get(&input.handle_id)
-            .map(|run| run.status.clone())
-            .ok_or_else(|| {
-                ErrorData::resource_not_found(
-                    format!("handle not found: {}", input.handle_id),
-                    None,
-                )
-            })?;
-
-        if matches!(
-            existing_status,
-            RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled | RunStatus::TimedOut
-        ) {
-            return Ok(Json(CancelAgentOutput {
-                handle_id: input.handle_id,
-                status: format!("{:?}", existing_status),
-            }));
-        }
-
-        if let Some(task) = state.tasks.remove(&input.handle_id) {
-            task.abort();
-        }
-
-        if let Some(record) = state.runs.get_mut(&input.handle_id) {
-            record.status = RunStatus::Cancelled;
-            record.updated_at = OffsetDateTime::now_utc();
-            append_status_if_terminal(&mut record.status_history, RunStatus::Cancelled);
-            record.error_message = Some("cancelled by user request".to_string());
-            if record.summary.is_none() {
-                let summary = cancelled_summary(record.task.clone());
-                let (artifact_index, artifacts) = build_runtime_artifacts(&summary, "", "", None);
-                record.summary = Some(summary);
-                record.artifact_index = artifact_index;
-                record.artifacts = artifacts;
-            }
-            persist_run_record(&self.state_dir, &input.handle_id, record)?;
-        }
-
-        Ok(Json(CancelAgentOutput {
-            handle_id: input.handle_id,
-            status: format!("{:?}", RunStatus::Cancelled),
-        }))
-    }
-
-    #[tool(description = "Read a UTF-8 text artifact by run handle and path.")]
-    pub async fn read_agent_artifact(
-        &self,
-        Parameters(input): Parameters<ReadAgentArtifactInput>,
-    ) -> std::result::Result<Json<ReadAgentArtifactOutput>, ErrorData> {
-        if sanitize_relative_artifact_path(&input.path).is_none() {
-            return Err(ErrorData::invalid_params(
-                format!("invalid artifact path: {}", input.path),
-                None,
-            ));
-        }
-
-        let mut run = self.get_or_load_run_record(&input.handle_id).await?;
-        let content = if let Some(content) = run.artifacts.get(&input.path) {
-            content.clone()
-        } else {
-            let content = read_artifact_from_disk(&self.state_dir, &input.handle_id, &input.path)?
-                .ok_or_else(|| {
-                    ErrorData::resource_not_found(
-                        format!(
-                            "artifact not found for handle {}: {}",
-                            input.handle_id, input.path
-                        ),
-                        None,
-                    )
-                })?;
-            run.artifacts.insert(input.path.clone(), content.clone());
-            let mut state = self.runtime_state.lock().await;
-            if let Some(existing) = state.runs.get_mut(&input.handle_id) {
-                existing
-                    .artifacts
-                    .insert(input.path.clone(), content.clone());
-            }
-            content
-        };
-
-        Ok(Json(ReadAgentArtifactOutput {
-            handle_id: input.handle_id,
-            path: input.path,
-            content,
-        }))
-    }
-}
-
 fn default_state_dir() -> PathBuf {
     PathBuf::from(".mcp-subagent/state")
 }
 
-fn build_capability_notes(probe: &ProviderProbe) -> Vec<String> {
+pub(crate) fn build_capability_notes(probe: &ProviderProbe) -> Vec<String> {
     let mut notes = Vec::new();
     notes.push(format!("probe_status: {}", probe.status));
     if let Some(version) = &probe.version {
@@ -581,7 +284,7 @@ fn build_capability_notes(probe: &ProviderProbe) -> Vec<String> {
     notes
 }
 
-fn map_summary_output(summary: &StructuredSummary) -> SummaryOutput {
+pub(crate) fn map_summary_output(summary: &StructuredSummary) -> SummaryOutput {
     SummaryOutput {
         summary: summary.summary.clone(),
         key_findings: summary.key_findings.clone(),
@@ -594,12 +297,12 @@ fn map_summary_output(summary: &StructuredSummary) -> SummaryOutput {
 }
 
 #[derive(Debug, Clone)]
-struct DispatchEnvelope {
-    result: DispatchResult,
-    workspace: WorkspaceRecord,
+pub(crate) struct DispatchEnvelope {
+    pub(crate) result: DispatchResult,
+    pub(crate) workspace: WorkspaceRecord,
 }
 
-async fn run_dispatch(
+pub(crate) async fn run_dispatch(
     spec: &crate::spec::AgentSpec,
     request: &RunRequest,
     handle_id: &str,
@@ -853,7 +556,7 @@ fn build_mock_summary(agent_name: &str, request: &RunRequest) -> StructuredSumma
     }
 }
 
-fn failed_summary(message: String) -> StructuredSummary {
+pub(crate) fn failed_summary(message: String) -> StructuredSummary {
     StructuredSummary {
         summary: "Run failed before structured output was collected.".to_string(),
         key_findings: vec![message],
@@ -866,7 +569,7 @@ fn failed_summary(message: String) -> StructuredSummary {
     }
 }
 
-fn cancelled_summary(task: String) -> StructuredSummary {
+pub(crate) fn cancelled_summary(task: String) -> StructuredSummary {
     StructuredSummary {
         summary: format!("Run cancelled before completion for task: {task}"),
         key_findings: vec!["User requested cancellation".to_string()],
@@ -879,7 +582,7 @@ fn cancelled_summary(task: String) -> StructuredSummary {
     }
 }
 
-fn format_time(value: OffsetDateTime) -> String {
+pub(crate) fn format_time(value: OffsetDateTime) -> String {
     value.format(&Rfc3339).unwrap_or_else(|_| value.to_string())
 }
 
@@ -908,10 +611,10 @@ mod tests {
     };
 
     use super::{
-        acquire_serialize_lock_from_state, build_runtime_artifacts, HandleInput, McpSubagentServer,
-        ReadAgentArtifactInput, RunAgentInput, RunAgentSelectedFileInput,
+        acquire_serialize_lock_from_state, HandleInput, McpSubagentServer, ReadAgentArtifactInput,
+        RunAgentInput, RunAgentSelectedFileInput,
     };
-    use crate::mcp::state::RuntimeState;
+    use crate::{mcp::artifacts::build_runtime_artifacts, mcp::state::RuntimeState};
 
     fn write_agent_spec(dir: &Path) {
         write_agent_spec_with_provider(dir, "Ollama");

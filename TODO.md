@@ -368,3 +368,18 @@
 - `src/mcp/mod.rs` 已注册 `pub(crate) mod persistence;`。
 - `src/mcp/server.rs` 已移除本地持久化函数，改为引用 `mcp::persistence::{persist_run_record, load_run_record_from_disk}`。
 - 已通过 `cargo fmt && cargo test`（61 passed）与 `cargo run -- validate`（summary contract template: ok）。
+
+## T-024 V0.6-P0-2e-McpServerToolEntrySplit (Completed 2026-03-24)
+任务：推进 v0.6 P0-2 的第五步，将 MCP tool entry 从 `mcp/server.rs` 抽离到独立模块，进一步降低 server 文件职责密度。
+验收标准：
+1. 新增 `src/mcp/tools.rs`，承载 `list_agents/run_agent/spawn_agent/get_agent_status/cancel_agent/read_agent_artifact` 六个 tool 入口。
+2. `src/mcp/server.rs` 不再包含 `#[tool_router]` 工具实现块，仅保留 server/service 骨架与运行链路。
+3. 对外 MCP tool 名称与行为不回退，`new_with_state_dir_and_prober` 等 public API 保持兼容。
+4. 相关可见性调整仅限 crate 内（`pub(crate)`），不扩大外部暴露面。
+5. `cargo test` 与 `cargo run -- validate` 通过。
+完成记录：
+- 已新增 `src/mcp/tools.rs`，迁移全部 6 个 MCP tool entry，并保留原有工具描述与返回结构。
+- `src/mcp/server.rs` 已移除 `#[tool_router] impl`，改为通过 `mcp::tools::build_tool_router()` 装配 router。
+- 为跨模块复用已将必要 helper（如 `run_dispatch`、summary/status 映射函数）收敛为 `pub(crate)`，未改变 crate 外 API。
+- `src/mcp/mod.rs` 已注册 `pub(crate) mod tools;`。
+- 已通过 `cargo fmt && cargo test`（61 passed）与 `cargo run -- validate`（summary contract template: ok）。
