@@ -1,15 +1,23 @@
 use std::{path::PathBuf, process::ExitCode};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use mcp_subagent::{
     config::{resolve_runtime_config, ConfigOverrides, RuntimeConfig},
     doctor::{build_doctor_report, render_doctor_report},
-    logging::init_logging,
-    mcp::server::McpSubagentServer,
+    logging::{init_logging, LoggingGuard},
+    mcp::{
+        dto::{
+            ArtifactOutput, HandleInput, ReadAgentArtifactInput, RunAgentInput,
+            RunAgentSelectedFileInput,
+        },
+        server::McpSubagentServer,
+    },
     probe::SystemProviderProber,
     runtime::context::validate_default_summary_contract_template,
     spec::registry::load_agent_specs_from_dirs,
 };
+use rmcp::handler::server::wrapper::Parameters;
+use serde::Serialize;
 use tracing::info;
 
 #[derive(Debug, Parser)]
@@ -42,6 +50,67 @@ enum Commands {
         #[arg(value_name = "AGENTS_DIR")]
         agents_dir: Option<PathBuf>,
     },
+    ListAgents {
+        #[arg(long)]
+        json: bool,
+    },
+    Run {
+        agent: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        task_brief: Option<String>,
+        #[arg(long)]
+        parent_summary: Option<String>,
+        #[arg(long = "selected-file")]
+        selected_files: Vec<PathBuf>,
+        #[arg(long)]
+        working_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    Spawn {
+        agent: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        task_brief: Option<String>,
+        #[arg(long)]
+        parent_summary: Option<String>,
+        #[arg(long = "selected-file")]
+        selected_files: Vec<PathBuf>,
+        #[arg(long)]
+        working_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    Status {
+        handle_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Cancel {
+        handle_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Artifact {
+        handle_id: String,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, value_enum)]
+        kind: Option<ArtifactKindArg>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ArtifactKindArg {
+    Summary,
+    Log,
+    Patch,
+    Json,
 }
 
 #[tokio::main]
@@ -54,27 +123,16 @@ async fn main() -> ExitCode {
 
     match cli.command {
         Commands::Mcp { agents_dir } => {
-            let cfg = match resolve_cli_config(
-                config_path.clone(),
-                state_dir.clone(),
-                global_agents_dirs.clone(),
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
                 agents_dir,
-                cli_log_level.clone(),
+                cli_log_level,
             ) {
-                Ok(cfg) => cfg,
+                Ok(v) => v,
                 Err(err) => {
-                    eprintln!("failed to resolve config: {err}");
-                    return ExitCode::from(2);
-                }
-            };
-            let _logging_guard = match init_logging(
-                &cfg.state_dir,
-                cli_log_level.as_deref(),
-                cfg.log_level.as_str(),
-            ) {
-                Ok(guard) => guard,
-                Err(err) => {
-                    eprintln!("failed to initialize logging: {err}");
+                    eprintln!("{err}");
                     return ExitCode::from(2);
                 }
             };
@@ -82,27 +140,16 @@ async fn main() -> ExitCode {
             run_mcp_server(cfg).await
         }
         Commands::Doctor { agents_dir } => {
-            let cfg = match resolve_cli_config(
-                config_path.clone(),
-                state_dir.clone(),
-                global_agents_dirs.clone(),
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
                 agents_dir,
-                cli_log_level.clone(),
+                cli_log_level,
             ) {
-                Ok(cfg) => cfg,
+                Ok(v) => v,
                 Err(err) => {
-                    eprintln!("failed to resolve config: {err}");
-                    return ExitCode::from(2);
-                }
-            };
-            let _logging_guard = match init_logging(
-                &cfg.state_dir,
-                cli_log_level.as_deref(),
-                cfg.log_level.as_str(),
-            ) {
-                Ok(guard) => guard,
-                Err(err) => {
-                    eprintln!("failed to initialize logging: {err}");
+                    eprintln!("{err}");
                     return ExitCode::from(2);
                 }
             };
@@ -110,34 +157,192 @@ async fn main() -> ExitCode {
             doctor(cfg)
         }
         Commands::Validate { agents_dir } => {
-            let cfg = match resolve_cli_config(
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
                 config_path,
                 state_dir,
                 global_agents_dirs,
                 agents_dir,
-                cli_log_level.clone(),
+                cli_log_level,
             ) {
-                Ok(cfg) => cfg,
+                Ok(v) => v,
                 Err(err) => {
-                    eprintln!("failed to resolve config: {err}");
-                    return ExitCode::from(2);
-                }
-            };
-            let _logging_guard = match init_logging(
-                &cfg.state_dir,
-                cli_log_level.as_deref(),
-                cfg.log_level.as_str(),
-            ) {
-                Ok(guard) => guard,
-                Err(err) => {
-                    eprintln!("failed to initialize logging: {err}");
+                    eprintln!("{err}");
                     return ExitCode::from(2);
                 }
             };
             info!("starting command: validate");
             validate_specs(cfg)
         }
+        Commands::ListAgents { json } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: list-agents");
+            list_agents(cfg, json).await
+        }
+        Commands::Run {
+            agent,
+            task,
+            task_brief,
+            parent_summary,
+            selected_files,
+            working_dir,
+            json,
+        } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: run");
+            run_agent(
+                cfg,
+                agent,
+                task,
+                task_brief,
+                parent_summary,
+                selected_files,
+                working_dir,
+                json,
+            )
+            .await
+        }
+        Commands::Spawn {
+            agent,
+            task,
+            task_brief,
+            parent_summary,
+            selected_files,
+            working_dir,
+            json,
+        } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: spawn");
+            spawn_agent(
+                cfg,
+                agent,
+                task,
+                task_brief,
+                parent_summary,
+                selected_files,
+                working_dir,
+                json,
+            )
+            .await
+        }
+        Commands::Status { handle_id, json } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: status");
+            get_status(cfg, handle_id, json).await
+        }
+        Commands::Cancel { handle_id, json } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: cancel");
+            cancel_agent(cfg, handle_id, json).await
+        }
+        Commands::Artifact {
+            handle_id,
+            path,
+            kind,
+            json,
+        } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: artifact");
+            read_artifact(cfg, handle_id, path, kind, json).await
+        }
     }
+}
+
+fn resolve_cli_config_with_logging(
+    config_path: Option<PathBuf>,
+    state_dir: Option<PathBuf>,
+    global_agents_dirs: Vec<PathBuf>,
+    command_agents_dir: Option<PathBuf>,
+    cli_log_level: Option<String>,
+) -> std::result::Result<(RuntimeConfig, LoggingGuard), String> {
+    let cfg = resolve_cli_config(
+        config_path,
+        state_dir,
+        global_agents_dirs,
+        command_agents_dir,
+        cli_log_level.clone(),
+    )
+    .map_err(|err| format!("failed to resolve config: {err}"))?;
+
+    let guard = init_logging(
+        &cfg.state_dir,
+        cli_log_level.as_deref(),
+        cfg.log_level.as_str(),
+    )
+    .map_err(|err| format!("failed to initialize logging: {err}"))?;
+
+    Ok((cfg, guard))
 }
 
 fn resolve_cli_config(
@@ -200,4 +405,306 @@ fn doctor(cfg: RuntimeConfig) -> ExitCode {
     let report = build_doctor_report(cfg.agents_dirs, cfg.state_dir, &SystemProviderProber);
     println!("{}", render_doctor_report(&report));
     ExitCode::SUCCESS
+}
+
+async fn list_agents(cfg: RuntimeConfig, json: bool) -> ExitCode {
+    let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
+    match server.list_agents().await {
+        Ok(result) => {
+            if json {
+                print_json(&result.0);
+            } else {
+                for agent in result.0.agents {
+                    println!(
+                        "{} [{}] available={} context_mode={} working_dir_policy={} sandbox={} timeout={}s",
+                        agent.name,
+                        agent.provider,
+                        agent.available,
+                        agent.runtime_policy.context_mode,
+                        agent.runtime_policy.working_dir_policy,
+                        agent.runtime_policy.sandbox,
+                        agent.runtime_policy.timeout_secs
+                    );
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("list-agents failed: {}", err.message);
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_agent(
+    cfg: RuntimeConfig,
+    agent: String,
+    task: String,
+    task_brief: Option<String>,
+    parent_summary: Option<String>,
+    selected_files: Vec<PathBuf>,
+    working_dir: Option<PathBuf>,
+    json: bool,
+) -> ExitCode {
+    let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
+    let input = RunAgentInput {
+        agent_name: agent,
+        task,
+        task_brief,
+        parent_summary,
+        selected_files: selected_file_inputs(selected_files),
+        working_dir: working_dir.map(|path| path.display().to_string()),
+    };
+
+    match server.run_agent(Parameters(input)).await {
+        Ok(result) => {
+            if json {
+                print_json(&result.0);
+            } else {
+                let out = result.0;
+                println!("handle_id: {}", out.handle_id);
+                println!("status: {}", out.status);
+                println!("summary: {}", out.structured_summary.summary);
+                if !out.structured_summary.key_findings.is_empty() {
+                    println!("key_findings:");
+                    for finding in out.structured_summary.key_findings {
+                        println!("- {finding}");
+                    }
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("run failed: {}", err.message);
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spawn_agent(
+    cfg: RuntimeConfig,
+    agent: String,
+    task: String,
+    task_brief: Option<String>,
+    parent_summary: Option<String>,
+    selected_files: Vec<PathBuf>,
+    working_dir: Option<PathBuf>,
+    json: bool,
+) -> ExitCode {
+    let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
+    let input = RunAgentInput {
+        agent_name: agent,
+        task,
+        task_brief,
+        parent_summary,
+        selected_files: selected_file_inputs(selected_files),
+        working_dir: working_dir.map(|path| path.display().to_string()),
+    };
+
+    match server.spawn_agent(Parameters(input)).await {
+        Ok(result) => {
+            if json {
+                print_json(&result.0);
+            } else {
+                println!("handle_id: {}", result.0.handle_id);
+                println!("status: {}", result.0.status);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("spawn failed: {}", err.message);
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn get_status(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
+    let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
+    match server
+        .get_agent_status(Parameters(HandleInput { handle_id }))
+        .await
+    {
+        Ok(result) => {
+            if json {
+                print_json(&result.0);
+            } else {
+                println!("handle_id: {}", result.0.handle_id);
+                println!("status: {}", result.0.status);
+                println!("updated_at: {}", result.0.updated_at);
+                if let Some(err) = result.0.error_message {
+                    println!("error: {err}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("status failed: {}", err.message);
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn cancel_agent(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
+    let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
+    match server
+        .cancel_agent(Parameters(HandleInput { handle_id }))
+        .await
+    {
+        Ok(result) => {
+            if json {
+                print_json(&result.0);
+            } else {
+                println!("handle_id: {}", result.0.handle_id);
+                println!("status: {}", result.0.status);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("cancel failed: {}", err.message);
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn read_artifact(
+    cfg: RuntimeConfig,
+    handle_id: String,
+    explicit_path: Option<String>,
+    kind: Option<ArtifactKindArg>,
+    json: bool,
+) -> ExitCode {
+    let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
+
+    let path = match explicit_path {
+        Some(path) => path,
+        None => {
+            let status = match server
+                .get_agent_status(Parameters(HandleInput {
+                    handle_id: handle_id.clone(),
+                }))
+                .await
+            {
+                Ok(status) => status.0,
+                Err(err) => {
+                    eprintln!("artifact failed to resolve status: {}", err.message);
+                    return ExitCode::from(1);
+                }
+            };
+            let target_kind = kind.unwrap_or(ArtifactKindArg::Summary);
+            match resolve_artifact_path(target_kind, &status.artifact_index) {
+                Some(path) => path,
+                None => {
+                    eprintln!("artifact path not found for selected kind");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+    };
+
+    match server
+        .read_agent_artifact(Parameters(ReadAgentArtifactInput { handle_id, path }))
+        .await
+    {
+        Ok(result) => {
+            if json {
+                print_json(&result.0);
+            } else {
+                println!("{}", result.0.content);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("artifact failed: {}", err.message);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn selected_file_inputs(paths: Vec<PathBuf>) -> Vec<RunAgentSelectedFileInput> {
+    paths
+        .into_iter()
+        .map(|path| RunAgentSelectedFileInput {
+            path: path.display().to_string(),
+            rationale: None,
+            content: None,
+        })
+        .collect()
+}
+
+fn resolve_artifact_path(kind: ArtifactKindArg, index: &[ArtifactOutput]) -> Option<String> {
+    let by_path = |path: &str| index.iter().find(|item| item.path == path);
+    let by_kind = |name: &str| index.iter().find(|item| item.kind == name);
+
+    match kind {
+        ArtifactKindArg::Summary => by_path("summary.json")
+            .or_else(|| by_kind("SummaryJson"))
+            .map(|item| item.path.clone()),
+        ArtifactKindArg::Log => by_path("stdout.txt")
+            .or_else(|| by_path("stderr.txt"))
+            .or_else(|| by_kind("StdoutText"))
+            .or_else(|| by_kind("StderrText"))
+            .map(|item| item.path.clone()),
+        ArtifactKindArg::Patch => index
+            .iter()
+            .find(|item| item.kind == "PatchDiff" || item.path.ends_with(".patch"))
+            .map(|item| item.path.clone()),
+        ArtifactKindArg::Json => index
+            .iter()
+            .find(|item| {
+                item.path.ends_with(".json")
+                    || item
+                        .media_type
+                        .as_deref()
+                        .is_some_and(|media| media == "application/json")
+            })
+            .map(|item| item.path.clone()),
+    }
+}
+
+fn print_json<T: Serialize>(value: &T) {
+    match serde_json::to_string_pretty(value) {
+        Ok(text) => println!("{text}"),
+        Err(err) => eprintln!("failed to render json output: {err}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::{ArtifactKindArg, Cli, Commands};
+
+    #[test]
+    fn parses_list_agents_json_flag() {
+        let cli = Cli::parse_from(["mcp-subagent", "list-agents", "--json"]);
+        match cli.command {
+            Commands::ListAgents { json } => assert!(json),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_run_command_with_required_args() {
+        let cli = Cli::parse_from(["mcp-subagent", "run", "reviewer", "--task", "review code"]);
+        match cli.command {
+            Commands::Run { agent, task, .. } => {
+                assert_eq!(agent, "reviewer");
+                assert_eq!(task, "review code");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_artifact_kind_enum() {
+        let cli = Cli::parse_from(["mcp-subagent", "artifact", "handle-1", "--kind", "summary"]);
+        match cli.command {
+            Commands::Artifact { kind, .. } => {
+                assert!(matches!(kind, Some(ArtifactKindArg::Summary)));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
 }

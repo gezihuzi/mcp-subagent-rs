@@ -555,3 +555,128 @@
   - `mcp::service::tests::run_dispatch_error_path_cleans_temp_workspace`
   - `mcp::server::tests::run_agent_tempcopy_persists_workspace_metadata`（断言 run 后 workspace 已清理）
 - 已通过 `cargo test`（70 passed）与 `cargo run -- validate`（summary contract template: ok）。
+
+---
+
+## Remaining Backlog (V0.6)
+
+说明：以下为基于 `docs/mcp-subagent_tech_design_v0.6.md` 与当前代码状态整理的完整待办清单，按“大模块批次”执行，不再碎步推进。
+
+### Batch A - 可运行命令面与主路径收口（高优先级）
+
+## T-029 V0.6-BatchA-LocalCliCommandSurface (Pending)
+
+任务：补齐本地命令面，让不接 MCP Host 也可完成日常调试与执行。
+验收标准：
+
+1. CLI 新增并可运行：`list-agents`、`run`、`spawn`、`status`、`cancel`、`artifact`。
+2. `run/spawn/status/cancel/artifact` 复用既有 runtime 执行链路，不新增一套平行实现。
+3. 提供 `--json` 输出模式，便于脚本化调用。
+4. `run` 最小路径可在 Mock/Codex 跑通（按本机 provider 实际可用性）。
+5. 新增命令解析与关键路径测试，`cargo test` 通过。
+
+## T-030 V0.6-BatchA-SummaryEnvelopeContractUpgrade (Pending)
+
+任务：完成 P0-6，将 summary contract 从“sentinel + 直接结构体”升级为 `SummaryEnvelope`。
+验收标准：
+
+1. 新增 `SummaryEnvelope`，包含 `contract_version/parse_status/summary/raw_fallback_text`。
+2. `StructuredSummary` 补齐强字段：`plan_refs`，并保留 `artifacts/touched_files/verification_status` 强约束。
+3. parse 失败时不伪装成功，`parse_status` 正确标记 `Degraded/Invalid`。
+4. 持久化新增 `summary.raw.txt`，并在状态读取路径可回溯原始文本。
+5. 新增单测覆盖 validated/degraded/invalid 三路径，`cargo test` 与 `cargo run -- validate` 通过。
+
+### Batch B - Workflow 一等能力（高优先级）
+
+## T-031 V0.6-BatchB-WorkflowSpecAndValidation (Pending)
+
+任务：引入 `WorkflowSpec` 与 gate/review/archive 等策略结构，并纳入 spec 校验。
+验收标准：
+
+1. 新增 `spec/workflow.rs` 与 `AgentSpec.workflow` 字段（可选）。
+2. 支持 `stages/require_plan_when/active_plan/review_policy/knowledge_capture/archive_policy/max_runtime_depth`。
+3. 校验规则覆盖：非法 stage、`max_runtime_depth` 下限、关键字段组合约束。
+4. registry 与 validate 路径均覆盖 workflow 字段。
+5. 新增测试覆盖加载与校验，`cargo test` 通过。
+
+## T-032 V0.6-BatchB-ActivePlanMemorySource (Pending)
+
+任务：将 `ActivePlan` 升级为 memory 一等来源，并支持归档记忆来源。
+验收标准：
+
+1. `MemorySource` 支持 `ActivePlan` 与 `ArchivedPlans`。
+2. `resolve_memory` 在 workflow 启用时可解析 `PLAN.md`（含 excerpt 策略）。
+3. provider-native memory 去重规则保持成立，不引入重复注入。
+4. `PLAN.md` 缺失/损坏时返回明确错误（按 gate 条件触发）。
+5. 新增测试覆盖 active plan 注入、缺失失败、native 去重，`cargo test` 通过。
+
+## T-033 V0.6-BatchB-StageAwareDispatchAndPlanGate (Pending)
+
+任务：让 dispatcher 按阶段驱动，并在 Build/Review 前执行 plan gate。
+验收标准：
+
+1. 运行请求支持 `stage` 与 `plan_ref`，MCP + 本地 CLI 参数贯通。
+2. dispatcher 引入 stage-aware 路由（至少支持 `Research/Plan/Build/Review/Archive`）。
+3. 当 workflow gate 命中且无有效 `PLAN.md` 时，运行失败并返回结构化错误。
+4. `max_runtime_depth` 生效，超限的 runtime-managed 派发被拒绝。
+5. 新增集成测试覆盖 gate pass/fail 与 stage 路由，`cargo test` 通过。
+
+### Batch C - 策略与 provider 分层收口（中高优先级）
+
+## T-034 V0.6-BatchC-WorkingDirAutoPolicy (Pending)
+
+任务：实现 `WorkingDirPolicy::Auto`，让读写任务自动选择 in-place/worktree/temp-copy。
+验收标准：
+
+1. runtime policy 增加 `Auto`，并作为默认策略（符合 v0.6 拍板）。
+2. 只读任务默认 `InPlace`；写任务优先 `GitWorktree`，不可用时退化 `TempCopy`。
+3. workspace 记录中包含解析决策注释（why/fallback reason）。
+4. 新增测试覆盖三类分支与回退，`cargo test` 通过。
+
+## T-035 V0.6-BatchC-MockTierAndOllamaReserved (Pending)
+
+任务：修正 provider 分层语义，建立 Mock 一等路径，避免将 Ollama 伪装为已支持。
+验收标准：
+
+1. `Provider` 增加 `Mock`，并提供稳定 mock runner 路径。
+2. `Provider::Ollama` 在未有真实 runner 前标记 `reserved`，doctor/list_agents 明确展示。
+3. 无 provider binary 环境下仍可通过 Mock 路径完成本地调试。
+4. probe/doctor/capability notes 与 tiers 一致。
+5. 新增测试覆盖 mock 可跑与 ollama reserved 表达，`cargo test` 通过。
+
+## T-036 V0.6-BatchC-DoctorEnhancedReport (Pending)
+
+任务：扩展 `doctor` 让其承担 v0.6 要求的健康检查与策略提示。
+验收标准：
+
+1. doctor 输出 provider 能力矩阵、已验证 flags、版本/可执行状态。
+2. 输出 workspace 策略成本提示（至少区分 in-place/worktree/temp-copy 建议）。
+3. 输出 `PLAN.md`/project memory/archive 结构健康检查。
+4. 保持文本可读和 JSON 友好（如后续接入 `--json`）。
+5. 新增渲染/构建测试，`cargo test` 通过。
+
+### Batch D - 状态与工件可观测性（中优先级）
+
+## T-037 V0.6-BatchD-StateLayoutAndEventsUpgrade (Pending)
+
+任务：对齐 v0.6 持久化布局，增强 run 级可审计性。
+验收标准：
+
+1. 每次 run 落盘：`request.json/resolved-spec.json/compiled-context.md/status.json/summary.json/summary.raw.txt/events.ndjson/workspace.meta.json`。
+2. `artifacts/index.json` 补齐字段：`kind/path/media_type/producer/created_at/description`。
+3. 兼容读取旧 run 数据（向后兼容）。
+4. 关键事件入 `events.ndjson`（probe/gate/workspace/memory/parse/cleanup）。
+5. 新增重启读取与事件落盘测试，`cargo test` 通过。
+
+### Batch E - MVP 验收与文档（中优先级）
+
+## T-038 V0.6-BatchE-MvpSmokeAndDocs (Pending)
+
+任务：建立“本地可跑”统一验收脚本与文档，收口 v0.6 MVP。
+验收标准：
+
+1. 固化 smoke 流程：`doctor -> validate -> list-agents -> run(mock/codex) -> --mcp`。
+2. 明确 Claude(Beta)/Gemini(Experimental)/Ollama(Reserved) 状态声明与限制。
+3. README/开发文档更新到当前命令面和配置面。
+4. CI 或本地脚本可一键跑最小验收。
+5. 验收清单与结果回填 TODO，形成闭环。
