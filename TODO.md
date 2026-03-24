@@ -383,3 +383,22 @@
 - 为跨模块复用已将必要 helper（如 `run_dispatch`、summary/status 映射函数）收敛为 `pub(crate)`，未改变 crate 外 API。
 - `src/mcp/mod.rs` 已注册 `pub(crate) mod tools;`。
 - 已通过 `cargo fmt && cargo test`（61 passed）与 `cargo run -- validate`（summary contract template: ok）。
+
+## T-025 V0.6-P0-2f-McpServerDispatchServiceSplit (Completed 2026-03-24)
+任务：推进 v0.6 P0-2 的第六步，将 `run_dispatch` 与 provider 分发执行链从 `mcp/server.rs` 抽离到独立 service 模块。
+验收标准：
+1. 新增 `src/mcp/service.rs`，集中承载 `run_dispatch` 主链、workspace 记录映射、provider-specific dispatch 分支和 terminal metadata 组装。
+2. `src/mcp/server.rs` 不再包含上述 dispatch 细节实现，职责收敛为 server/service 骨架与通用状态管理。
+3. `src/mcp/tools.rs` 通过 service 模块调用 dispatch，不依赖 server 内部 dispatch 细节。
+4. 行为不回退：`run_agent/spawn_agent` 在 Codex/Claude/Gemini/mock 路径保持一致。
+5. `cargo test` 与 `cargo run -- validate` 通过。
+完成记录：
+- 已新增 `src/mcp/service.rs`，迁移：
+  - `DispatchEnvelope`
+  - `run_dispatch`
+  - `run_dispatch_{mock,codex,claude,gemini}`
+  - `build_terminal_metadata`、workspace 映射与 mock summary helper
+- `src/mcp/mod.rs` 已注册 `pub(crate) mod service;`。
+- `src/mcp/server.rs` 已移除 dispatch 链实现并清理对应导入。
+- `src/mcp/tools.rs` 已改为通过 `mcp::service::run_dispatch` 调用运行链路。
+- 已通过 `cargo fmt && cargo test`（61 passed）与 `cargo run -- validate`（summary contract template: ok）。

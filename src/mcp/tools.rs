@@ -20,8 +20,9 @@ use crate::{
         persistence::persist_run_record,
         server::{
             acquire_serialize_lock_from_state, build_capability_notes, cancelled_summary,
-            failed_summary, format_time, map_summary_output, run_dispatch, McpSubagentServer,
+            failed_summary, format_time, map_summary_output, McpSubagentServer,
         },
+        service::run_dispatch,
         state::{
             append_status_if_terminal, build_probe_result_snapshot, build_run_request_snapshot,
             build_run_spec_snapshot, RunRecord,
