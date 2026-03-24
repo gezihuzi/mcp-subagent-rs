@@ -19,9 +19,10 @@ Rust implementation of an MCP subagent runtime aligned to the technical design b
 mcp-subagent mcp [AGENTS_DIR]
 mcp-subagent doctor [AGENTS_DIR]
 mcp-subagent validate [AGENTS_DIR]
+mcp-subagent init [--preset claude-opus-supervisor] [--root-dir ...] [--force] [--json]
 mcp-subagent list-agents [--json]
-mcp-subagent run <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--working-dir ...] [--json]
-mcp-subagent spawn <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--working-dir ...] [--json]
+mcp-subagent run <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
+mcp-subagent spawn <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
 mcp-subagent status <handle-id> [--json]
 mcp-subagent cancel <handle-id> [--json]
 mcp-subagent artifact <handle-id> [--path ... | --kind summary|log|patch|json] [--json]
@@ -38,6 +39,11 @@ Global flags:
 - `--agents-dir <path>` (repeatable)
 - `--state-dir <path>`
 - `--log-level <level>`
+
+Selected file flags for `run`/`spawn`:
+
+- `--selected-file <path>`: pass path only
+- `--selected-file-inline <path>`: read local file content and inline into selected context
 
 ## Config Precedence
 
@@ -59,6 +65,12 @@ Run one command for minimal local acceptance:
 
 ```bash
 ./scripts/smoke_v06.sh
+```
+
+Initialize a local preset workspace:
+
+```bash
+mcp-subagent init --preset claude-opus-supervisor
 ```
 
 This script validates:

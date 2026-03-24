@@ -1022,3 +1022,62 @@
   - `cargo test -q`（101 passed + 3 passed + 3 integration passed）
   - `cargo run -- --agents-dir examples/agents validate`
   - `./scripts/smoke_v06.sh`
+
+## T-045 V0.7-P1-InitPresetClaudeOpusSupervisor (Completed 2026-03-24)
+
+任务：实现 `mcp-subagent init --preset claude-opus-supervisor` 的最小可用版本，生成可直接验证的默认团队骨架。
+验收标准：
+
+1. 新增 `init` 子命令，支持 `--preset claude-opus-supervisor`。
+2. 自动生成：
+   - `agents/` 默认团队 specs（6 个）
+   - `PLAN.md` 模板
+   - `.mcp-subagent/config.toml`
+   - `README.mcp-subagent.md`
+3. 生成后可通过 specs 校验（至少在实现内做一次加载校验）。
+4. 支持 `--force` 覆盖，默认禁止覆盖已有文件。
+5. 新增单测覆盖创建成功、无 force 拒绝覆盖、force 覆盖路径。
+完成记录：
+
+- 已新增 `src/init.rs`：
+  - `InitPreset` / `InitReport`；
+  - `init_workspace()` 入口；
+  - `claude-opus-supervisor` 模板生成逻辑；
+  - 生成后调用 `load_agent_specs_from_dirs` 做即时校验。
+- 已在 `src/main.rs` 接入 `init` 子命令：
+  - 参数：`--preset`、`--root-dir`、`--force`、`--json`
+  - 默认 preset：`claude-opus-supervisor`
+  - 终端输出生成报告与下一步提示。
+- 已更新 `src/lib.rs` 导出 `init` 模块。
+- 已更新 `README.md` 命令面，补充 `init` 用法。
+- 已通过：
+  - `cargo fmt`
+  - `cargo test -q`（104 passed + 4 passed + 3 integration passed）
+  - `cargo run -- --agents-dir examples/agents validate`
+  - `./scripts/smoke_v06.sh`
+  - `cargo run -- init --preset claude-opus-supervisor --root-dir <tmp> --json`
+  - `cargo run -- --agents-dir <tmp>/agents validate`（验证生成 preset 可直接通过校验）
+
+## T-046 V0.7-P1-SelectedFileInlineFlag (Completed 2026-03-24)
+
+任务：新增 `--selected-file-inline`，让本地 CLI 可显式读取并内联文件内容到 selected files。
+验收标准：
+
+1. `run` / `spawn` 命令支持重复参数 `--selected-file-inline <path>`。
+2. `--selected-file-inline` 会读取本地文件内容，并把内容写入 `RunAgentSelectedFileInput.content`。
+3. `--selected-file` 与 `--selected-file-inline` 可混用；同一路径出现时以内联内容为准。
+4. 文件读取失败时返回清晰错误，不进入运行分发。
+5. 新增解析与构造单测覆盖上述行为。
+完成记录：
+
+- 已更新 `src/main.rs`：
+  - `Commands::Run` / `Commands::Spawn` 新增 `selected_files_inline` 参数；
+  - 新增 `build_selected_file_inputs()` 与 `resolve_inline_read_path()`；
+  - `run_agent` / `spawn_agent` 改为先构建 selected files（失败即提前返回错误）。
+- 已新增单测：
+  - `parses_run_command_with_selected_file_inline`
+  - `inline_selected_files_include_file_content`
+  - `inline_selected_file_overrides_non_inline_entry`
+- 已更新 `README.md`：
+  - 命令面新增 `--selected-file-inline`；
+  - 增加 `--selected-file` 与 `--selected-file-inline` 行为说明。

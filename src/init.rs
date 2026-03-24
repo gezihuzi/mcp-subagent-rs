@@ -1,0 +1,449 @@
+use std::{
+    fs,
+    io::{Error, ErrorKind},
+    path::{Path, PathBuf},
+};
+
+use serde::Serialize;
+
+use crate::{error::Result, spec::registry::load_agent_specs_from_dirs};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitPreset {
+    ClaudeOpusSupervisor,
+}
+
+impl InitPreset {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaudeOpusSupervisor => "claude-opus-supervisor",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InitReport {
+    pub preset: String,
+    pub root: PathBuf,
+    pub agents_dir: PathBuf,
+    pub created_files: Vec<PathBuf>,
+    pub overwritten_files: Vec<PathBuf>,
+    pub generated_agent_count: usize,
+    pub notes: Vec<String>,
+}
+
+pub fn init_workspace(root: &Path, preset: InitPreset, force: bool) -> Result<InitReport> {
+    match preset {
+        InitPreset::ClaudeOpusSupervisor => init_claude_opus_supervisor(root, force),
+    }
+}
+
+fn init_claude_opus_supervisor(root: &Path, force: bool) -> Result<InitReport> {
+    let root = root.to_path_buf();
+    let agents_dir = root.join("agents");
+    let config_path = root.join(".mcp-subagent/config.toml");
+    let readme_path = root.join("README.mcp-subagent.md");
+    let plan_path = root.join("PLAN.md");
+
+    let files = vec![
+        plan_path.clone(),
+        config_path.clone(),
+        readme_path.clone(),
+        agents_dir.join("fast-researcher.agent.toml"),
+        agents_dir.join("backend-coder.agent.toml"),
+        agents_dir.join("frontend-builder.agent.toml"),
+        agents_dir.join("correctness-reviewer.agent.toml"),
+        agents_dir.join("style-reviewer.agent.toml"),
+        agents_dir.join("local-fallback-coder.agent.toml"),
+    ];
+
+    let mut overwritten_files = Vec::new();
+    if !force {
+        if let Some(existing) = files.iter().find(|path| path.exists()) {
+            return Err(Error::new(
+                ErrorKind::AlreadyExists,
+                format!(
+                    "refusing to overwrite existing file: {} (use --force)",
+                    existing.display()
+                ),
+            )
+            .into());
+        }
+    } else {
+        overwritten_files.extend(files.iter().filter(|path| path.exists()).cloned());
+    }
+
+    for path in &files {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    write(&plan_path, &plan_template())?;
+    write(&config_path, &config_template())?;
+    write(&readme_path, &readme_template())?;
+
+    write(
+        &agents_dir.join("fast-researcher.agent.toml"),
+        FAST_RESEARCHER_AGENT,
+    )?;
+    write(
+        &agents_dir.join("backend-coder.agent.toml"),
+        BACKEND_CODER_AGENT,
+    )?;
+    write(
+        &agents_dir.join("frontend-builder.agent.toml"),
+        FRONTEND_BUILDER_AGENT,
+    )?;
+    write(
+        &agents_dir.join("correctness-reviewer.agent.toml"),
+        CORRECTNESS_REVIEWER_AGENT,
+    )?;
+    write(
+        &agents_dir.join("style-reviewer.agent.toml"),
+        STYLE_REVIEWER_AGENT,
+    )?;
+    write(
+        &agents_dir.join("local-fallback-coder.agent.toml"),
+        LOCAL_FALLBACK_CODER_AGENT,
+    )?;
+
+    let generated = load_agent_specs_from_dirs(&[agents_dir.clone()])?;
+
+    Ok(InitReport {
+        preset: InitPreset::ClaudeOpusSupervisor.as_str().to_string(),
+        root: root.clone(),
+        agents_dir,
+        created_files: files,
+        overwritten_files,
+        generated_agent_count: generated.len(),
+        notes: vec![
+            "Run `mcp-subagent validate --agents-dir ./agents` to verify generated specs."
+                .to_string(),
+            "Run `mcp-subagent doctor --agents-dir ./agents` to inspect provider readiness."
+                .to_string(),
+            "Use `mcp-subagent mcp` for stdio MCP transport.".to_string(),
+        ],
+    })
+}
+
+fn write(path: &Path, content: &str) -> Result<()> {
+    fs::write(path, content)?;
+    Ok(())
+}
+
+fn plan_template() -> String {
+    r#"# PLAN.md
+
+## Objective
+
+State the target outcome in one sentence.
+
+## Scope
+
+- In scope:
+- Out of scope:
+
+## Stages
+
+1. Research: gather facts and risks
+2. Plan: update this file with concrete steps
+3. Build: execute small, reviewable changes
+4. Review: correctness + style checks
+5. Archive: persist decisions and summaries
+
+## Steps
+
+1. [ ] Step 1
+2. [ ] Step 2
+3. [ ] Step 3
+
+## Risks
+
+- Risk:
+- Mitigation:
+
+## Validation
+
+- `cargo test -q`
+- `cargo run -- --agents-dir ./agents validate`
+"#
+    .to_string()
+}
+
+fn config_template() -> String {
+    r#"[server]
+transport = "stdio"
+log_level = "info"
+
+[paths]
+agents_dirs = ["./agents"]
+state_dir = ".mcp-subagent/state"
+"#
+    .to_string()
+}
+
+fn readme_template() -> String {
+    r#"# README.mcp-subagent
+
+This workspace was initialized by:
+
+```bash
+mcp-subagent init --preset claude-opus-supervisor
+```
+
+## Quick Start
+
+```bash
+mcp-subagent validate --agents-dir ./agents
+mcp-subagent doctor --agents-dir ./agents
+mcp-subagent list-agents --agents-dir ./agents
+```
+
+## MCP Integration (stdio)
+
+Claude Code:
+
+```bash
+claude mcp add --transport stdio mcp-subagent -- \
+  <ABSOLUTE_PATH_TO_MCP_SUBAGENT> \
+  --agents-dir <ABSOLUTE_PATH_TO_REPO>/agents \
+  --state-dir <ABSOLUTE_PATH_TO_REPO>/.mcp-subagent/state \
+  mcp
+```
+
+Codex CLI:
+
+```bash
+codex mcp add mcp-subagent -- \
+  <ABSOLUTE_PATH_TO_MCP_SUBAGENT> \
+  --agents-dir <ABSOLUTE_PATH_TO_REPO>/agents \
+  --state-dir <ABSOLUTE_PATH_TO_REPO>/.mcp-subagent/state \
+  mcp
+```
+
+Gemini CLI:
+
+```bash
+gemini mcp add mcp-subagent \
+  <ABSOLUTE_PATH_TO_MCP_SUBAGENT> \
+  --agents-dir <ABSOLUTE_PATH_TO_REPO>/agents \
+  --state-dir <ABSOLUTE_PATH_TO_REPO>/.mcp-subagent/state \
+  mcp
+```
+"#
+    .to_string()
+}
+
+const FAST_RESEARCHER_AGENT: &str = r#"[core]
+name = "fast-researcher"
+description = "Fast read-only investigator for dependency mapping and risk discovery."
+provider = "Gemini"
+model = "flash"
+instructions = "You are a read-only research specialist. Do not edit files. Return concise evidence-based summaries."
+tags = ["research", "read-only", "fast"]
+
+[runtime]
+context_mode = "ExpandedBrief"
+memory_sources = ["AutoProjectMemory", "ActivePlan"]
+working_dir_policy = "Auto"
+file_conflict_policy = "Serialize"
+sandbox = "ReadOnly"
+approval = "ProviderDefault"
+timeout_secs = 600
+spawn_policy = "Sync"
+
+[workflow]
+enabled = true
+stages = ["Research", "Plan"]
+max_runtime_depth = 1
+"#;
+
+const BACKEND_CODER_AGENT: &str = r#"[core]
+name = "backend-coder"
+description = "Implements backend and Rust changes from an approved plan."
+provider = "Codex"
+model = "gpt-5.3-codex"
+instructions = "Implement scoped changes from PLAN.md. Keep diffs minimal and reference plan steps in summary."
+tags = ["build", "backend", "rust", "codex"]
+
+[runtime]
+context_mode = { SelectedFiles = ["src/**", "Cargo.toml", "PLAN.md"] }
+memory_sources = ["AutoProjectMemory", "ActivePlan"]
+working_dir_policy = "Auto"
+file_conflict_policy = "Serialize"
+sandbox = "WorkspaceWrite"
+approval = "DenyByDefault"
+timeout_secs = 1200
+spawn_policy = "Async"
+
+[provider_overrides.codex]
+model_reasoning_effort = "medium"
+
+[workflow]
+enabled = true
+stages = ["Build", "Review"]
+max_runtime_depth = 1
+"#;
+
+const FRONTEND_BUILDER_AGENT: &str = r#"[core]
+name = "frontend-builder"
+description = "Implements frontend and UI changes from an approved plan."
+provider = "Gemini"
+model = "pro"
+instructions = "Implement frontend changes from PLAN.md with usable, reviewable diffs."
+tags = ["build", "frontend", "ui", "gemini"]
+
+[runtime]
+context_mode = { SelectedFiles = ["web/**", "src/**", "package.json", "PLAN.md"] }
+memory_sources = ["AutoProjectMemory", "ActivePlan"]
+working_dir_policy = "Auto"
+file_conflict_policy = "Serialize"
+sandbox = "WorkspaceWrite"
+approval = "ProviderDefault"
+timeout_secs = 1200
+spawn_policy = "Async"
+
+[provider_overrides.gemini]
+experimental_subagents = true
+
+[workflow]
+enabled = true
+stages = ["Build", "Review"]
+max_runtime_depth = 1
+"#;
+
+const CORRECTNESS_REVIEWER_AGENT: &str = r#"[core]
+name = "correctness-reviewer"
+description = "Reviews logic, regressions, edge cases, and verification claims."
+provider = "Codex"
+model = "gpt-5.3-codex"
+instructions = "Audit logic, regression risk, verification gaps, and plan compliance with explicit evidence."
+tags = ["review", "correctness", "codex"]
+
+[runtime]
+context_mode = "SummaryOnly"
+memory_sources = ["AutoProjectMemory", "ActivePlan"]
+working_dir_policy = "Auto"
+file_conflict_policy = "Serialize"
+sandbox = "ReadOnly"
+approval = "DenyByDefault"
+timeout_secs = 900
+spawn_policy = "Sync"
+
+[provider_overrides.codex]
+model_reasoning_effort = "high"
+
+[workflow]
+enabled = true
+stages = ["Review"]
+max_runtime_depth = 1
+"#;
+
+const STYLE_REVIEWER_AGENT: &str = r#"[core]
+name = "style-reviewer"
+description = "Reviews maintainability, naming, readability, and consistency."
+provider = "Claude"
+model = "sonnet"
+instructions = "Review maintainability and style. Do not claim certainty without evidence."
+tags = ["review", "style", "claude"]
+
+[runtime]
+context_mode = "SummaryOnly"
+memory_sources = ["AutoProjectMemory", "ActivePlan"]
+working_dir_policy = "Auto"
+file_conflict_policy = "Serialize"
+sandbox = "ReadOnly"
+approval = "DenyByDefault"
+timeout_secs = 900
+spawn_policy = "Sync"
+
+[workflow]
+enabled = true
+stages = ["Review", "Archive"]
+max_runtime_depth = 1
+"#;
+
+const LOCAL_FALLBACK_CODER_AGENT: &str = r#"[core]
+name = "local-fallback-coder"
+description = "Optional local fallback coding agent backed by Ollama."
+provider = "Ollama"
+model = "qwen2.5-coder"
+instructions = "Implement small scoped changes. If uncertain, return open questions."
+tags = ["build", "local", "ollama", "fallback"]
+
+[runtime]
+context_mode = { SelectedFiles = ["src/**", "PLAN.md"] }
+memory_sources = ["AutoProjectMemory", "ActivePlan"]
+working_dir_policy = "Auto"
+file_conflict_policy = "Serialize"
+sandbox = "WorkspaceWrite"
+approval = "DenyByDefault"
+timeout_secs = 1200
+spawn_policy = "Async"
+
+[workflow]
+enabled = true
+stages = ["Build"]
+max_runtime_depth = 1
+"#;
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, io::ErrorKind};
+
+    use tempfile::tempdir;
+
+    use super::{init_workspace, InitPreset};
+
+    #[test]
+    fn init_creates_preset_files_and_valid_specs() {
+        let dir = tempdir().expect("tempdir");
+        let report = init_workspace(dir.path(), InitPreset::ClaudeOpusSupervisor, false)
+            .expect("init succeeds");
+
+        assert_eq!(report.generated_agent_count, 6);
+        assert!(dir.path().join("agents").exists());
+        assert!(dir.path().join("PLAN.md").exists());
+        assert!(dir.path().join(".mcp-subagent/config.toml").exists());
+        assert!(dir.path().join("README.mcp-subagent.md").exists());
+    }
+
+    #[test]
+    fn init_refuses_to_overwrite_without_force() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("agents")).expect("create agents");
+        fs::write(dir.path().join("agents/backend-coder.agent.toml"), "seed").expect("seed file");
+
+        let err = init_workspace(dir.path(), InitPreset::ClaudeOpusSupervisor, false)
+            .expect_err("must fail on existing files");
+        assert!(
+            matches!(
+                err,
+                crate::error::McpSubagentError::Io(ref io) if io.kind() == ErrorKind::AlreadyExists
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn init_force_overwrites_existing_files() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("agents")).expect("create agents");
+        fs::write(
+            dir.path().join("agents/backend-coder.agent.toml"),
+            "old-content",
+        )
+        .expect("seed file");
+
+        let report = init_workspace(dir.path(), InitPreset::ClaudeOpusSupervisor, true)
+            .expect("init with force");
+        let content =
+            fs::read_to_string(dir.path().join("agents/backend-coder.agent.toml")).expect("read");
+        assert!(content.contains("provider = \"Codex\""));
+        assert!(report
+            .overwritten_files
+            .iter()
+            .any(|path| path.ends_with("agents/backend-coder.agent.toml")));
+    }
+}

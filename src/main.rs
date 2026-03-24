@@ -1,9 +1,14 @@
-use std::{path::PathBuf, process::ExitCode};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mcp_subagent::{
     config::{resolve_runtime_config, ConfigOverrides, RuntimeConfig},
     doctor::{build_doctor_report, render_doctor_report},
+    init::{init_workspace, InitPreset, InitReport},
     logging::{init_logging, LoggingGuard},
     mcp::{
         dto::{
@@ -50,6 +55,16 @@ enum Commands {
         #[arg(value_name = "AGENTS_DIR")]
         agents_dir: Option<PathBuf>,
     },
+    Init {
+        #[arg(long, value_enum, default_value_t = InitPresetArg::ClaudeOpusSupervisor)]
+        preset: InitPresetArg,
+        #[arg(long, value_name = "ROOT_DIR")]
+        root_dir: Option<PathBuf>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
     ListAgents {
         #[arg(long)]
         json: bool,
@@ -68,6 +83,8 @@ enum Commands {
         plan_ref: Option<String>,
         #[arg(long = "selected-file")]
         selected_files: Vec<PathBuf>,
+        #[arg(long = "selected-file-inline")]
+        selected_files_inline: Vec<PathBuf>,
         #[arg(long)]
         working_dir: Option<PathBuf>,
         #[arg(long)]
@@ -87,6 +104,8 @@ enum Commands {
         plan_ref: Option<String>,
         #[arg(long = "selected-file")]
         selected_files: Vec<PathBuf>,
+        #[arg(long = "selected-file-inline")]
+        selected_files_inline: Vec<PathBuf>,
         #[arg(long)]
         working_dir: Option<PathBuf>,
         #[arg(long)]
@@ -119,6 +138,19 @@ enum ArtifactKindArg {
     Log,
     Patch,
     Json,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum InitPresetArg {
+    ClaudeOpusSupervisor,
+}
+
+impl From<InitPresetArg> for InitPreset {
+    fn from(value: InitPresetArg) -> Self {
+        match value {
+            InitPresetArg::ClaudeOpusSupervisor => InitPreset::ClaudeOpusSupervisor,
+        }
+    }
 }
 
 #[tokio::main]
@@ -181,6 +213,15 @@ async fn main() -> ExitCode {
             info!("starting command: validate");
             validate_specs(cfg)
         }
+        Commands::Init {
+            preset,
+            root_dir,
+            force,
+            json,
+        } => {
+            info!("starting command: init");
+            init_command(preset, root_dir, force, json)
+        }
         Commands::ListAgents { json } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
                 config_path,
@@ -206,6 +247,7 @@ async fn main() -> ExitCode {
             stage,
             plan_ref,
             selected_files,
+            selected_files_inline,
             working_dir,
             json,
         } => {
@@ -232,6 +274,7 @@ async fn main() -> ExitCode {
                 stage,
                 plan_ref,
                 selected_files,
+                selected_files_inline,
                 working_dir,
                 json,
             )
@@ -245,6 +288,7 @@ async fn main() -> ExitCode {
             stage,
             plan_ref,
             selected_files,
+            selected_files_inline,
             working_dir,
             json,
         } => {
@@ -271,6 +315,7 @@ async fn main() -> ExitCode {
                 stage,
                 plan_ref,
                 selected_files,
+                selected_files_inline,
                 working_dir,
                 json,
             )
@@ -423,6 +468,38 @@ fn doctor(cfg: RuntimeConfig) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn init_command(
+    preset: InitPresetArg,
+    root_dir: Option<PathBuf>,
+    force: bool,
+    json: bool,
+) -> ExitCode {
+    let root = match root_dir {
+        Some(path) => path,
+        None => match std::env::current_dir() {
+            Ok(path) => path,
+            Err(err) => {
+                eprintln!("init failed: unable to resolve current directory: {err}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    match init_workspace(&root, preset.into(), force) {
+        Ok(report) => {
+            if json {
+                print_json(&report);
+            } else {
+                print_init_report(&report);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("init failed: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 async fn list_agents(cfg: RuntimeConfig, json: bool) -> ExitCode {
     let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
     match server.list_agents().await {
@@ -462,16 +539,28 @@ async fn run_agent(
     stage: Option<String>,
     plan_ref: Option<String>,
     selected_files: Vec<PathBuf>,
+    selected_files_inline: Vec<PathBuf>,
     working_dir: Option<PathBuf>,
     json: bool,
 ) -> ExitCode {
     let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
+    let selected_files = match build_selected_file_inputs(
+        selected_files,
+        selected_files_inline,
+        working_dir.as_deref(),
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("run failed: {err}");
+            return ExitCode::from(1);
+        }
+    };
     let input = RunAgentInput {
         agent_name: agent,
         task,
         task_brief,
         parent_summary,
-        selected_files: selected_file_inputs(selected_files),
+        selected_files,
         stage,
         plan_ref,
         working_dir: working_dir.map(|path| path.display().to_string()),
@@ -512,16 +601,28 @@ async fn spawn_agent(
     stage: Option<String>,
     plan_ref: Option<String>,
     selected_files: Vec<PathBuf>,
+    selected_files_inline: Vec<PathBuf>,
     working_dir: Option<PathBuf>,
     json: bool,
 ) -> ExitCode {
     let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
+    let selected_files = match build_selected_file_inputs(
+        selected_files,
+        selected_files_inline,
+        working_dir.as_deref(),
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("spawn failed: {err}");
+            return ExitCode::from(1);
+        }
+    };
     let input = RunAgentInput {
         agent_name: agent,
         task,
         task_brief,
         parent_summary,
-        selected_files: selected_file_inputs(selected_files),
+        selected_files,
         stage,
         plan_ref,
         working_dir: working_dir.map(|path| path.display().to_string()),
@@ -646,15 +747,59 @@ async fn read_artifact(
     }
 }
 
-fn selected_file_inputs(paths: Vec<PathBuf>) -> Vec<RunAgentSelectedFileInput> {
-    paths
+fn build_selected_file_inputs(
+    selected_files: Vec<PathBuf>,
+    selected_files_inline: Vec<PathBuf>,
+    working_dir: Option<&Path>,
+) -> std::result::Result<Vec<RunAgentSelectedFileInput>, String> {
+    let mut merged = selected_files
         .into_iter()
         .map(|path| RunAgentSelectedFileInput {
             path: path.display().to_string(),
             rationale: None,
             content: None,
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    for inline_path in selected_files_inline {
+        let display = inline_path.display().to_string();
+        let resolved = resolve_inline_read_path(&inline_path, working_dir);
+        let content = fs::read_to_string(&resolved).map_err(|err| {
+            format!(
+                "failed to read --selected-file-inline `{display}` from `{}`: {err}",
+                resolved.display()
+            )
+        })?;
+
+        if let Some(existing) = merged.iter_mut().find(|item| item.path == display) {
+            existing.content = Some(content);
+            continue;
+        }
+
+        merged.push(RunAgentSelectedFileInput {
+            path: display,
+            rationale: Some("inline content provided by CLI --selected-file-inline".to_string()),
+            content: Some(content),
+        });
+    }
+
+    Ok(merged)
+}
+
+fn resolve_inline_read_path(path: &Path, working_dir: Option<&Path>) -> PathBuf {
+    if path.is_absolute() || path.exists() {
+        return path.to_path_buf();
+    }
+
+    if let Some(base) = working_dir {
+        let candidate = base.join(path);
+        if candidate.exists() {
+            return candidate;
+        }
+        return candidate;
+    }
+
+    path.to_path_buf()
 }
 
 fn resolve_artifact_path(kind: ArtifactKindArg, index: &[ArtifactOutput]) -> Option<String> {
@@ -694,11 +839,40 @@ fn print_json<T: Serialize>(value: &T) {
     }
 }
 
+fn print_init_report(report: &InitReport) {
+    println!("preset: {}", report.preset);
+    println!("root: {}", report.root.display());
+    println!("agents_dir: {}", report.agents_dir.display());
+    println!("generated_agents: {}", report.generated_agent_count);
+    println!("created_files:");
+    for path in &report.created_files {
+        println!("- {}", path.display());
+    }
+    if !report.overwritten_files.is_empty() {
+        println!("overwritten_files:");
+        for path in &report.overwritten_files {
+            println!("- {}", path.display());
+        }
+    }
+    if !report.notes.is_empty() {
+        println!("next_steps:");
+        for note in &report.notes {
+            println!("- {note}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use std::fs;
 
-    use crate::{ArtifactKindArg, Cli, Commands};
+    use clap::Parser;
+    use tempfile::tempdir;
+
+    use crate::{
+        build_selected_file_inputs, ArtifactKindArg, Cli, Commands, InitPresetArg,
+        RunAgentSelectedFileInput,
+    };
 
     #[test]
     fn parses_list_agents_json_flag() {
@@ -722,6 +896,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_run_command_with_selected_file_inline() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "run",
+            "reviewer",
+            "--task",
+            "review code",
+            "--selected-file",
+            "src/lib.rs",
+            "--selected-file-inline",
+            "src/main.rs",
+        ]);
+        match cli.command {
+            Commands::Run {
+                selected_files,
+                selected_files_inline,
+                ..
+            } => {
+                assert_eq!(selected_files.len(), 1);
+                assert_eq!(selected_files_inline.len(), 1);
+                assert_eq!(selected_files_inline[0].to_string_lossy(), "src/main.rs");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_artifact_kind_enum() {
         let cli = Cli::parse_from(["mcp-subagent", "artifact", "handle-1", "--kind", "summary"]);
         match cli.command {
@@ -730,5 +931,58 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_init_command() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "init",
+            "--preset",
+            "claude-opus-supervisor",
+            "--force",
+            "--json",
+        ]);
+        match cli.command {
+            Commands::Init {
+                preset,
+                force,
+                json,
+                ..
+            } => {
+                assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisor));
+                assert!(force);
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_selected_files_include_file_content() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("inline.txt");
+        fs::write(&file, "inline body").expect("write inline file");
+
+        let out = build_selected_file_inputs(Vec::new(), vec![file.clone()], None)
+            .expect("build selected files");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, file.display().to_string());
+        assert_eq!(out[0].content.as_deref(), Some("inline body"));
+    }
+
+    #[test]
+    fn inline_selected_file_overrides_non_inline_entry() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("inline-override.txt");
+        fs::write(&file, "override body").expect("write inline file");
+
+        let out = build_selected_file_inputs(vec![file.clone()], vec![file.clone()], None)
+            .expect("build selected files");
+        let only = out
+            .iter()
+            .find(|item: &&RunAgentSelectedFileInput| item.path == file.display().to_string())
+            .expect("entry exists");
+        assert_eq!(only.content.as_deref(), Some("override body"));
     }
 }
