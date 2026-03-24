@@ -371,8 +371,10 @@ mod tests {
     };
 
     fn sample_spec(mode: ContextMode) -> AgentSpec {
-        let mut runtime = RuntimePolicy::default();
-        runtime.context_mode = mode;
+        let runtime = RuntimePolicy {
+            context_mode: mode,
+            ..Default::default()
+        };
         AgentSpec {
             core: AgentSpecCore {
                 name: "reviewer".to_string(),
