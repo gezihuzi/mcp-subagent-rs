@@ -2735,3 +2735,21 @@
 - 已同步 README：
   - command surface 改为 `events [<handle-id>] [--all] ...`；
   - 示例新增 `mcp-subagent events --all --follow`。
+
+## T-103 V0.10-P1-GlobalEventsContinuousFollow (Completed 2026-03-25)
+
+任务：修复 `events --all --follow` 的“非连续流”行为，避免在当前活跃 run 结束后自动退出导致看起来像一次性拉取。  
+验收标准：
+
+1. `events --all --follow` 默认持续监听（不因当前 active run 归零自动退出）。
+2. 仅在显式超时（`--timeout-secs` / `--phase-timeout-secs`）或用户中断时退出。
+3. 单 handle `events <handle-id> --follow` 语义保持不变。
+4. README 明确 `events --all --follow` 是 continuous stream 模式。
+5. `cargo test -q` 全量通过。
+完成记录：
+
+- 已修复 `src/main.rs::read_events_all`：
+  - 移除“active runs 清空即退出”的逻辑；
+  - 全局 follow 改为持续轮询并输出增量事件。
+- 已同步 README：
+  - 在示例段明确 `events --all --follow` 会持续监听直到 Ctrl-C 或 timeout。

@@ -196,6 +196,8 @@ mcp-subagent events <handle-id> --event provider.first_output.warning --follow
 mcp-subagent events --all --follow
 ```
 
+`events --all --follow` is a continuous stream mode: it keeps listening for new runs/events until you stop it (Ctrl-C) or set `--timeout-secs`.
+
 `timeline` is kept as a compatibility alias; prefer `events`.
 
 `result --json` and MCP `get_run_result` now include retry observability fields:

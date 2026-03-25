@@ -2636,7 +2636,6 @@ async fn read_events_all(
     let mut seen_counts: HashMap<String, usize> = HashMap::new();
     let mut phase_track: HashMap<String, (Option<String>, Instant)> = HashMap::new();
     let mut last_phase_progress: HashMap<String, String> = HashMap::new();
-    let mut saw_active_run = false;
     loop {
         let snapshots =
             match collect_run_event_snapshots(&cfg.state_dir, event.as_deref(), phase.as_deref()) {
@@ -2647,11 +2646,7 @@ async fn read_events_all(
                 }
             };
 
-        let mut active_runs = 0usize;
         for snapshot in &snapshots {
-            if !is_terminal_status(snapshot.status.as_str()) {
-                active_runs += 1;
-            }
             let seen = seen_counts
                 .entry(snapshot.handle_id.clone())
                 .or_insert(0usize);
@@ -2727,12 +2722,6 @@ async fn read_events_all(
             }
         }
 
-        if active_runs > 0 {
-            saw_active_run = true;
-        }
-        if saw_active_run && active_runs == 0 {
-            return ExitCode::SUCCESS;
-        }
         if phase_timeout_secs.is_some() {
             let timeout = phase_timeout_secs.unwrap_or_default();
             for snapshot in &snapshots {
