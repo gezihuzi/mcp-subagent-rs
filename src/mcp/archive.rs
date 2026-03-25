@@ -118,7 +118,7 @@ pub(crate) fn apply_archive_hook(
             stage: request
                 .stage
                 .clone()
-                .unwrap_or_else(|| "Archive".to_string()),
+                .unwrap_or_else(|| "archive".to_string()),
             task: request.task.clone(),
             parse_status: format!("{}", summary.parse_status),
             verification_status: format!("{}", summary.summary.verification_status),
@@ -272,7 +272,7 @@ fn build_final_summary_markdown(
         "# Final Summary\n\nDate: {date}\n\nHandle: `{handle_id}`\n\nAgent: `{agent}` ({provider})\n\nStage: `{stage}`\n\nTask: {task}\n\nVerification: `{verification}`\n\nParse status: `{parse_status}`\n\nSummary:\n\n{summary_text}\n\n## Key findings\n\n{key_findings}\n\n## Touched files\n\n{touched_files}\n\n## Plan refs\n\n{plan_refs}\n\n## Open questions\n\n{open_questions}\n\n## Next steps\n\n{next_steps}\n",
         agent = spec.core.name,
         provider = spec.core.provider.as_str(),
-        stage = request.stage.as_deref().unwrap_or("Archive"),
+        stage = request.stage.as_deref().unwrap_or("archive"),
         task = request.task,
         verification = summary.summary.verification_status,
         parse_status = summary.parse_status,
@@ -593,10 +593,10 @@ mod tests {
         let root = temp.path().join("repo");
         std::fs::create_dir_all(&root).expect("create root");
         let spec = sample_spec("docs/plans");
-        let request = sample_request(root.clone(), "Archive");
+        let request = sample_request(root.clone(), "archive");
         let handle_id = Uuid::now_v7().to_string();
         let workspace = WorkspaceRecord {
-            mode: "InPlace".to_string(),
+            mode: "in_place".to_string(),
             source_path: root.clone(),
             workspace_path: root.clone(),
             notes: Vec::new(),
@@ -664,9 +664,9 @@ mod tests {
         let root = temp.path().join("repo");
         std::fs::create_dir_all(&root).expect("create root");
         let spec = sample_spec("docs/plans");
-        let request = sample_request(root.clone(), "Build");
+        let request = sample_request(root.clone(), "build");
         let workspace = WorkspaceRecord {
-            mode: "InPlace".to_string(),
+            mode: "in_place".to_string(),
             source_path: root.clone(),
             workspace_path: root,
             notes: Vec::new(),
@@ -701,9 +701,9 @@ mod tests {
         let root = temp.path().join("repo");
         std::fs::create_dir_all(&root).expect("create root");
         let spec = sample_spec("/absolute/path/not-allowed");
-        let request = sample_request(root.clone(), "Archive");
+        let request = sample_request(root.clone(), "archive");
         let workspace = WorkspaceRecord {
-            mode: "InPlace".to_string(),
+            mode: "in_place".to_string(),
             source_path: root.clone(),
             workspace_path: root,
             notes: Vec::new(),

@@ -385,68 +385,68 @@ fn retry_policy_source(value: &RetryPolicy, default: &RetryPolicy) -> PolicyValu
 
 fn context_mode_to_str(mode: &ContextMode) -> String {
     match mode {
-        ContextMode::Isolated => "Isolated".to_string(),
-        ContextMode::SummaryOnly => "SummaryOnly".to_string(),
-        ContextMode::SelectedFiles(paths) => format!("SelectedFiles({})", paths.join(",")),
-        ContextMode::ExpandedBrief => "ExpandedBrief".to_string(),
+        ContextMode::Isolated => "isolated".to_string(),
+        ContextMode::SummaryOnly => "summary_only".to_string(),
+        ContextMode::SelectedFiles(paths) => format!("selected_files({})", paths.join(",")),
+        ContextMode::ExpandedBrief => "expanded_brief".to_string(),
     }
 }
 
 fn working_dir_policy_to_str(policy: &WorkingDirPolicy) -> String {
     match policy {
-        WorkingDirPolicy::Auto => "Auto".to_string(),
-        WorkingDirPolicy::InPlace => "InPlace".to_string(),
-        WorkingDirPolicy::TempCopy => "TempCopy".to_string(),
-        WorkingDirPolicy::GitWorktree => "GitWorktree".to_string(),
+        WorkingDirPolicy::Auto => "auto".to_string(),
+        WorkingDirPolicy::InPlace => "in_place".to_string(),
+        WorkingDirPolicy::TempCopy => "temp_copy".to_string(),
+        WorkingDirPolicy::GitWorktree => "git_worktree".to_string(),
     }
 }
 
 fn file_conflict_policy_to_str(policy: &FileConflictPolicy) -> String {
     match policy {
-        FileConflictPolicy::Deny => "Deny".to_string(),
-        FileConflictPolicy::Serialize => "Serialize".to_string(),
-        FileConflictPolicy::AllowWithMergeReview => "AllowWithMergeReview".to_string(),
+        FileConflictPolicy::Deny => "deny".to_string(),
+        FileConflictPolicy::Serialize => "serialize".to_string(),
+        FileConflictPolicy::AllowWithMergeReview => "allow_with_merge_review".to_string(),
     }
 }
 
 fn sandbox_policy_to_str(policy: &SandboxPolicy) -> String {
     match policy {
-        SandboxPolicy::ReadOnly => "ReadOnly".to_string(),
-        SandboxPolicy::WorkspaceWrite => "WorkspaceWrite".to_string(),
-        SandboxPolicy::FullAccess => "FullAccess".to_string(),
+        SandboxPolicy::ReadOnly => "read_only".to_string(),
+        SandboxPolicy::WorkspaceWrite => "workspace_write".to_string(),
+        SandboxPolicy::FullAccess => "full_access".to_string(),
     }
 }
 
 fn approval_policy_to_str(policy: &ApprovalPolicy) -> String {
     match policy {
-        ApprovalPolicy::ProviderDefault => "ProviderDefault".to_string(),
-        ApprovalPolicy::Ask => "Ask".to_string(),
-        ApprovalPolicy::AutoAcceptEdits => "AutoAcceptEdits".to_string(),
-        ApprovalPolicy::DenyByDefault => "DenyByDefault".to_string(),
+        ApprovalPolicy::ProviderDefault => "provider_default".to_string(),
+        ApprovalPolicy::Ask => "ask".to_string(),
+        ApprovalPolicy::AutoAcceptEdits => "auto_accept_edits".to_string(),
+        ApprovalPolicy::DenyByDefault => "deny_by_default".to_string(),
     }
 }
 
 fn memory_source_to_str(source: &MemorySource) -> String {
     match source {
-        MemorySource::AutoProjectMemory => "AutoProjectMemory".to_string(),
-        MemorySource::ActivePlan => "ActivePlan".to_string(),
-        MemorySource::ArchivedPlans => "ArchivedPlans".to_string(),
-        MemorySource::File(path) => format!("File({path})"),
-        MemorySource::Glob(pattern) => format!("Glob({pattern})"),
-        MemorySource::Inline(_) => "Inline(<content>)".to_string(),
+        MemorySource::AutoProjectMemory => "auto_project_memory".to_string(),
+        MemorySource::ActivePlan => "active_plan".to_string(),
+        MemorySource::ArchivedPlans => "archived_plans".to_string(),
+        MemorySource::File(path) => format!("file({path})"),
+        MemorySource::Glob(pattern) => format!("glob({pattern})"),
+        MemorySource::Inline(_) => "inline(<content>)".to_string(),
     }
 }
 
 fn spawn_policy_to_str(policy: &SpawnPolicy) -> String {
     match policy {
-        SpawnPolicy::Sync => "Sync".to_string(),
-        SpawnPolicy::Async => "Async".to_string(),
+        SpawnPolicy::Sync => "sync".to_string(),
+        SpawnPolicy::Async => "async".to_string(),
     }
 }
 
 fn background_preference_to_str(preference: &BackgroundPreference) -> String {
     match preference {
-        BackgroundPreference::PreferForeground => "PreferForeground".to_string(),
-        BackgroundPreference::PreferBackground => "PreferBackground".to_string(),
+        BackgroundPreference::PreferForeground => "prefer_foreground".to_string(),
+        BackgroundPreference::PreferBackground => "prefer_background".to_string(),
     }
 }

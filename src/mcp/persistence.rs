@@ -452,7 +452,7 @@ mod tests {
             .format(&Rfc3339)
             .expect("format timestamp");
         let legacy = serde_json::json!({
-            "status": "SUCCEEDED",
+            "status": "succeeded",
             "updated_at": updated_at,
             "summary": null,
             "artifact_index": [],

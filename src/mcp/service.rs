@@ -78,10 +78,10 @@ fn to_workspace_record(prepared: &PreparedWorkspace, lock_keys: Vec<String>) -> 
     let lock_key = lock_keys.first().cloned();
     WorkspaceRecord {
         mode: match prepared.mode {
-            WorkspaceMode::InPlace => "InPlace",
-            WorkspaceMode::TempCopy => "TempCopy",
-            WorkspaceMode::GitWorktree => "GitWorktree",
-            WorkspaceMode::GitWorktreeFallbackTempCopy => "GitWorktreeFallbackTempCopy",
+            WorkspaceMode::InPlace => "in_place",
+            WorkspaceMode::TempCopy => "temp_copy",
+            WorkspaceMode::GitWorktree => "git_worktree",
+            WorkspaceMode::GitWorktreeFallbackTempCopy => "git_worktree_fallback_temp_copy",
         }
         .to_string(),
         source_path: prepared.source_path.clone(),

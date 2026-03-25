@@ -1202,7 +1202,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
         request.working_dir = temp.path().to_path_buf();
         request.selected_files = vec![SelectedFile {
             path: PathBuf::from("src/a.rs"),
@@ -1235,7 +1235,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
         request.working_dir = temp.path().to_path_buf();
         request.selected_files = vec![SelectedFile {
             path: PathBuf::from("src/a.rs"),
@@ -1264,7 +1264,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
         request.working_dir = temp.path().to_path_buf();
         request.selected_files = vec![
             SelectedFile {
@@ -1310,7 +1310,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
         request.working_dir = temp.path().to_path_buf();
         request.task = "add new public API endpoint for parser".to_string();
 
@@ -1345,7 +1345,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
         request.working_dir = temp.path().to_path_buf();
         request.task = "run database migration from v1 to v2".to_string();
 
@@ -1380,7 +1380,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
         request.working_dir = temp.path().to_path_buf();
 
         let gate = WorkflowGatePolicy {
@@ -1412,7 +1412,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Research".to_string());
+        request.stage = Some("research".to_string());
 
         let err = dispatcher
             .run(
@@ -1439,7 +1439,7 @@ mod tests {
         );
         let mut request = sample_request();
         request.parent_summary = Some("runtime_depth=1 previous nested run".to_string());
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
 
         let err = dispatcher
             .run(
@@ -1468,7 +1468,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Research".to_string());
+        request.stage = Some("research".to_string());
 
         let result = dispatcher
             .run(&spec, &request, ResolvedMemory::default())
@@ -1490,7 +1490,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
 
         let err = dispatcher
             .run(&spec, &request, ResolvedMemory::default())
@@ -1531,7 +1531,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Research".to_string());
+        request.stage = Some("research".to_string());
 
         let spec = sample_spec_for_stage_routing(
             "backend-coder",
@@ -1554,7 +1554,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Plan".to_string());
+        request.stage = Some("plan".to_string());
 
         let spec = sample_spec_for_stage_routing(
             "fast-researcher",
@@ -1577,7 +1577,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Review".to_string());
+        request.stage = Some("review".to_string());
 
         let spec = sample_spec_for_stage_routing(
             "frontend-builder",
@@ -1600,7 +1600,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Review".to_string());
+        request.stage = Some("review".to_string());
 
         let spec = sample_spec_for_stage_routing(
             "correctness-reviewer",
@@ -1644,7 +1644,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Review".to_string());
+        request.stage = Some("review".to_string());
         request.selected_files = vec![SelectedFile {
             path: PathBuf::from("src/a.rs"),
             rationale: None,
@@ -1688,7 +1688,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Review".to_string());
+        request.stage = Some("review".to_string());
         request.selected_files = vec![SelectedFile {
             path: PathBuf::from("src/a.rs"),
             rationale: None,

@@ -381,15 +381,15 @@ mod tests {
     use crate::{mcp::artifacts::build_runtime_artifacts, mcp::state::RuntimeState};
 
     fn write_agent_spec(dir: &Path) {
-        write_agent_spec_with_provider_and_runtime(dir, "Mock", "");
+        write_agent_spec_with_provider_and_runtime(dir, "mock", "");
     }
 
     fn write_codex_agent_spec(dir: &Path) {
-        write_agent_spec_with_provider_and_runtime(dir, "Codex", "");
+        write_agent_spec_with_provider_and_runtime(dir, "codex", "");
     }
 
     fn write_gemini_agent_spec(dir: &Path) {
-        write_agent_spec_with_provider_and_runtime(dir, "Gemini", "");
+        write_agent_spec_with_provider_and_runtime(dir, "gemini", "");
     }
 
     fn write_agent_spec_with_provider(dir: &Path, provider: &str) {
@@ -406,8 +406,8 @@ provider = "{provider}"
 instructions = "review"
 
 [runtime]
-working_dir_policy = "InPlace"
-sandbox = "ReadOnly"
+working_dir_policy = "in_place"
+sandbox = "read_only"
 {runtime_extra}
 "#
         );
@@ -574,7 +574,7 @@ sandbox = "ReadOnly"
         assert!(out.agents[0]
             .capability_notes
             .iter()
-            .any(|note| note.contains("MissingBinary")));
+            .any(|note| note.contains("missing_binary")));
     }
 
     #[tokio::test]
@@ -583,7 +583,7 @@ sandbox = "ReadOnly"
         let agents_dir = temp.path().join("agents");
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&agents_dir).expect("create agents");
-        write_agent_spec_with_provider(&agents_dir, "Ollama");
+        write_agent_spec_with_provider(&agents_dir, "ollama");
         let server = make_server(agents_dir, state_dir);
 
         let out = server.list_agents().await.expect("list").0;
@@ -680,7 +680,7 @@ sandbox = "ReadOnly"
         fs::create_dir_all(&agents_dir).expect("create agents");
         write_agent_spec_with_provider_and_runtime(
             &agents_dir,
-            "Mock",
+            "mock",
             r#"spawn_policy = "Async""#,
         );
         let server = make_server(agents_dir, state_dir);
@@ -717,8 +717,8 @@ sandbox = "ReadOnly"
         fs::create_dir_all(&agents_dir).expect("create agents");
         write_agent_spec_with_provider_and_runtime(
             &agents_dir,
-            "Mock",
-            r#"background_preference = "PreferBackground""#,
+            "mock",
+            r#"background_preference = "prefer_background""#,
         );
         let server = make_server(agents_dir, state_dir);
 
@@ -752,7 +752,7 @@ sandbox = "ReadOnly"
         let agents_dir = temp.path().join("agents");
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&agents_dir).expect("create agents");
-        write_agent_spec_with_provider(&agents_dir, "Ollama");
+        write_agent_spec_with_provider(&agents_dir, "ollama");
         let server = McpSubagentServer::new_with_state_dir_and_prober(
             vec![agents_dir],
             state_dir,
@@ -1058,13 +1058,13 @@ sandbox = "ReadOnly"
 [core]
 name = "writer"
 description = "write code"
-provider = "Mock"
+provider = "mock"
 instructions = "write"
 
 [runtime]
-working_dir_policy = "TempCopy"
+working_dir_policy = "temp_copy"
 file_conflict_policy = "Serialize"
-sandbox = "WorkspaceWrite"
+sandbox = "workspace_write"
 "#;
         fs::write(agents_dir.join("writer.agent.toml"), agent).expect("write agent");
         let server = make_server(agents_dir, state_dir.clone());
@@ -1098,10 +1098,10 @@ sandbox = "WorkspaceWrite"
             project_dir.display().to_string()
         );
         assert_eq!(run_obj["spec_snapshot"]["name"], "writer");
-        assert_eq!(run_obj["spec_snapshot"]["working_dir_policy"], "TempCopy");
-        assert_eq!(run_obj["probe_result"]["provider"], "Mock");
+        assert_eq!(run_obj["spec_snapshot"]["working_dir_policy"], "temp_copy");
+        assert_eq!(run_obj["probe_result"]["provider"], "mock");
         assert!(!run_obj["memory_resolution"].is_null());
-        assert_eq!(run_obj["workspace"]["mode"], "TempCopy");
+        assert_eq!(run_obj["workspace"]["mode"], "temp_copy");
         assert!(!run_obj["execution_policy"].is_null());
         assert_eq!(run_obj["execution_policy"]["requested_run_mode"], "sync");
         assert_eq!(run_obj["execution_policy"]["effective_run_mode"], "sync");

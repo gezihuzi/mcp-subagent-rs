@@ -641,7 +641,7 @@ mod tests {
             task_brief: None,
             parent_summary: None,
             selected_files: Vec::new(),
-            stage: Some("Build".to_string()),
+            stage: Some("build".to_string()),
             plan_ref: None,
             working_dir: PathBuf::from("."),
             run_mode: RunMode::Sync,

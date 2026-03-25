@@ -321,42 +321,42 @@ mcp-subagent connect-snippet --host gemini
 const FAST_RESEARCHER_AGENT: &str = r#"[core]
 name = "fast-researcher"
 description = "Fast read-only investigator for dependency mapping and risk discovery."
-provider = "Gemini"
+provider = "gemini"
 model = "flash"
 instructions = "You are a read-only research specialist. Do not edit files. Return concise evidence-based summaries."
 tags = ["research", "read-only", "fast"]
 
 [runtime]
-context_mode = "ExpandedBrief"
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
+context_mode = "expanded_brief"
+memory_sources = ["auto_project_memory", "active_plan"]
+working_dir_policy = "auto"
 file_conflict_policy = "Serialize"
-sandbox = "ReadOnly"
-approval = "ProviderDefault"
+sandbox = "read_only"
+approval = "provider_default"
 timeout_secs = 600
 spawn_policy = "Sync"
 
 [workflow]
 enabled = true
-stages = ["Research", "Plan"]
+stages = ["research", "plan"]
 max_runtime_depth = 1
 "#;
 
 const BACKEND_CODER_AGENT: &str = r#"[core]
 name = "backend-coder"
 description = "Implements backend and Rust changes from an approved plan."
-provider = "Codex"
+provider = "codex"
 model = "gpt-5.3-codex"
 instructions = "Implement scoped changes from PLAN.md. Keep diffs minimal and reference plan steps in summary."
 tags = ["build", "backend", "rust", "codex"]
 
 [runtime]
 context_mode = { SelectedFiles = ["src/**", "Cargo.toml", "PLAN.md"] }
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
+memory_sources = ["auto_project_memory", "active_plan"]
+working_dir_policy = "auto"
 file_conflict_policy = "Serialize"
-sandbox = "WorkspaceWrite"
-approval = "DenyByDefault"
+sandbox = "workspace_write"
+approval = "deny_by_default"
 timeout_secs = 1200
 spawn_policy = "Async"
 
@@ -365,25 +365,25 @@ model_reasoning_effort = "medium"
 
 [workflow]
 enabled = true
-stages = ["Build", "Review"]
+stages = ["build", "review"]
 max_runtime_depth = 1
 "#;
 
 const FRONTEND_BUILDER_AGENT: &str = r#"[core]
 name = "frontend-builder"
 description = "Implements frontend and UI changes from an approved plan."
-provider = "Gemini"
+provider = "gemini"
 model = "pro"
 instructions = "Implement frontend changes from PLAN.md with usable, reviewable diffs."
 tags = ["build", "frontend", "ui", "gemini"]
 
 [runtime]
 context_mode = { SelectedFiles = ["web/**", "src/**", "package.json", "PLAN.md"] }
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
+memory_sources = ["auto_project_memory", "active_plan"]
+working_dir_policy = "auto"
 file_conflict_policy = "Serialize"
-sandbox = "WorkspaceWrite"
-approval = "ProviderDefault"
+sandbox = "workspace_write"
+approval = "provider_default"
 timeout_secs = 1200
 spawn_policy = "Async"
 
@@ -392,25 +392,25 @@ experimental_subagents = true
 
 [workflow]
 enabled = true
-stages = ["Build", "Review"]
+stages = ["build", "review"]
 max_runtime_depth = 1
 "#;
 
 const CORRECTNESS_REVIEWER_AGENT: &str = r#"[core]
 name = "correctness-reviewer"
 description = "Reviews logic, regressions, edge cases, and verification claims."
-provider = "Codex"
+provider = "codex"
 model = "gpt-5.3-codex"
 instructions = "Audit logic, regression risk, verification gaps, and plan compliance with explicit evidence."
 tags = ["review", "correctness", "codex"]
 
 [runtime]
-context_mode = "SummaryOnly"
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
+context_mode = "summary_only"
+memory_sources = ["auto_project_memory", "active_plan"]
+working_dir_policy = "auto"
 file_conflict_policy = "Serialize"
-sandbox = "ReadOnly"
-approval = "DenyByDefault"
+sandbox = "read_only"
+approval = "deny_by_default"
 timeout_secs = 900
 spawn_policy = "Sync"
 
@@ -419,49 +419,49 @@ model_reasoning_effort = "high"
 
 [workflow]
 enabled = true
-stages = ["Review"]
+stages = ["review"]
 max_runtime_depth = 1
 "#;
 
 const STYLE_REVIEWER_AGENT: &str = r#"[core]
 name = "style-reviewer"
 description = "Reviews maintainability, naming, readability, and consistency."
-provider = "Claude"
+provider = "claude"
 model = "sonnet"
 instructions = "Review maintainability and style. Do not claim certainty without evidence."
 tags = ["review", "style", "claude"]
 
 [runtime]
-context_mode = "SummaryOnly"
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
+context_mode = "summary_only"
+memory_sources = ["auto_project_memory", "active_plan"]
+working_dir_policy = "auto"
 file_conflict_policy = "Serialize"
-sandbox = "ReadOnly"
-approval = "DenyByDefault"
+sandbox = "read_only"
+approval = "deny_by_default"
 timeout_secs = 900
 spawn_policy = "Sync"
 
 [workflow]
 enabled = true
-stages = ["Review", "Archive"]
+stages = ["review", "archive"]
 max_runtime_depth = 1
 "#;
 
 const CODEX_STYLE_REVIEWER_AGENT: &str = r#"[core]
 name = "codex-style-reviewer"
 description = "Codex reviewer focused on style and maintainability."
-provider = "Codex"
+provider = "codex"
 model = "gpt-5.3-codex"
 instructions = "Review maintainability, naming, readability, and consistency with concrete evidence."
 tags = ["review", "style", "codex"]
 
 [runtime]
-context_mode = "SummaryOnly"
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
+context_mode = "summary_only"
+memory_sources = ["auto_project_memory", "active_plan"]
+working_dir_policy = "auto"
 file_conflict_policy = "Serialize"
-sandbox = "ReadOnly"
-approval = "DenyByDefault"
+sandbox = "read_only"
+approval = "deny_by_default"
 timeout_secs = 900
 spawn_policy = "Sync"
 
@@ -470,79 +470,79 @@ model_reasoning_effort = "high"
 
 [workflow]
 enabled = true
-stages = ["Review"]
+stages = ["review"]
 max_runtime_depth = 1
 "#;
 
 const GEMINI_STYLE_REVIEWER_AGENT: &str = r#"[core]
 name = "gemini-style-reviewer"
 description = "Gemini reviewer for frontend style and maintainability checks."
-provider = "Gemini"
+provider = "gemini"
 model = "pro"
 instructions = "Review style, readability, and maintainability with short actionable findings."
 tags = ["review", "style", "gemini"]
 
 [runtime]
-context_mode = "SummaryOnly"
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
+context_mode = "summary_only"
+memory_sources = ["auto_project_memory", "active_plan"]
+working_dir_policy = "auto"
 file_conflict_policy = "Serialize"
-sandbox = "ReadOnly"
-approval = "ProviderDefault"
+sandbox = "read_only"
+approval = "provider_default"
 timeout_secs = 900
 spawn_policy = "Sync"
 
 [workflow]
 enabled = true
-stages = ["Review"]
+stages = ["review"]
 max_runtime_depth = 1
 "#;
 
 const LOCAL_FALLBACK_CODER_AGENT: &str = r#"[core]
 name = "local-fallback-coder"
 description = "Optional local fallback coding agent backed by Ollama."
-provider = "Ollama"
+provider = "ollama"
 model = "qwen2.5-coder"
 instructions = "Implement small scoped changes. If uncertain, return open questions."
 tags = ["build", "local", "ollama", "fallback"]
 
 [runtime]
 context_mode = { SelectedFiles = ["src/**", "PLAN.md"] }
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
+memory_sources = ["auto_project_memory", "active_plan"]
+working_dir_policy = "auto"
 file_conflict_policy = "Serialize"
-sandbox = "WorkspaceWrite"
-approval = "DenyByDefault"
+sandbox = "workspace_write"
+approval = "deny_by_default"
 timeout_secs = 1200
 spawn_policy = "Async"
 
 [workflow]
 enabled = true
-stages = ["Build"]
+stages = ["build"]
 max_runtime_depth = 1
 "#;
 
 const SINGLE_PROVIDER_CODER_AGENT: &str = r#"[core]
 name = "single-provider-coder"
 description = "Minimal single-provider coder for small workflows."
-provider = "Codex"
+provider = "codex"
 model = "gpt-5.3-codex"
 instructions = "Implement scoped changes and return concise structured summary."
 tags = ["build", "codex", "minimal"]
 
 [runtime]
 context_mode = { SelectedFiles = ["src/**", "PLAN.md"] }
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
+memory_sources = ["auto_project_memory", "active_plan"]
+working_dir_policy = "auto"
 file_conflict_policy = "Serialize"
-sandbox = "WorkspaceWrite"
-approval = "DenyByDefault"
+sandbox = "workspace_write"
+approval = "deny_by_default"
 timeout_secs = 900
 spawn_policy = "Sync"
 
 [workflow]
 enabled = true
-stages = ["Build", "Review"]
+stages = ["build", "review"]
 max_runtime_depth = 1
 "#;
 
@@ -622,7 +622,7 @@ mod tests {
             .expect("init with force");
         let content =
             fs::read_to_string(dir.path().join("agents/backend-coder.agent.toml")).expect("read");
-        assert!(content.contains("provider = \"Codex\""));
+        assert!(content.contains("provider = \"codex\""));
         assert!(report
             .overwritten_files
             .iter()

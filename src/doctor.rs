@@ -653,7 +653,7 @@ mod tests {
 [core]
 name = "reviewer"
 description = "review code"
-provider = "Mock"
+provider = "mock"
 instructions = "review"
 "#,
         )
@@ -709,12 +709,12 @@ instructions = "review"
 [core]
 name = "writer"
 description = "write code"
-provider = "Mock"
+provider = "mock"
 instructions = "write"
 
 [runtime]
-working_dir_policy = "GitWorktree"
-sandbox = "WorkspaceWrite"
+working_dir_policy = "git_worktree"
+sandbox = "workspace_write"
 "#,
         )
         .expect("write agent");
@@ -735,7 +735,7 @@ sandbox = "WorkspaceWrite"
             report
                 .workspace_policy_hints
                 .iter()
-                .find(|hint| hint.policy == "GitWorktree")
+                .find(|hint| hint.policy == "git_worktree")
                 .map(|hint| hint.usage_count),
             Some(1)
         );
@@ -765,7 +765,7 @@ codex = "test-version"
             .version_pins
             .entries
             .iter()
-            .find(|entry| entry.provider == "Codex")
+            .find(|entry| entry.provider == "codex")
             .expect("codex entry");
         assert_eq!(codex.compatibility, "matched");
     }
@@ -794,7 +794,7 @@ codex = "9.9.9"
             .version_pins
             .entries
             .iter()
-            .find(|entry| entry.provider == "Codex")
+            .find(|entry| entry.provider == "codex")
             .expect("codex entry");
         assert_eq!(codex.compatibility, "drift");
     }
@@ -823,7 +823,7 @@ codex = "test-version"
             .version_pins
             .entries
             .iter()
-            .find(|entry| entry.provider == "Codex")
+            .find(|entry| entry.provider == "codex")
             .expect("codex entry");
         assert_eq!(codex.compatibility, "disabled");
     }
