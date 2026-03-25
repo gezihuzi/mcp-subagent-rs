@@ -38,6 +38,7 @@ mcp-subagent artifact <handle-id> [--path ... | --kind summary|log|patch|json] [
 ```
 
 `result --json` uses stable schema contract `mcp-subagent.result.v1` (MCP `get_run_result` returns the same `contract_version` for parser alignment).
+Contract reference: [`docs/result_contract_v1.md`](./docs/result_contract_v1.md).
 
 `show` renders a compact colorized view in interactive terminals; set `NO_COLOR=1` or use `--json` for plain machine-readable output.
 

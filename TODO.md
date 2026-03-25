@@ -2059,3 +2059,25 @@
   - `README.md` 增加 `show` 的彩色输出与 `NO_COLOR/--json` 说明。
 - 已通过回归：
   - `cargo test -q`（`158 + 35 + 3` tests passed）。
+
+## T-080 V0.9-P1-VersionedResultContractDocAndOnboardingEntry (Completed 2026-03-25)
+
+任务：发布版本化结果契约文档，给 CLI/MCP 集成方一个固定、可引用、可迁移的对接入口。  
+验收标准：
+
+1. 新增 `docs` 文档，明确 `mcp-subagent.result.v1` 的字段、类型、语义和兼容规则。
+2. 文档覆盖两条接口：CLI `result --json` 与 MCP `get_run_result`，并给出差异字段对照。
+3. README 增加契约文档入口，避免集成方只靠源码反推。
+4. TODO/PLAN 同步到 T-080 状态。
+5. `cargo test -q` 通过（确保文档变更未引入回归）。
+完成记录：
+
+- 已新增版本化契约文档：
+  - 新建 `docs/result_contract_v1.md`，固定声明 `mcp-subagent.result.v1`；
+  - 文档覆盖共享字段、CLI/MCP 差异字段、`usage` 子结构、兼容策略与最小示例。
+- 已补 README 入口：
+  - `README.md` 在 `result --json` 契约说明处增加文档链接，集成方可直接跳转。
+- 已同步流程状态：
+  - `PLAN.md` / `TODO.md` 更新为 T-080 完成。
+- 已通过回归：
+  - `cargo test -q`（`158 + 35 + 3` tests passed）。
