@@ -1567,20 +1567,11 @@ impl McpSubagentServer {
                 "workspace/context preparation started",
                 json!({}),
             );
-            let _ = append_run_event(
-                &state_dir,
-                &task_handle_id,
-                "provider.boot.started",
-                "running",
-                "provider_boot",
-                "provider",
-                "provider boot started",
-                json!({}),
-            );
             let _serialize_guards =
                 acquire_serialize_locks_from_state(&state, lock_keys.clone()).await;
             let dispatch_started_at = Instant::now();
             let mut first_output_warned = false;
+            let mut first_output_seen = false;
             let mut dispatch_future = Box::pin(run_dispatch(
                 &loaded.spec,
                 &request,
@@ -1593,12 +1584,22 @@ impl McpSubagentServer {
                     output = &mut dispatch_future => break output,
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {
                         let elapsed_ms = dispatch_started_at.elapsed().as_millis() as u64;
+                        if !first_output_seen {
+                            if let Ok(events) = load_run_events(&state_dir, &task_handle_id) {
+                                first_output_seen = has_event_named(&events, "provider.first_output");
+                            }
+                        }
+                        let heartbeat_phase = if first_output_seen {
+                            "running"
+                        } else {
+                            "provider_boot"
+                        };
                         let _ = append_run_event(
                             &state_dir,
                             &task_handle_id,
                             "provider.heartbeat",
                             "running",
-                            "provider_boot",
+                            heartbeat_phase,
                             "runtime",
                             "still alive",
                             json!({
@@ -1606,6 +1607,7 @@ impl McpSubagentServer {
                             }),
                         );
                         if !first_output_warned
+                            && !first_output_seen
                             && elapsed_ms >= FIRST_OUTPUT_WARN_AFTER_SECS.saturating_mul(1000)
                         {
                             first_output_warned = true;

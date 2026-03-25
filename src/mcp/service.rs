@@ -93,6 +93,18 @@ pub(crate) async fn run_dispatch(
                         json!({}),
                     );
                 }
+                if matches!(current, crate::runtime::dispatcher::RunStatus::Launching) {
+                    let _ = append_run_event(
+                        state_dir,
+                        handle_id,
+                        "provider.boot.started",
+                        "running",
+                        "provider_boot",
+                        "provider",
+                        "provider boot started",
+                        json!({}),
+                    );
+                }
                 if matches!(
                     current,
                     crate::runtime::dispatcher::RunStatus::ParsingSummary
