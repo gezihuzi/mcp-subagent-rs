@@ -179,6 +179,7 @@ mcp-subagent logs <handle-id> --stderr
 mcp-subagent logs <handle-id> --follow
 mcp-subagent events <handle-id> --json
 mcp-subagent events <handle-id> --event provider.heartbeat --follow
+mcp-subagent events <handle-id> --event provider.first_output.warning --follow
 ```
 
 `timeline` is kept as a compatibility alias; prefer `events`.

@@ -2419,3 +2419,30 @@
   - `classify_block_reason_uses_stalled_phase_fallback`；
   - MCP roundtrip 新增 `block_reason` 字段存在性断言。
 - 已同步 README：命令面新增 `logs --follow` 参数与示例，`ps` 字段说明补 `block_reason`。
+
+## T-092 V0.10-P1-ProviderWaitSignalsAndFirstOutputWatchdog (Completed 2026-03-25)
+
+任务：补齐 provider 启动阻塞信号事件与 first-byte watchdog，让 `events/watch/logs` 能看到“卡在哪一层”。  
+验收标准：
+
+1. 异步执行链新增 `provider.boot.started` 事件。
+2. 异步执行链新增 first-byte watchdog：超过阈值无输出时写入 `provider.first_output.warning` 事件。
+3. 从 provider 输出/错误文本识别并写入 `provider.waiting_for_trust/auth/tool_approval/skill_discovery/workspace_scan` 事件。
+4. `block_reason` 归因逻辑支持上述新增事件（CLI + MCP 一致）。
+5. README 示例补充 first-byte warning 事件跟随命令。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已在 `src/mcp/tools.rs` 的 spawn worker 事件流增加：
+  - `provider.boot.started`（进入 provider 启动阶段）；
+  - `provider.first_output.warning`（默认 8s 无输出触发一次）。
+- 已新增 provider wait signal 识别：
+  - 文本命中后落盘 `provider.waiting_for_trust/auth/tool_approval/skill_discovery/workspace_scan` 事件；
+  - 识别来源覆盖 dispatch `stdout/stderr` 与错误路径 `error_message`。
+- 已更新 `block_reason` 规则：
+  - MCP 与 CLI 都支持从新增 wait 事件和 first-output warning 直接归因。
+- 已补测试：
+  - `src/mcp/tools.rs` 新增 wait signal / first-output warning 归因单测；
+  - `src/main.rs` 新增 wait event 归因单测。
+- 已同步 README 示例：
+  - 新增 `events --event provider.first_output.warning --follow`。

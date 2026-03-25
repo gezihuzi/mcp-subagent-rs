@@ -1607,6 +1607,9 @@ fn classify_block_reason_from_events(
             "provider.waiting_for_auth" => return Some("auth_required"),
             "provider.waiting_for_tool_approval" => return Some("tool_approval_required"),
             "provider.waiting_for_consent" => return Some("consent_required"),
+            "provider.waiting_for_skill_discovery" => return Some("skill_discovery"),
+            "provider.waiting_for_workspace_scan" => return Some("workspace_scan"),
+            "provider.first_output.warning" if stalled => return Some("provider_output_wait"),
             "run.queued" if stalled => return Some("queueing"),
             "workspace.prepare.started" if stalled => return Some("workspace_prepare"),
             "provider.probe.started" if stalled => return Some("provider_probe"),
@@ -4245,6 +4248,24 @@ target/
         let reason =
             super::classify_block_reason("running", Some("workspace_prepare"), true, &[], None);
         assert_eq!(reason.as_deref(), Some("workspace_prepare"));
+    }
+
+    #[test]
+    fn classify_block_reason_uses_provider_wait_event() {
+        let events = vec![super::RunTimelineEvent {
+            event: "provider.waiting_for_auth".to_string(),
+            timestamp: "2026-03-25T00:00:00Z".to_string(),
+            detail: serde_json::json!({}),
+            seq: Some(1),
+            ts: None,
+            level: None,
+            state: Some("running".to_string()),
+            phase: Some("waiting_for_auth".to_string()),
+            source: Some("provider".to_string()),
+            message: Some("provider is waiting for authentication".to_string()),
+        }];
+        let reason = super::classify_block_reason("running", Some("running"), true, &events, None);
+        assert_eq!(reason.as_deref(), Some("auth_required"));
     }
 
     #[test]

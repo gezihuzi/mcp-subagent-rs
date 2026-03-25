@@ -55,6 +55,7 @@ pub(crate) fn build_tool_router() -> ToolRouter<McpSubagentServer> {
 }
 
 const RUN_RESULT_CONTRACT_VERSION: &str = "mcp-subagent.result.v1";
+const FIRST_OUTPUT_WARN_AFTER_SECS: u64 = 8;
 
 fn is_terminal_status(status: &RunStatus) -> bool {
     matches!(
@@ -335,6 +336,106 @@ fn latest_event(events: &[RunEventOutput]) -> Option<&RunEventOutput> {
     events.last()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ProviderWaitSignal {
+    event: &'static str,
+    phase: &'static str,
+    reason: &'static str,
+    message: &'static str,
+}
+
+fn detect_provider_wait_signal(text: &str) -> Option<ProviderWaitSignal> {
+    let lowered = text.to_ascii_lowercase();
+    if contains_any(
+        &lowered,
+        &[
+            "trusted folder",
+            "trust this folder",
+            "waiting_for_trust",
+            "waiting for trust",
+            "trust required",
+        ],
+    ) {
+        return Some(ProviderWaitSignal {
+            event: "provider.waiting_for_trust",
+            phase: "waiting_for_trust",
+            reason: "trust_required",
+            message: "provider is waiting for workspace trust",
+        });
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "auth required",
+            "authentication",
+            "unauthorized",
+            "login required",
+            "credentials",
+            "api key",
+            "keychain",
+        ],
+    ) {
+        return Some(ProviderWaitSignal {
+            event: "provider.waiting_for_auth",
+            phase: "waiting_for_auth",
+            reason: "auth_required",
+            message: "provider is waiting for authentication",
+        });
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "tool approval",
+            "approval required",
+            "permission denied",
+            "consent required",
+            "approval mode",
+        ],
+    ) {
+        return Some(ProviderWaitSignal {
+            event: "provider.waiting_for_tool_approval",
+            phase: "waiting_for_tool_approval",
+            reason: "tool_approval_required",
+            message: "provider is waiting for tool approval",
+        });
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "skill conflict",
+            "skills conflict",
+            "skill discovery",
+            "find-skills",
+            ".agents/skills",
+            ".gemini/skills",
+        ],
+    ) {
+        return Some(ProviderWaitSignal {
+            event: "provider.waiting_for_skill_discovery",
+            phase: "waiting_for_skill_discovery",
+            reason: "skill_discovery",
+            message: "provider is scanning skills/discovery context",
+        });
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "workspace scan",
+            "scanning workspace",
+            "indexing workspace",
+            "workspace settings",
+        ],
+    ) {
+        return Some(ProviderWaitSignal {
+            event: "provider.waiting_for_workspace_scan",
+            phase: "waiting_for_workspace_scan",
+            reason: "workspace_scan",
+            message: "provider is scanning workspace context",
+        });
+    }
+    None
+}
+
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
@@ -450,6 +551,9 @@ fn classify_block_reason_from_events(
             "provider.waiting_for_auth" => return Some("auth_required"),
             "provider.waiting_for_tool_approval" => return Some("tool_approval_required"),
             "provider.waiting_for_consent" => return Some("consent_required"),
+            "provider.waiting_for_skill_discovery" => return Some("skill_discovery"),
+            "provider.waiting_for_workspace_scan" => return Some("workspace_scan"),
+            "provider.first_output.warning" if stalled => return Some("provider_output_wait"),
             "run.queued" if stalled => return Some("queueing"),
             "workspace.prepare.started" if stalled => return Some("workspace_prepare"),
             "provider.probe.started" if stalled => return Some("provider_probe"),
@@ -1163,9 +1267,20 @@ impl McpSubagentServer {
                 "workspace/context preparation started",
                 json!({}),
             );
+            let _ = append_run_event(
+                &state_dir,
+                &task_handle_id,
+                "provider.boot.started",
+                "running",
+                "provider_boot",
+                "provider",
+                "provider boot started",
+                json!({}),
+            );
             let _serialize_guards =
                 acquire_serialize_locks_from_state(&state, lock_keys.clone()).await;
             let dispatch_started_at = Instant::now();
+            let mut first_output_warned = false;
             let mut dispatch_future = Box::pin(run_dispatch(
                 &loaded.spec,
                 &request,
@@ -1177,6 +1292,7 @@ impl McpSubagentServer {
                 tokio::select! {
                     output = &mut dispatch_future => break output,
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                        let elapsed_ms = dispatch_started_at.elapsed().as_millis() as u64;
                         let _ = append_run_event(
                             &state_dir,
                             &task_handle_id,
@@ -1186,9 +1302,27 @@ impl McpSubagentServer {
                             "runtime",
                             "still alive",
                             json!({
-                                "elapsed_ms": dispatch_started_at.elapsed().as_millis() as u64,
+                                "elapsed_ms": elapsed_ms,
                             }),
                         );
+                        if !first_output_warned
+                            && elapsed_ms >= FIRST_OUTPUT_WARN_AFTER_SECS.saturating_mul(1000)
+                        {
+                            first_output_warned = true;
+                            let _ = append_run_event(
+                                &state_dir,
+                                &task_handle_id,
+                                "provider.first_output.warning",
+                                "running",
+                                "provider_boot",
+                                "runtime",
+                                "provider has not produced output yet",
+                                json!({
+                                    "elapsed_ms": elapsed_ms,
+                                    "warn_after_secs": FIRST_OUTPUT_WARN_AFTER_SECS,
+                                }),
+                            );
+                        }
                     }
                 }
             };
@@ -1211,6 +1345,39 @@ impl McpSubagentServer {
                         memory_resolution,
                         _workspace_cleanup: workspace_cleanup,
                     } = dispatch;
+                    if !(dispatch_result.stdout.trim().is_empty()
+                        && dispatch_result.stderr.trim().is_empty())
+                    {
+                        let _ = append_run_event(
+                            &state_dir,
+                            &task_handle_id,
+                            "provider.first_output",
+                            "running",
+                            "running",
+                            "provider",
+                            "provider produced output",
+                            json!({
+                                "stdout_bytes": dispatch_result.stdout.len(),
+                                "stderr_bytes": dispatch_result.stderr.len(),
+                            }),
+                        );
+                    }
+                    let wait_text =
+                        format!("{}\n{}", dispatch_result.stdout, dispatch_result.stderr);
+                    if let Some(signal) = detect_provider_wait_signal(&wait_text) {
+                        let _ = append_run_event(
+                            &state_dir,
+                            &task_handle_id,
+                            signal.event,
+                            "running",
+                            signal.phase,
+                            "provider",
+                            signal.message,
+                            json!({
+                                "reason": signal.reason,
+                            }),
+                        );
+                    }
                     let (artifact_index, artifacts) = build_runtime_artifacts(
                         &dispatch_result.summary,
                         &dispatch_result.stdout,
@@ -1282,13 +1449,28 @@ impl McpSubagentServer {
                     drop(workspace_cleanup);
                 }
                 Err(err) => {
+                    let err_text = err.to_string();
+                    if let Some(signal) = detect_provider_wait_signal(&err_text) {
+                        let _ = append_run_event(
+                            &state_dir,
+                            &task_handle_id,
+                            signal.event,
+                            "running",
+                            signal.phase,
+                            "provider",
+                            signal.message,
+                            json!({
+                                "reason": signal.reason,
+                            }),
+                        );
+                    }
                     let summary = failed_summary(err.message.clone().into_owned());
                     let (artifact_index, artifacts) =
                         build_runtime_artifacts(&summary, "", "", None);
                     record.status = RunStatus::Failed;
                     record.updated_at = OffsetDateTime::now_utc();
                     append_status_if_terminal(&mut record.status_history, RunStatus::Failed);
-                    record.error_message = Some(err.to_string());
+                    record.error_message = Some(err_text);
                     record.summary = Some(summary);
                     record.artifact_index = artifact_index;
                     record.artifacts = artifacts;
@@ -1457,5 +1639,34 @@ impl McpSubagentServer {
             path: input.path,
             content,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_block_reason_from_events, detect_provider_wait_signal, RunEventOutput};
+
+    #[test]
+    fn detect_provider_wait_signal_matches_trust_prompt() {
+        let signal = detect_provider_wait_signal("This folder is not trusted folder yet")
+            .expect("expected trust signal");
+        assert_eq!(signal.event, "provider.waiting_for_trust");
+        assert_eq!(signal.reason, "trust_required");
+    }
+
+    #[test]
+    fn classify_block_reason_from_events_recognizes_first_output_warning() {
+        let events = vec![RunEventOutput {
+            seq: Some(1),
+            event: "provider.first_output.warning".to_string(),
+            timestamp: "2026-03-25T00:00:00Z".to_string(),
+            state: Some("running".to_string()),
+            phase: Some("provider_boot".to_string()),
+            source: Some("runtime".to_string()),
+            message: Some("provider has not produced output yet".to_string()),
+            detail: serde_json::json!({}),
+        }];
+        let reason = classify_block_reason_from_events(&events, true);
+        assert_eq!(reason, Some("provider_output_wait"));
     }
 }
