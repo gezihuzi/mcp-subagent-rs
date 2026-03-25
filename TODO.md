@@ -2625,3 +2625,28 @@
   - MCP roundtrip 新增 `watch_run/watch_agent_events` 的 `block_reason/advice` 字段断言。
 - 已同步 README：
   - `watch_run/watch_agent_events` 输出说明补充 `block_reason/advice`。
+
+## T-099 V0.10-P1-StatusStatsAdviceSurface (Completed 2026-03-25)
+
+任务：把 `advice` 能力从 MCP watch 工具扩展到 `get_agent_status/get_agent_stats`，让仅轮询状态的 Host 也能拿到下一步建议。  
+验收标准：
+
+1. `AgentStatusOutput` 与 `GetAgentStatsOutput` 新增 `advice` 字段（默认空数组）。
+2. `get_agent_status/get_agent_stats` 复用统一建议生成逻辑（基于 status/phase/block_reason）。
+3. 新字段保持协议兼容（`serde(default)`，旧客户端可忽略）。
+4. MCP roundtrip 测试补齐 `get_agent_status/get_agent_stats` 的 `advice` 字段断言。
+5. README MCP 工具说明同步到 polling 能力。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 DTO：
+  - `src/mcp/dto.rs::AgentStatusOutput` 新增 `advice`；
+  - `src/mcp/dto.rs::GetAgentStatsOutput` 新增 `advice`；
+  - 两处均使用 `#[serde(default)]` 保持兼容。
+- 已升级工具实现：
+  - `src/mcp/tools.rs::get_agent_status` 接入 `build_watch_advice`；
+  - `src/mcp/tools.rs::build_agent_stats_output` 接入 `build_watch_advice`。
+- 已补 MCP roundtrip：
+  - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 新增 `status_after_done` 与 `stats` 的 `advice` 字段断言。
+- 已同步 README：
+  - MCP 工具说明补充 `get_agent_status/get_agent_stats` 返回 `block_reason/advice`。
