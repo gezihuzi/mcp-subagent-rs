@@ -2833,3 +2833,23 @@
   - `load_run_events_incremental_only_returns_appended_events`
   - `load_run_events_incremental_handles_partial_trailing_line`
 - 已通过 `cargo fmt && cargo test -q`（186 + 60 + 3 全通过）。
+
+## T-107 V0.10-P1-SyntheticEventProgressNoiseFix (Completed 2026-03-25)
+
+任务：修复你实测日志里 `phase_progress` 被 synthetic 衍生事件污染导致尾部出现多个 `0ms` phase 段的问题。  
+验收标准：
+
+1. 衍生事件（`workspace.prepare.completed/context.compile*/parse*`）保留事件可观测性，但显式标记 synthetic。
+2. `phase_progress` 计算忽略 synthetic 事件，不再出现末尾 `context_compile/parse=0ms` 抖动。
+3. 新增单测覆盖 synthetic 事件不会进入 phase_progress 分段。
+4. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/mcp/tools.rs::append_transition_derived_events`：
+  - 为衍生事件 detail 增加 `{ synthetic: true, derived_from: "status_history" }`。
+- 已升级 `src/main.rs`：
+  - 新增 `is_synthetic_progress_event`；
+  - `build_phase_progress_line` 跳过 synthetic 事件。
+- 已新增测试：
+  - `build_phase_progress_line_ignores_synthetic_events`。
+- 已通过 `cargo fmt && cargo test -q`（186 + 61 + 3 全通过）。

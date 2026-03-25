@@ -1916,6 +1916,14 @@ fn phase_matches_filter(phase: Option<&str>, filter: Option<&str>) -> bool {
     }
 }
 
+fn is_synthetic_progress_event(event: &RunTimelineEvent) -> bool {
+    event
+        .detail
+        .get("synthetic")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
 fn build_phase_progress_line(
     events: &[RunTimelineEvent],
     terminal: bool,
@@ -1933,6 +1941,9 @@ fn build_phase_progress_line(
     let mut segments: Vec<(String, u64, bool)> = Vec::new();
 
     for event in events {
+        if is_synthetic_progress_event(event) {
+            continue;
+        }
         let Some(ts) = event_time(event) else {
             continue;
         };
@@ -5309,6 +5320,56 @@ target/
         let now = super::parse_rfc3339("2026-03-25T00:00:05Z").expect("parse now");
         let line = super::build_phase_progress_line(&events, false, now, Some("provider_boot"));
         assert!(line.is_none());
+    }
+
+    #[test]
+    fn build_phase_progress_line_ignores_synthetic_events() {
+        let events = vec![
+            super::RunTimelineEvent {
+                event: "provider.first_output".to_string(),
+                timestamp: "2026-03-25T00:00:02Z".to_string(),
+                detail: serde_json::json!({}),
+                seq: Some(1),
+                ts: None,
+                level: None,
+                state: Some("running".to_string()),
+                phase: Some("running".to_string()),
+                source: Some("provider".to_string()),
+                message: None,
+            },
+            super::RunTimelineEvent {
+                event: "context.compile.started".to_string(),
+                timestamp: "2026-03-25T00:00:03Z".to_string(),
+                detail: serde_json::json!({
+                    "synthetic": true,
+                }),
+                seq: Some(2),
+                ts: None,
+                level: None,
+                state: Some("preparing".to_string()),
+                phase: Some("context_compile".to_string()),
+                source: Some("context".to_string()),
+                message: None,
+            },
+            super::RunTimelineEvent {
+                event: "run.completed".to_string(),
+                timestamp: "2026-03-25T00:00:04Z".to_string(),
+                detail: serde_json::json!({}),
+                seq: Some(3),
+                ts: None,
+                level: None,
+                state: Some("succeeded".to_string()),
+                phase: Some("completed".to_string()),
+                source: Some("runtime".to_string()),
+                message: None,
+            },
+        ];
+        let now = super::parse_rfc3339("2026-03-25T00:00:05Z").expect("parse now");
+        let line =
+            super::build_phase_progress_line(&events, true, now, None).expect("progress line");
+        assert!(!line.contains("context_compile"), "{line}");
+        assert!(line.contains("running="), "{line}");
+        assert!(line.contains("completed="), "{line}");
     }
 
     #[test]

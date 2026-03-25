@@ -797,7 +797,10 @@ fn append_transition_derived_events(
                 "context_compile",
                 "context",
                 "context compile started",
-                json!({}),
+                json!({
+                    "synthetic": true,
+                    "derived_from": "status_history",
+                }),
             )?;
         }
         if matches!(status, RunStatus::ParsingSummary) {
@@ -809,7 +812,10 @@ fn append_transition_derived_events(
                 "parse",
                 "parser",
                 "summary parse started",
-                json!({}),
+                json!({
+                    "synthetic": true,
+                    "derived_from": "status_history",
+                }),
             )?;
         }
 
@@ -824,7 +830,10 @@ fn append_transition_derived_events(
                 "workspace_prepare",
                 "workspace",
                 "workspace preparation completed",
-                json!({}),
+                json!({
+                    "synthetic": true,
+                    "derived_from": "status_history",
+                }),
             )?;
         }
         if matches!(previous, Some(RunStatus::CompilingContext))
@@ -838,7 +847,10 @@ fn append_transition_derived_events(
                 "context_compile",
                 "context",
                 "context compile completed",
-                json!({}),
+                json!({
+                    "synthetic": true,
+                    "derived_from": "status_history",
+                }),
             )?;
         }
         if matches!(previous, Some(RunStatus::ParsingSummary))
@@ -852,7 +864,10 @@ fn append_transition_derived_events(
                 "parse",
                 "parser",
                 "summary parse completed",
-                json!({}),
+                json!({
+                    "synthetic": true,
+                    "derived_from": "status_history",
+                }),
             )?;
         }
     }
