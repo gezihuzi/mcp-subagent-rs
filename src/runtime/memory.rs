@@ -391,9 +391,7 @@ fn parse_markdown_heading(line: &str) -> Option<(usize, String)> {
         return None;
     }
     let rest = &trimmed[level..];
-    let Some(first) = rest.chars().next() else {
-        return None;
-    };
+    let first = rest.chars().next()?;
     if !first.is_whitespace() {
         return None;
     }
