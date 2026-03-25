@@ -74,7 +74,7 @@ Both CLI and MCP responses include:
 - `model: string|null`
 - `provider_exit_code: number|null`
 - `retries: number`
-- `token_source: string` (`estimated|unknown`)
+- `token_source: string` (`native|estimated|mixed|unknown`)
 - `input_tokens: number|null`
 - `output_tokens: number|null`
 - `total_tokens: number|null`

@@ -249,6 +249,7 @@ pub(crate) fn load_run_record_from_disk(
         memory_resolution: persisted.memory_resolution,
         workspace: persisted.workspace,
         compiled_context_markdown: persisted.compiled_context_markdown,
+        usage: persisted.usage,
         execution_policy: persisted.execution_policy,
     }))
 }

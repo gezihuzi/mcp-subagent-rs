@@ -109,9 +109,47 @@ fn build_usage_output(record: &RunRecord) -> RunUsageOutput {
     };
     let input_tokens = estimate_tokens(estimated_prompt_bytes);
     let output_tokens = estimate_tokens(estimated_output_bytes);
-    let total_tokens = match (input_tokens, output_tokens) {
+    let estimated_total_tokens = match (input_tokens, output_tokens) {
         (Some(a), Some(b)) => Some(a.saturating_add(b)),
         _ => None,
+    };
+    let native_usage = record.usage.as_ref();
+    let mut used_native = false;
+    let mut used_estimated = false;
+    let input_tokens = if let Some(value) = native_usage.and_then(|usage| usage.input_tokens) {
+        used_native = true;
+        Some(value)
+    } else {
+        if input_tokens.is_some() {
+            used_estimated = true;
+        }
+        input_tokens
+    };
+    let output_tokens = if let Some(value) = native_usage.and_then(|usage| usage.output_tokens) {
+        used_native = true;
+        Some(value)
+    } else {
+        if output_tokens.is_some() {
+            used_estimated = true;
+        }
+        output_tokens
+    };
+    let total_tokens = if let Some(value) = native_usage.and_then(|usage| usage.total_tokens) {
+        used_native = true;
+        Some(value)
+    } else if let (Some(input), Some(output)) = (input_tokens, output_tokens) {
+        Some(input.saturating_add(output))
+    } else {
+        if estimated_total_tokens.is_some() {
+            used_estimated = true;
+        }
+        estimated_total_tokens
+    };
+    let token_source = match (used_native, used_estimated) {
+        (true, true) => "mixed",
+        (true, false) => "native",
+        (false, true) => "estimated",
+        (false, false) => "unknown",
     };
 
     RunUsageOutput {
@@ -133,11 +171,7 @@ fn build_usage_output(record: &RunRecord) -> RunUsageOutput {
             .as_ref()
             .and_then(|policy| policy.retries_used)
             .unwrap_or(0),
-        token_source: if input_tokens.is_some() || output_tokens.is_some() {
-            "estimated".to_string()
-        } else {
-            "unknown".to_string()
-        },
+        token_source: token_source.to_string(),
         input_tokens,
         output_tokens,
         total_tokens,
@@ -455,6 +489,7 @@ impl McpSubagentServer {
             structured_summary: map_summary_output(&result.summary),
             artifact_index: artifact_index.clone(),
         };
+        let native_usage = result.native_usage;
 
         let record = RunRecord {
             status: result.metadata.status,
@@ -472,6 +507,7 @@ impl McpSubagentServer {
             memory_resolution: Some(memory_resolution),
             workspace: Some(workspace),
             compiled_context_markdown: Some(result.compiled_context_markdown),
+            usage: native_usage,
             execution_policy,
         };
         drop(workspace_cleanup);
@@ -577,6 +613,7 @@ impl McpSubagentServer {
                     record.workspace = Some(workspace);
                     record.compiled_context_markdown =
                         Some(dispatch_result.compiled_context_markdown);
+                    record.usage = dispatch_result.native_usage;
                     drop(workspace_cleanup);
                 }
                 Err(err) => {
@@ -593,6 +630,7 @@ impl McpSubagentServer {
                     record.memory_resolution = None;
                     record.workspace = None;
                     record.compiled_context_markdown = None;
+                    record.usage = None;
                 }
             }
 

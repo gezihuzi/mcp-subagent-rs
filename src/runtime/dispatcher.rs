@@ -14,6 +14,7 @@ use crate::{
         context::ContextCompiler,
         runners::{AgentRunner, RunnerTerminalState},
         summary::{SummaryEnvelope, SummaryParseStatus},
+        usage::NativeUsage,
     },
     spec::{
         runtime_policy::{ApprovalPolicy, ParsePolicy, SandboxPolicy, WorkingDirPolicy},
@@ -98,6 +99,8 @@ pub struct DispatchResult {
     pub stdout: String,
     pub stderr: String,
     pub compiled_context_markdown: String,
+    #[serde(default)]
+    pub native_usage: Option<NativeUsage>,
 }
 
 #[derive(Debug)]
@@ -210,6 +213,11 @@ where
         tracker.metadata.retry_attempts = tracker.metadata.attempts_used.saturating_sub(1);
         tracker.transition(RunStatus::Finalizing);
         tracker.finish(final_status, final_error_message);
+        let native_usage = crate::runtime::usage::parse_native_usage(
+            &spec.core.provider,
+            &execution.stdout,
+            &execution.stderr,
+        );
 
         Ok(DispatchResult {
             metadata: tracker.metadata,
@@ -217,6 +225,7 @@ where
             stdout: execution.stdout,
             stderr: execution.stderr,
             compiled_context_markdown,
+            native_usage,
         })
     }
 }

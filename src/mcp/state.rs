@@ -7,6 +7,7 @@ use tokio::{sync::Mutex, task::JoinHandle};
 use crate::{
     mcp::dto::ArtifactOutput,
     probe::ProviderProbe,
+    runtime::usage::NativeUsage,
     runtime::{dispatcher::RunStatus, summary::SummaryEnvelope},
     spec::{
         runtime_policy::{
@@ -42,6 +43,7 @@ pub(crate) struct RunRecord {
     pub(crate) memory_resolution: Option<MemoryResolutionRecord>,
     pub(crate) workspace: Option<WorkspaceRecord>,
     pub(crate) compiled_context_markdown: Option<String>,
+    pub(crate) usage: Option<NativeUsage>,
     pub(crate) execution_policy: Option<ExecutionPolicyRecord>,
 }
 
@@ -75,6 +77,7 @@ impl RunRecord {
             memory_resolution: None,
             workspace: None,
             compiled_context_markdown: None,
+            usage: None,
             execution_policy,
         }
     }
@@ -222,6 +225,8 @@ pub(crate) struct PersistedRunRecord {
     #[serde(default)]
     pub(crate) compiled_context_markdown: Option<String>,
     #[serde(default)]
+    pub(crate) usage: Option<NativeUsage>,
+    #[serde(default)]
     pub(crate) execution_policy: Option<ExecutionPolicyRecord>,
 }
 
@@ -242,6 +247,7 @@ impl From<&RunRecord> for PersistedRunRecord {
             memory_resolution: value.memory_resolution.clone(),
             workspace: value.workspace.clone(),
             compiled_context_markdown: value.compiled_context_markdown.clone(),
+            usage: value.usage.clone(),
             execution_policy: value.execution_policy.clone(),
         }
     }

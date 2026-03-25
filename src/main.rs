@@ -142,6 +142,13 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    Timeline {
+        handle_id: String,
+        #[arg(long)]
+        event: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     Watch {
         handle_id: String,
         #[arg(long, default_value_t = 1000)]
@@ -509,6 +516,27 @@ async fn main() -> ExitCode {
             };
             info!("starting command: logs");
             read_logs(cfg, handle_id, stdout, stderr, json)
+        }
+        Commands::Timeline {
+            handle_id,
+            event,
+            json,
+        } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: timeline");
+            read_timeline(cfg, handle_id, event, json)
         }
         Commands::Watch {
             handle_id,
@@ -967,6 +995,14 @@ struct StoredExecutionPolicy {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
+struct StoredNativeUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
 struct StoredRunRecord {
     status: String,
     created_at: Option<String>,
@@ -979,6 +1015,7 @@ struct StoredRunRecord {
     spec_snapshot: Option<StoredRunSpecSnapshot>,
     execution_policy: Option<StoredExecutionPolicy>,
     compiled_context_markdown: Option<String>,
+    usage: Option<StoredNativeUsage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1047,6 +1084,30 @@ struct RunLogsOutput {
     handle_id: String,
     stdout: Option<String>,
     stderr: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+struct RunTimelineEvent {
+    event: String,
+    timestamp: String,
+    detail: serde_json::Value,
+}
+
+impl Default for RunTimelineEvent {
+    fn default() -> Self {
+        Self {
+            event: String::new(),
+            timestamp: String::new(),
+            detail: serde_json::Value::Null,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunTimelineOutput {
+    handle_id: String,
+    events: Vec<RunTimelineEvent>,
 }
 
 fn should_use_color_output() -> bool {
@@ -1127,6 +1188,10 @@ fn run_json_path(state_dir: &Path, handle_id: &str) -> PathBuf {
     runs_root(state_dir).join(handle_id).join("run.json")
 }
 
+fn run_events_path(state_dir: &Path, handle_id: &str) -> PathBuf {
+    runs_root(state_dir).join(handle_id).join("events.ndjson")
+}
+
 fn run_artifacts_root(state_dir: &Path, handle_id: &str) -> PathBuf {
     runs_root(state_dir).join(handle_id).join("artifacts")
 }
@@ -1170,6 +1235,30 @@ fn list_run_records(
     runs.sort_by_key(|(_, record)| parse_rfc3339(record.updated_at.as_str()));
     runs.reverse();
     Ok(runs)
+}
+
+fn load_run_events(
+    state_dir: &Path,
+    handle_id: &str,
+) -> std::result::Result<Vec<RunTimelineEvent>, String> {
+    let path = run_events_path(state_dir, handle_id);
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let mut events = Vec::new();
+    for (line_no, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event = serde_json::from_str::<RunTimelineEvent>(line).map_err(|err| {
+            format!(
+                "failed to parse {} line {}: {err}",
+                path.display(),
+                line_no + 1
+            )
+        })?;
+        events.push(event);
+    }
+    Ok(events)
 }
 
 fn parse_rfc3339(value: &str) -> Option<OffsetDateTime> {
@@ -1272,11 +1361,49 @@ fn build_usage_output(
         (None, Some(b)) => Some(b),
         (Some(a), Some(b)) => Some(a.saturating_add(b)),
     };
-    let input_tokens = estimate_tokens(estimated_prompt_bytes);
-    let output_tokens = estimate_tokens(estimated_output_bytes);
-    let total_tokens = match (input_tokens, output_tokens) {
+    let estimated_input_tokens = estimate_tokens(estimated_prompt_bytes);
+    let estimated_output_tokens = estimate_tokens(estimated_output_bytes);
+    let estimated_total_tokens = match (estimated_input_tokens, estimated_output_tokens) {
         (Some(a), Some(b)) => Some(a.saturating_add(b)),
         _ => None,
+    };
+    let native_usage = record.usage.as_ref();
+    let mut used_native = false;
+    let mut used_estimated = false;
+    let input_tokens = if let Some(value) = native_usage.and_then(|usage| usage.input_tokens) {
+        used_native = true;
+        Some(value)
+    } else {
+        if estimated_input_tokens.is_some() {
+            used_estimated = true;
+        }
+        estimated_input_tokens
+    };
+    let output_tokens = if let Some(value) = native_usage.and_then(|usage| usage.output_tokens) {
+        used_native = true;
+        Some(value)
+    } else {
+        if estimated_output_tokens.is_some() {
+            used_estimated = true;
+        }
+        estimated_output_tokens
+    };
+    let total_tokens = if let Some(value) = native_usage.and_then(|usage| usage.total_tokens) {
+        used_native = true;
+        Some(value)
+    } else if let (Some(input), Some(output)) = (input_tokens, output_tokens) {
+        Some(input.saturating_add(output))
+    } else {
+        if estimated_total_tokens.is_some() {
+            used_estimated = true;
+        }
+        estimated_total_tokens
+    };
+    let token_source = match (used_native, used_estimated) {
+        (true, true) => "mixed",
+        (true, false) => "native",
+        (false, true) => "estimated",
+        (false, false) => "unknown",
     };
 
     UsageStatsOutput {
@@ -1298,11 +1425,7 @@ fn build_usage_output(
             .as_ref()
             .and_then(|policy| policy.retries_used)
             .unwrap_or(0),
-        token_source: if input_tokens.is_some() || output_tokens.is_some() {
-            "estimated".to_string()
-        } else {
-            "unknown".to_string()
-        },
+        token_source: token_source.to_string(),
         input_tokens,
         output_tokens,
         total_tokens,
@@ -1531,6 +1654,48 @@ fn read_logs(
                 println!("{err}");
             }
         }
+    }
+    ExitCode::SUCCESS
+}
+
+fn filter_timeline_events(
+    mut events: Vec<RunTimelineEvent>,
+    event: Option<&str>,
+) -> Vec<RunTimelineEvent> {
+    if let Some(name) = event {
+        events.retain(|item| item.event == name);
+    }
+    events
+}
+
+fn read_timeline(
+    cfg: RuntimeConfig,
+    handle_id: String,
+    event: Option<String>,
+    json: bool,
+) -> ExitCode {
+    let events = match load_run_events(&cfg.state_dir, &handle_id) {
+        Ok(items) => items,
+        Err(err) => {
+            eprintln!("timeline failed: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let events = filter_timeline_events(events, event.as_deref());
+
+    if json {
+        print_json(&RunTimelineOutput { handle_id, events });
+        return ExitCode::SUCCESS;
+    }
+
+    if events.is_empty() {
+        println!("no events found");
+        return ExitCode::SUCCESS;
+    }
+
+    for item in events {
+        let detail = serde_json::to_string(&item.detail).unwrap_or_else(|_| "null".to_string());
+        println!("{} [{}] {}", item.timestamp, item.event, detail);
     }
     ExitCode::SUCCESS
 }
@@ -2319,8 +2484,8 @@ mod tests {
         bootstrap_bridge_config_template, build_selected_file_inputs, clean_state_dir,
         ensure_bootstrap_bridge_config, ensure_project_gitignore, resolve_init_root,
         ArtifactKindArg, Cli, Commands, ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput,
-        RunResultOutput, RunShowOutput, UsageStatsOutput, DEFAULT_BOOTSTRAP_ROOT_RELATIVE,
-        RESULT_CONTRACT_VERSION,
+        RunResultOutput, RunShowOutput, StoredNativeUsage, StoredRunRecord, StoredRunSpecSnapshot,
+        UsageStatsOutput, DEFAULT_BOOTSTRAP_ROOT_RELATIVE, RESULT_CONTRACT_VERSION,
     };
 
     #[test]
@@ -2795,6 +2960,58 @@ target/
     }
 
     #[test]
+    fn build_usage_output_prefers_native_tokens() {
+        let dir = tempdir().expect("tempdir");
+        let record = StoredRunRecord {
+            status: "succeeded".to_string(),
+            created_at: Some("2026-03-25T00:00:00Z".to_string()),
+            updated_at: "2026-03-25T00:00:01Z".to_string(),
+            spec_snapshot: Some(StoredRunSpecSnapshot {
+                name: "backend-coder".to_string(),
+                provider: "Codex".to_string(),
+                model: Some("gpt-5.3-codex".to_string()),
+            }),
+            usage: Some(StoredNativeUsage {
+                input_tokens: Some(111),
+                output_tokens: Some(222),
+                total_tokens: Some(333),
+            }),
+            ..StoredRunRecord::default()
+        };
+
+        let usage = super::build_usage_output(dir.path(), "run-native", &record);
+        assert_eq!(usage.token_source, "native");
+        assert_eq!(usage.input_tokens, Some(111));
+        assert_eq!(usage.output_tokens, Some(222));
+        assert_eq!(usage.total_tokens, Some(333));
+    }
+
+    #[test]
+    fn build_usage_output_marks_mixed_when_partial_native_usage_exists() {
+        let dir = tempdir().expect("tempdir");
+        let run_artifacts = dir.path().join("runs").join("run-mixed").join("artifacts");
+        fs::create_dir_all(&run_artifacts).expect("mkdir artifacts");
+        fs::write(run_artifacts.join("stdout.txt"), "x".repeat(400)).expect("write stdout");
+
+        let record = StoredRunRecord {
+            status: "succeeded".to_string(),
+            created_at: Some("2026-03-25T00:00:00Z".to_string()),
+            updated_at: "2026-03-25T00:00:01Z".to_string(),
+            usage: Some(StoredNativeUsage {
+                input_tokens: Some(50),
+                output_tokens: None,
+                total_tokens: None,
+            }),
+            ..StoredRunRecord::default()
+        };
+
+        let usage = super::build_usage_output(dir.path(), "run-mixed", &record);
+        assert_eq!(usage.token_source, "mixed");
+        assert_eq!(usage.input_tokens, Some(50));
+        assert!(usage.output_tokens.is_some(), "expected estimated fallback");
+    }
+
+    #[test]
     fn parses_logs_command_stderr_mode() {
         let cli = Cli::parse_from(["mcp-subagent", "logs", "handle-1", "--stderr", "--json"]);
         match cli.command {
@@ -2811,6 +3028,52 @@ target/
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_timeline_command_flags() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "timeline",
+            "handle-1",
+            "--event",
+            "parse",
+            "--json",
+        ]);
+        match cli.command {
+            Commands::Timeline {
+                handle_id,
+                event,
+                json,
+            } => {
+                assert_eq!(handle_id, "handle-1");
+                assert_eq!(event.as_deref(), Some("parse"));
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_run_events_and_filter_by_event_name() {
+        let dir = tempdir().expect("tempdir");
+        let run_dir = dir.path().join("runs").join("handle-1");
+        fs::create_dir_all(&run_dir).expect("mkdir run");
+        let events_path = run_dir.join("events.ndjson");
+        fs::write(
+            &events_path,
+            concat!(
+                "{\"event\":\"probe\",\"timestamp\":\"2026-03-25T00:00:00Z\",\"detail\":{\"status\":\"ready\"}}\n",
+                "{\"event\":\"parse\",\"timestamp\":\"2026-03-25T00:00:01Z\",\"detail\":{\"parse_status\":\"Validated\"}}\n"
+            ),
+        )
+        .expect("write events");
+
+        let events = super::load_run_events(dir.path(), "handle-1").expect("load events");
+        assert_eq!(events.len(), 2);
+        let filtered = super::filter_timeline_events(events, Some("parse"));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].event, "parse");
     }
 
     #[test]

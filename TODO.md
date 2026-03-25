@@ -2081,3 +2081,60 @@
   - `PLAN.md` / `TODO.md` 更新为 T-080 完成。
 - 已通过回归：
   - `cargo test -q`（`158 + 35 + 3` tests passed）。
+
+## T-081 V0.9-P1-NativeUsageCaptureAndFallbackMerge (Completed 2026-03-25)
+
+任务：把 usage 结果面升级为 native-first：优先采集 provider 原生 token usage，估算值仅做兜底。  
+验收标准：
+
+1. 运行时新增 native usage 解析与存储，`run.json` 持久化 usage 字段。
+2. CLI `show/result --json` 的 usage 计算优先使用 native usage，不可得时回落估算。
+3. MCP `get_run_result` 的 usage 计算同步 native-first，`token_source` 支持 `native|estimated|mixed|unknown`。
+4. 新增测试覆盖 native usage 解析关键路径（至少 codex tokens used 解析与无 usage 场景）。
+5. 文档契约更新 `token_source` 可选值。
+6. `cargo test -q` 通过。
+完成记录：
+
+- 已新增 native usage 解析链路：
+  - 新增 `src/runtime/usage.rs`，支持通用 token 字段解析与 Codex `tokens used` 解析；
+  - `DispatchResult` 新增 `native_usage`，在 dispatch 完成时随 stdout/stderr 一并产出。
+- 已落地持久化与读取：
+  - `src/mcp/state.rs` 的 `RunRecord`/`PersistedRunRecord` 新增 `usage` 字段；
+  - `src/mcp/persistence.rs` 已支持从 `run.json` 回填 usage。
+- 已完成 CLI/MCP usage 结果面收口：
+  - `src/main.rs` 与 `src/mcp/tools.rs` 的 usage 计算改为 native-first；
+  - `token_source` 细分为 `native|mixed|estimated|unknown`，native 不足时按字段级别回落估算。
+- 已补测试与契约文档：
+  - `src/runtime/usage.rs` 新增 native usage 解析测试（含 Codex multiline 与无 usage 场景）；
+  - `src/main.rs` 新增 usage source 选择测试；
+  - `docs/result_contract_v1.md` 已更新 `token_source` 可选值。
+- 已通过回归：
+  - `cargo test -q`（`161 + 37 + 3` tests passed）。
+
+## T-082 V0.9-P2-RunTimelineEventStreamCli (Completed 2026-03-25)
+
+任务：新增 run timeline 命令，直接读取并展示 `events.ndjson`，降低排障时手工翻目录成本。  
+验收标准：
+
+1. CLI 新增 `timeline <handle_id>` 子命令，默认文本输出事件流，并支持 `--json`。
+2. `timeline` 支持 `--event <name>` 过滤事件类型（例如 `parse`/`workspace`）。
+3. 当 run 或事件文件不存在时返回清晰错误，不静默成功。
+4. 新增单测覆盖命令解析与事件文件读取/过滤路径。
+5. README 命令面同步新增 `timeline`。
+6. `cargo test -q` 通过。
+完成记录：
+
+- 已新增 CLI 命令面：
+  - `src/main.rs` 新增 `timeline <handle_id> [--event ...] [--json]`；
+  - 默认文本输出事件流，`--json` 输出结构化 `RunTimelineOutput`。
+- 已落地事件读取与过滤：
+  - 新增 `run_events_path/load_run_events/filter_timeline_events`；
+  - 从 `state/runs/<id>/events.ndjson` 逐行解析，支持按 `--event` 过滤。
+- 已增强错误语义：
+  - run 或事件文件缺失、行级 JSON 损坏都会返回明确 `timeline failed: ...` 错误。
+- 已补测试与文档：
+  - 新增 `parses_timeline_command_flags`；
+  - 新增 `load_run_events_and_filter_by_event_name`；
+  - `README.md` 命令面新增 `timeline`。
+- 已通过回归：
+  - `cargo test -q`（`161 + 39 + 3` tests passed）。

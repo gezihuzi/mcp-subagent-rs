@@ -4,4 +4,5 @@ pub mod dispatcher;
 pub mod memory;
 pub mod runners;
 pub mod summary;
+pub mod usage;
 pub mod workspace;
