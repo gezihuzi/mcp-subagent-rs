@@ -27,10 +27,10 @@ mcp-subagent list-agents [--json]
 mcp-subagent ps [--limit ...] [--json]
 mcp-subagent show <handle-id> [--json]
 mcp-subagent result <handle-id> [--raw | --normalized | --summary] [--json]
-mcp-subagent logs <handle-id> [--stdout | --stderr] [--follow] [--interval-ms ...] [--timeout-secs ...] [--json]
+mcp-subagent logs <handle-id> [--stdout | --stderr] [--phase ...] [--follow] [--interval-ms ...] [--timeout-secs ...] [--phase-timeout-secs ...] [--json]
 mcp-subagent timeline <handle-id> [--event ...] [--json]
-mcp-subagent events <handle-id> [--event ...] [--follow] [--interval-ms ...] [--timeout-secs ...] [--json]
-mcp-subagent watch <handle-id> [--interval-ms ...] [--timeout-secs ...] [--json]
+mcp-subagent events <handle-id> [--event ...] [--phase ...] [--follow] [--interval-ms ...] [--timeout-secs ...] [--phase-timeout-secs ...] [--json]
+mcp-subagent watch <handle-id> [--phase ...] [--interval-ms ...] [--timeout-secs ...] [--phase-timeout-secs ...] [--json]
 mcp-subagent wait <handle-id> [--interval-ms ...] [--timeout-secs ...] [--json]
 mcp-subagent stats <handle-id> [--json]
 mcp-subagent run <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
@@ -170,6 +170,7 @@ mcp-subagent watch <handle-id>
 `ps` now includes observability fields for running jobs: `phase`, `elapsed`, `last_event`, `stalled`, `block_reason`.
 `stats` now includes stage timing splits (`workspace_prepare_ms`, `provider_boot_ms`), first-output watchdog markers, and aggregated `wait_reasons`.
 `watch`, `events --follow`, and `logs --follow` now emit a rolling `phase_progress` line (phase durations + current phase marker) in text mode.
+For long-running phases, use `--phase-timeout-secs` to fail fast when a phase does not progress.
 
 Inspect one run end-to-end:
 

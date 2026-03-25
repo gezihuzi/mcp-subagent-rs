@@ -140,11 +140,15 @@ enum Commands {
         #[arg(long, conflicts_with = "stdout")]
         stderr: bool,
         #[arg(long)]
+        phase: Option<String>,
+        #[arg(long)]
         follow: bool,
         #[arg(long, default_value_t = 1000)]
         interval_ms: u64,
         #[arg(long)]
         timeout_secs: Option<u64>,
+        #[arg(long)]
+        phase_timeout_secs: Option<u64>,
         #[arg(long)]
         json: bool,
     },
@@ -160,20 +164,28 @@ enum Commands {
         #[arg(long)]
         event: Option<String>,
         #[arg(long)]
+        phase: Option<String>,
+        #[arg(long)]
         follow: bool,
         #[arg(long, default_value_t = 1000)]
         interval_ms: u64,
         #[arg(long)]
         timeout_secs: Option<u64>,
         #[arg(long)]
+        phase_timeout_secs: Option<u64>,
+        #[arg(long)]
         json: bool,
     },
     Watch {
         handle_id: String,
+        #[arg(long)]
+        phase: Option<String>,
         #[arg(long, default_value_t = 1000)]
         interval_ms: u64,
         #[arg(long)]
         timeout_secs: Option<u64>,
+        #[arg(long)]
+        phase_timeout_secs: Option<u64>,
         #[arg(long)]
         json: bool,
     },
@@ -532,9 +544,11 @@ async fn main() -> ExitCode {
             handle_id,
             stdout,
             stderr,
+            phase,
             follow,
             interval_ms,
             timeout_secs,
+            phase_timeout_secs,
             json,
         } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -556,9 +570,11 @@ async fn main() -> ExitCode {
                 handle_id,
                 stdout,
                 stderr,
+                phase,
                 follow,
                 interval_ms,
                 timeout_secs,
+                phase_timeout_secs,
                 json,
             )
             .await
@@ -582,14 +598,16 @@ async fn main() -> ExitCode {
                 }
             };
             info!("starting command: timeline");
-            read_timeline(cfg, handle_id, event, json)
+            read_timeline(cfg, handle_id, event, None, json)
         }
         Commands::Events {
             handle_id,
             event,
+            phase,
             follow,
             interval_ms,
             timeout_secs,
+            phase_timeout_secs,
             json,
         } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -610,17 +628,21 @@ async fn main() -> ExitCode {
                 cfg,
                 handle_id,
                 event,
+                phase,
                 follow,
                 interval_ms,
                 timeout_secs,
+                phase_timeout_secs,
                 json,
             )
             .await
         }
         Commands::Watch {
             handle_id,
+            phase,
             interval_ms,
             timeout_secs,
+            phase_timeout_secs,
             json,
         } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -637,7 +659,16 @@ async fn main() -> ExitCode {
                 }
             };
             info!("starting command: watch");
-            watch_run(cfg, handle_id, interval_ms, timeout_secs, json).await
+            watch_run(
+                cfg,
+                handle_id,
+                phase,
+                interval_ms,
+                timeout_secs,
+                phase_timeout_secs,
+                json,
+            )
+            .await
         }
         Commands::Wait {
             handle_id,
@@ -1736,10 +1767,18 @@ fn is_terminal_status(status: &str) -> bool {
     matches!(status, "succeeded" | "failed" | "timed_out" | "cancelled")
 }
 
+fn phase_matches_filter(phase: Option<&str>, filter: Option<&str>) -> bool {
+    match filter {
+        None => true,
+        Some(filter) => phase.is_some_and(|phase| phase == filter),
+    }
+}
+
 fn build_phase_progress_line(
     events: &[RunTimelineEvent],
     terminal: bool,
     now: OffsetDateTime,
+    phase_filter: Option<&str>,
 ) -> Option<String> {
     if events.is_empty() {
         return None;
@@ -1791,6 +1830,12 @@ fn build_phase_progress_line(
 
     if segments.is_empty() {
         return None;
+    }
+    if let Some(filter) = phase_filter {
+        let current = segments.last().map(|(phase, _, _)| phase.as_str());
+        if !phase_matches_filter(current, Some(filter)) {
+            return None;
+        }
     }
 
     let span_parts = segments
@@ -2283,9 +2328,11 @@ async fn read_logs(
     handle_id: String,
     stdout_only: bool,
     stderr_only: bool,
+    phase: Option<String>,
     follow: bool,
     interval_ms: u64,
     timeout_secs: Option<u64>,
+    phase_timeout_secs: Option<u64>,
     json: bool,
 ) -> ExitCode {
     let stdout_enabled = !stderr_only;
@@ -2297,6 +2344,8 @@ async fn read_logs(
         let mut seen_stdout_bytes = 0usize;
         let mut seen_stderr_bytes = 0usize;
         let mut last_phase_progress = String::new();
+        let mut observed_phase: Option<String> = None;
+        let mut observed_phase_started_at = Instant::now();
         loop {
             let record = match load_run_record(&cfg.state_dir, &handle_id) {
                 Ok(record) => record,
@@ -2323,17 +2372,28 @@ async fn read_logs(
                 seen_event_count = events.len();
             }
             for event in events.iter().skip(seen_event_count) {
+                if phase.as_deref().is_some_and(|needle| {
+                    !event.phase.as_deref().is_some_and(|value| value == needle)
+                }) {
+                    continue;
+                }
                 if let Err(err) = print_event_follow_line(&handle_id, event, json) {
                     eprintln!("logs failed: {err}");
                     return ExitCode::from(1);
                 }
             }
             seen_event_count = events.len();
+            let current_phase = latest_event(&events).and_then(|evt| evt.phase.clone());
+            if current_phase != observed_phase {
+                observed_phase = current_phase;
+                observed_phase_started_at = Instant::now();
+            }
             if !json {
                 if let Some(line) = build_phase_progress_line(
                     &events,
                     is_terminal_status(record.status.as_str()),
                     OffsetDateTime::now_utc(),
+                    phase.as_deref(),
                 ) {
                     if line != last_phase_progress {
                         println!("{line}");
@@ -2393,6 +2453,17 @@ async fn read_logs(
             if is_terminal_status(record.status.as_str()) {
                 return ExitCode::SUCCESS;
             }
+            if phase_timeout_secs
+                .is_some_and(|secs| observed_phase_started_at.elapsed().as_secs() >= secs)
+            {
+                eprintln!(
+                    "logs follow phase timeout after {}s in phase `{}` for handle `{}`",
+                    phase_timeout_secs.unwrap_or_default(),
+                    observed_phase.as_deref().unwrap_or("unknown"),
+                    handle_id
+                );
+                return ExitCode::from(124);
+            }
             if timeout_secs.is_some_and(|secs| started.elapsed().as_secs() >= secs) {
                 eprintln!(
                     "logs follow timed out after {}s for handle `{}`",
@@ -2443,9 +2514,13 @@ async fn read_logs(
 fn filter_timeline_events(
     mut events: Vec<RunTimelineEvent>,
     event: Option<&str>,
+    phase: Option<&str>,
 ) -> Vec<RunTimelineEvent> {
     if let Some(name) = event {
         events.retain(|item| item.event == name);
+    }
+    if let Some(name) = phase {
+        events.retain(|item| item.phase.as_deref().is_some_and(|phase| phase == name));
     }
     events
 }
@@ -2454,6 +2529,7 @@ fn read_timeline(
     cfg: RuntimeConfig,
     handle_id: String,
     event: Option<String>,
+    phase: Option<String>,
     json: bool,
 ) -> ExitCode {
     let events = match load_run_events(&cfg.state_dir, &handle_id) {
@@ -2463,7 +2539,7 @@ fn read_timeline(
             return ExitCode::from(1);
         }
     };
-    let events = filter_timeline_events(events, event.as_deref());
+    let events = filter_timeline_events(events, event.as_deref(), phase.as_deref());
 
     if json {
         print_json(&RunTimelineOutput { handle_id, events });
@@ -2486,18 +2562,22 @@ async fn read_events(
     cfg: RuntimeConfig,
     handle_id: String,
     event: Option<String>,
+    phase: Option<String>,
     follow: bool,
     interval_ms: u64,
     timeout_secs: Option<u64>,
+    phase_timeout_secs: Option<u64>,
     json: bool,
 ) -> ExitCode {
     if !follow {
-        return read_timeline(cfg, handle_id, event, json);
+        return read_timeline(cfg, handle_id, event, phase, json);
     }
 
     let started = Instant::now();
     let mut seen_count = 0usize;
     let mut last_phase_progress = String::new();
+    let mut observed_phase: Option<String> = None;
+    let mut observed_phase_started_at = Instant::now();
     let sleep_ms = interval_ms.max(50);
     loop {
         let record = match load_run_record(&cfg.state_dir, &handle_id) {
@@ -2532,6 +2612,12 @@ async fn read_events(
             {
                 continue;
             }
+            if phase
+                .as_deref()
+                .is_some_and(|needle| !evt.phase.as_deref().is_some_and(|value| value == needle))
+            {
+                continue;
+            }
             if json {
                 match serde_json::to_string(evt) {
                     Ok(line) => println!("{line}"),
@@ -2558,11 +2644,17 @@ async fn read_events(
             }
         }
         seen_count = events.len();
+        let current_phase = latest_event(&events).and_then(|evt| evt.phase.clone());
+        if current_phase != observed_phase {
+            observed_phase = current_phase;
+            observed_phase_started_at = Instant::now();
+        }
         if !json {
             if let Some(line) = build_phase_progress_line(
                 &events,
                 is_terminal_status(record.status.as_str()),
                 OffsetDateTime::now_utc(),
+                phase.as_deref(),
             ) {
                 if line != last_phase_progress {
                     println!("{line}");
@@ -2573,6 +2665,17 @@ async fn read_events(
 
         if is_terminal_status(record.status.as_str()) {
             return ExitCode::SUCCESS;
+        }
+        if phase_timeout_secs
+            .is_some_and(|secs| observed_phase_started_at.elapsed().as_secs() >= secs)
+        {
+            eprintln!(
+                "events follow phase timeout after {}s in phase `{}` for handle `{}`",
+                phase_timeout_secs.unwrap_or_default(),
+                observed_phase.as_deref().unwrap_or("unknown"),
+                handle_id
+            );
+            return ExitCode::from(124);
         }
         if timeout_secs.is_some_and(|secs| started.elapsed().as_secs() >= secs) {
             eprintln!(
@@ -2853,14 +2956,18 @@ fn build_run_stats_output(
 async fn watch_run(
     cfg: RuntimeConfig,
     handle_id: String,
+    phase: Option<String>,
     interval_ms: u64,
     timeout_secs: Option<u64>,
+    phase_timeout_secs: Option<u64>,
     json: bool,
 ) -> ExitCode {
     let started = Instant::now();
     let mut last_status = String::new();
     let mut seen_event_count = 0usize;
     let mut last_phase_progress = String::new();
+    let mut observed_phase: Option<String> = None;
+    let mut observed_phase_started_at = Instant::now();
     loop {
         let record = match load_run_record(&cfg.state_dir, &handle_id) {
             Ok(record) => record,
@@ -2873,6 +2980,11 @@ async fn watch_run(
         if !json {
             if let Ok(events) = load_run_events(&cfg.state_dir, &handle_id) {
                 for event in events.iter().skip(seen_event_count) {
+                    if phase.as_deref().is_some_and(|needle| {
+                        !event.phase.as_deref().is_some_and(|value| value == needle)
+                    }) {
+                        continue;
+                    }
                     let detail =
                         serde_json::to_string(&event.detail).unwrap_or_else(|_| "null".to_string());
                     let message = event.message.as_deref().unwrap_or("");
@@ -2889,10 +3001,16 @@ async fn watch_run(
                     }
                 }
                 seen_event_count = events.len();
+                let current_phase = latest_event(&events).and_then(|evt| evt.phase.clone());
+                if current_phase != observed_phase {
+                    observed_phase = current_phase;
+                    observed_phase_started_at = Instant::now();
+                }
                 if let Some(line) = build_phase_progress_line(
                     &events,
                     is_terminal_status(record.status.as_str()),
                     OffsetDateTime::now_utc(),
+                    phase.as_deref(),
                 ) {
                     if line != last_phase_progress {
                         println!("{line}");
@@ -2911,6 +3029,17 @@ async fn watch_run(
                 return show_run(cfg, handle_id, true);
             }
             return ExitCode::SUCCESS;
+        }
+        if phase_timeout_secs
+            .is_some_and(|secs| observed_phase_started_at.elapsed().as_secs() >= secs)
+        {
+            eprintln!(
+                "watch phase timeout after {}s in phase `{}` for handle `{}`",
+                phase_timeout_secs.unwrap_or_default(),
+                observed_phase.as_deref().unwrap_or("unknown"),
+                handle_id
+            );
+            return ExitCode::from(124);
         }
 
         if timeout_secs.is_some_and(|secs| started.elapsed().as_secs() >= secs) {
@@ -4264,17 +4393,21 @@ target/
                 handle_id,
                 stdout,
                 stderr,
+                phase,
                 follow,
                 interval_ms,
                 timeout_secs,
+                phase_timeout_secs,
                 json,
             } => {
                 assert_eq!(handle_id, "handle-1");
                 assert!(!stdout);
                 assert!(stderr);
+                assert_eq!(phase, None);
                 assert!(!follow);
                 assert_eq!(interval_ms, 1000);
                 assert_eq!(timeout_secs, None);
+                assert_eq!(phase_timeout_secs, None);
                 assert!(json);
             }
             other => panic!("unexpected command: {other:?}"),
@@ -4287,11 +4420,15 @@ target/
             "mcp-subagent",
             "logs",
             "handle-1",
+            "--phase",
+            "provider_boot",
             "--follow",
             "--interval-ms",
             "250",
             "--timeout-secs",
             "12",
+            "--phase-timeout-secs",
+            "7",
             "--stdout",
         ]);
         match cli.command {
@@ -4299,17 +4436,21 @@ target/
                 handle_id,
                 stdout,
                 stderr,
+                phase,
                 follow,
                 interval_ms,
                 timeout_secs,
+                phase_timeout_secs,
                 json,
             } => {
                 assert_eq!(handle_id, "handle-1");
                 assert!(stdout);
                 assert!(!stderr);
+                assert_eq!(phase.as_deref(), Some("provider_boot"));
                 assert!(follow);
                 assert_eq!(interval_ms, 250);
                 assert_eq!(timeout_secs, Some(12));
+                assert_eq!(phase_timeout_secs, Some(7));
                 assert!(!json);
             }
             other => panic!("unexpected command: {other:?}"),
@@ -4348,27 +4489,35 @@ target/
             "handle-1",
             "--event",
             "provider.heartbeat",
+            "--phase",
+            "running",
             "--follow",
             "--interval-ms",
             "250",
             "--timeout-secs",
             "12",
+            "--phase-timeout-secs",
+            "8",
             "--json",
         ]);
         match cli.command {
             Commands::Events {
                 handle_id,
                 event,
+                phase,
                 follow,
                 interval_ms,
                 timeout_secs,
+                phase_timeout_secs,
                 json,
             } => {
                 assert_eq!(handle_id, "handle-1");
                 assert_eq!(event.as_deref(), Some("provider.heartbeat"));
+                assert_eq!(phase.as_deref(), Some("running"));
                 assert!(follow);
                 assert_eq!(interval_ms, 250);
                 assert_eq!(timeout_secs, Some(12));
+                assert_eq!(phase_timeout_secs, Some(8));
                 assert!(json);
             }
             other => panic!("unexpected command: {other:?}"),
@@ -4392,7 +4541,7 @@ target/
 
         let events = super::load_run_events(dir.path(), "handle-1").expect("load events");
         assert_eq!(events.len(), 2);
-        let filtered = super::filter_timeline_events(events, Some("parse"));
+        let filtered = super::filter_timeline_events(events, Some("parse"), None);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].event, "parse");
     }
@@ -4545,7 +4694,8 @@ target/
             },
         ];
         let now = super::parse_rfc3339("2026-03-25T00:00:05Z").expect("parse now");
-        let line = super::build_phase_progress_line(&events, false, now).expect("progress line");
+        let line =
+            super::build_phase_progress_line(&events, false, now, None).expect("progress line");
         assert!(line.contains("accepted="), "{line}");
         assert!(line.contains("provider_probe="), "{line}");
         assert!(line.contains("running*="), "{line}");
@@ -4567,9 +4717,29 @@ target/
             message: None,
         }];
         let now = super::parse_rfc3339("2026-03-25T00:00:05Z").expect("parse now");
-        let line = super::build_phase_progress_line(&events, true, now).expect("progress line");
+        let line =
+            super::build_phase_progress_line(&events, true, now, None).expect("progress line");
         assert!(line.contains("completed="), "{line}");
         assert!(!line.contains("*="), "{line}");
+    }
+
+    #[test]
+    fn build_phase_progress_line_respects_phase_filter() {
+        let events = vec![super::RunTimelineEvent {
+            event: "provider.first_output".to_string(),
+            timestamp: "2026-03-25T00:00:02Z".to_string(),
+            detail: serde_json::json!({}),
+            seq: Some(1),
+            ts: None,
+            level: None,
+            state: Some("running".to_string()),
+            phase: Some("running".to_string()),
+            source: Some("provider".to_string()),
+            message: None,
+        }];
+        let now = super::parse_rfc3339("2026-03-25T00:00:05Z").expect("parse now");
+        let line = super::build_phase_progress_line(&events, false, now, Some("provider_boot"));
+        assert!(line.is_none());
     }
 
     #[test]
@@ -4586,14 +4756,44 @@ target/
         match cli.command {
             Commands::Watch {
                 handle_id,
+                phase,
                 interval_ms,
                 timeout_secs,
+                phase_timeout_secs,
                 json,
             } => {
                 assert_eq!(handle_id, "handle-1");
+                assert_eq!(phase, None);
                 assert_eq!(interval_ms, 250);
                 assert_eq!(timeout_secs, Some(15));
+                assert_eq!(phase_timeout_secs, None);
                 assert!(!json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_watch_phase_timeout_flags() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "watch",
+            "handle-1",
+            "--phase",
+            "provider_boot",
+            "--phase-timeout-secs",
+            "10",
+        ]);
+        match cli.command {
+            Commands::Watch {
+                handle_id,
+                phase,
+                phase_timeout_secs,
+                ..
+            } => {
+                assert_eq!(handle_id, "handle-1");
+                assert_eq!(phase.as_deref(), Some("provider_boot"));
+                assert_eq!(phase_timeout_secs, Some(10));
             }
             other => panic!("unexpected command: {other:?}"),
         }

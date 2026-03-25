@@ -2504,3 +2504,39 @@
   - `build_phase_progress_line_terminal_has_no_current_marker`。
 - 已同步 README：
   - 增加 `watch/events/logs --follow` phase_progress 说明。
+
+## T-095 V0.10-P1-PhaseFilterAndPhaseTimeout (Completed 2026-03-25)
+
+任务：为 follow 观察命令补充阶段过滤与阶段超时，提升“只盯某阶段排障”的效率。  
+验收标准：
+
+1. `watch/events/logs` 新增 `--phase <name>` 过滤参数（事件输出按 phase 过滤）。
+2. `watch/events/logs` 新增 `--phase-timeout-secs <n>`（阶段长期不变化时超时退出）。
+3. `events` 非 follow 模式也支持 `--phase` 过滤。
+4. `phase_progress` 与 `--phase` 联动（非目标 phase 时不输出 progress 行）。
+5. JSON 模式兼容不破坏：`events/logs --json` 仍只输出 JSON。
+6. 命令解析与 progress/filter 行为有测试覆盖。
+7. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 CLI 命令面：
+  - `Commands::Watch/Events/Logs` 新增 `phase` 与 `phase_timeout_secs`；
+  - `read_events/read_logs/watch_run` 执行链同步接入。
+- 已实现 phase 过滤：
+  - `filter_timeline_events` 新增 phase 过滤参数；
+  - `events` follow 与非 follow 均可按 phase 过滤事件输出；
+  - `watch/logs --follow` 文本事件输出按 phase 过滤。
+- 已实现 phase timeout：
+  - 在 `watch/events/logs --follow` 循环维护 `observed_phase + observed_phase_started_at`；
+  - 超过 `--phase-timeout-secs` 后返回 `124` 并输出超时原因。
+- 已升级 phase progress：
+  - `build_phase_progress_line` 新增 `phase_filter` 参数；
+  - phase filter 不匹配时不输出 progress 行，避免噪音。
+- 已补测试：
+  - `parses_logs_command_stderr_mode/parses_logs_follow_flags`（新增 phase/phase-timeout 断言）；
+  - `parses_events_command_flags`（新增 phase/phase-timeout 断言）；
+  - `parses_watch_command_flags/parses_watch_phase_timeout_flags`；
+  - `build_phase_progress_line_*` 增加 phase filter 场景。
+- 已同步 README：
+  - 命令面新增 `--phase` / `--phase-timeout-secs`；
+  - 增加 phase-timeout 使用说明。
