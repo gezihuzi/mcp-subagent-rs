@@ -83,6 +83,7 @@ Run one command for minimal local acceptance:
 
 Default `init` writes to an isolated bootstrap root (`./.mcp-subagent/bootstrap`) to avoid clobbering existing repo files.
 It also writes a project bridge config at `./.mcp-subagent/config.toml`, so running from project root auto-resolves bootstrap `agents_dir/state_dir`.
+For bootstrap mode, `init` also patches project `.gitignore` idempotently to ignore runtime artifacts.
 Use this fixed order for first-time setup:
 
 ```bash

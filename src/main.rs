@@ -28,8 +28,15 @@ use tracing::info;
 
 const DEFAULT_BOOTSTRAP_ROOT_RELATIVE: &str = ".mcp-subagent/bootstrap";
 const PROJECT_BRIDGE_CONFIG_RELATIVE: &str = ".mcp-subagent/config.toml";
+const PROJECT_GITIGNORE_RELATIVE: &str = ".gitignore";
 const BRIDGE_AGENTS_DIR_RELATIVE: &str = "./.mcp-subagent/bootstrap/agents";
 const BRIDGE_STATE_DIR_RELATIVE: &str = "./.mcp-subagent/bootstrap/.mcp-subagent/state";
+const GITIGNORE_RUNTIME_HEADER: &str = "# mcp-subagent runtime artifacts";
+const GITIGNORE_RUNTIME_RULES: [&str; 3] = [
+    ".mcp-subagent/state/",
+    ".mcp-subagent/logs/",
+    ".mcp-subagent/bootstrap/",
+];
 
 #[derive(Debug, Parser)]
 #[command(name = "mcp-subagent", version, about = "MCP subagent runtime")]
@@ -572,6 +579,20 @@ fn init_command(
                         return ExitCode::from(1);
                     }
                 }
+                match ensure_project_gitignore(&cwd) {
+                    Ok((path, true)) => report.notes.push(format!(
+                        "Updated `{}` with mcp-subagent runtime ignore rules.",
+                        path.display()
+                    )),
+                    Ok((path, false)) => report.notes.push(format!(
+                        "Using existing `.gitignore` rules in `{}` (no changes).",
+                        path.display()
+                    )),
+                    Err(err) => {
+                        eprintln!("init failed: {err}");
+                        return ExitCode::from(1);
+                    }
+                }
             }
             if json {
                 print_json(&report);
@@ -643,6 +664,94 @@ state_dir = "{state_dir}"
         agents_dir = BRIDGE_AGENTS_DIR_RELATIVE,
         state_dir = BRIDGE_STATE_DIR_RELATIVE
     )
+}
+
+fn ensure_project_gitignore(cwd: &Path) -> std::result::Result<(PathBuf, bool), String> {
+    let gitignore_path = cwd.join(PROJECT_GITIGNORE_RELATIVE);
+    if gitignore_path.is_dir() {
+        return Err(format!(
+            "project .gitignore path is a directory: {}",
+            gitignore_path.display()
+        ));
+    }
+
+    let mut content = if gitignore_path.exists() {
+        fs::read_to_string(&gitignore_path)
+            .map_err(|err| format!("failed to read .gitignore: {err}"))?
+    } else {
+        String::new()
+    };
+
+    let existing_rules = content
+        .lines()
+        .filter_map(normalize_gitignore_rule)
+        .collect::<Vec<_>>();
+    if existing_rules
+        .iter()
+        .any(|rule| is_mcp_subagent_catch_all(rule))
+    {
+        return Ok((gitignore_path, false));
+    }
+
+    let missing_rules = GITIGNORE_RUNTIME_RULES
+        .iter()
+        .filter(|target| {
+            !existing_rules
+                .iter()
+                .any(|rule| gitignore_rule_matches_target(rule, target))
+        })
+        .copied()
+        .collect::<Vec<_>>();
+
+    if missing_rules.is_empty() {
+        return Ok((gitignore_path, false));
+    }
+
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    if !content.is_empty() {
+        content.push('\n');
+    }
+    content.push_str(GITIGNORE_RUNTIME_HEADER);
+    content.push('\n');
+    for rule in missing_rules {
+        content.push_str(rule);
+        content.push('\n');
+    }
+
+    fs::write(&gitignore_path, content)
+        .map_err(|err| format!("failed to write .gitignore: {err}"))?;
+    Ok((gitignore_path, true))
+}
+
+fn normalize_gitignore_rule(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') {
+        return None;
+    }
+    let without_dot = trimmed.strip_prefix("./").unwrap_or(trimmed);
+    let normalized = without_dot.strip_prefix('/').unwrap_or(without_dot);
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(normalized.to_string())
+}
+
+fn is_mcp_subagent_catch_all(rule: &str) -> bool {
+    matches!(rule.trim_end_matches('/'), ".mcp-subagent") || matches!(rule, ".mcp-subagent/**")
+}
+
+fn gitignore_rule_matches_target(rule: &str, target: &str) -> bool {
+    if is_mcp_subagent_catch_all(rule) {
+        return true;
+    }
+    let normalized_target = target
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .trim_end_matches('/');
+    rule.trim_end_matches('/') == normalized_target
 }
 
 fn connect_snippet_command(cfg: RuntimeConfig, host: ConnectHostArg) -> ExitCode {
@@ -1047,8 +1156,9 @@ mod tests {
 
     use crate::{
         bootstrap_bridge_config_template, build_selected_file_inputs,
-        ensure_bootstrap_bridge_config, resolve_init_root, ArtifactKindArg, Cli, Commands,
-        ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput, DEFAULT_BOOTSTRAP_ROOT_RELATIVE,
+        ensure_bootstrap_bridge_config, ensure_project_gitignore, resolve_init_root,
+        ArtifactKindArg, Cli, Commands, ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput,
+        DEFAULT_BOOTSTRAP_ROOT_RELATIVE,
     };
 
     #[test]
@@ -1230,6 +1340,55 @@ mod tests {
         assert!(written);
         let content = fs::read_to_string(&resolved).expect("read");
         assert_eq!(content, bootstrap_bridge_config_template());
+    }
+
+    #[test]
+    fn creates_gitignore_when_missing() {
+        let dir = tempdir().expect("tempdir");
+        let (path, updated) = ensure_project_gitignore(dir.path()).expect("ensure gitignore");
+        assert!(updated);
+        assert_eq!(path, dir.path().join(".gitignore"));
+        let content = fs::read_to_string(path).expect("read");
+        assert!(content.contains("# mcp-subagent runtime artifacts"));
+        assert!(content.contains(".mcp-subagent/state/"));
+        assert!(content.contains(".mcp-subagent/logs/"));
+        assert!(content.contains(".mcp-subagent/bootstrap/"));
+    }
+
+    #[test]
+    fn appends_only_missing_gitignore_rules() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(".gitignore");
+        fs::write(
+            &path,
+            "\
+target/
+.mcp-subagent/state/
+",
+        )
+        .expect("write gitignore");
+
+        let (resolved, updated) = ensure_project_gitignore(dir.path()).expect("ensure gitignore");
+        assert_eq!(resolved, path);
+        assert!(updated);
+        let content = fs::read_to_string(resolved).expect("read");
+        assert!(content.contains("target/"));
+        assert!(content.contains(".mcp-subagent/state/"));
+        assert!(content.contains(".mcp-subagent/logs/"));
+        assert!(content.contains(".mcp-subagent/bootstrap/"));
+    }
+
+    #[test]
+    fn preserves_gitignore_when_catch_all_rule_exists() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(".gitignore");
+        fs::write(&path, ".mcp-subagent/\n").expect("write gitignore");
+
+        let (resolved, updated) = ensure_project_gitignore(dir.path()).expect("ensure gitignore");
+        assert_eq!(resolved, path);
+        assert!(!updated);
+        let content = fs::read_to_string(resolved).expect("read");
+        assert_eq!(content, ".mcp-subagent/\n");
     }
 
     #[test]

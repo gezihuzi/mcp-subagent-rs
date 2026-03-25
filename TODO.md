@@ -1686,3 +1686,27 @@
 - 已同步文档与忽略规则：
   - `README.md` Quick Onboarding 改为 `init -> validate -> doctor -> connect-snippet --host ...`；
   - `.gitignore` 新增 `.mcp-subagent/state/`、`.mcp-subagent/logs/`、`.mcp-subagent/bootstrap/`。
+
+## T-067 V0.8-P0-InitTargetGitignoreAutopatch (Completed 2026-03-25)
+
+任务：在默认 bootstrap `init` 路径中自动收口“目标项目 `.gitignore` 规则”，避免用户手工维护运行态忽略项。  
+验收标准：
+
+1. 默认 bootstrap 模式执行 `init` 时自动处理目标项目根 `.gitignore`。
+2. 若 `.gitignore` 不存在，则自动创建并写入 mcp-subagent 运行态忽略规则。
+3. 若 `.gitignore` 已存在且仅缺少部分规则，则只追加缺失项，不破坏既有内容。
+4. 若已有 catch-all 规则（如 `.mcp-subagent/`），则不重复写入。
+5. 回归通过：`cargo fmt`、`cargo test -q`、`./scripts/smoke_v08.sh`。
+完成记录：
+
+- 已新增目标项目 `.gitignore` 幂等补丁逻辑：
+  - `src/main.rs` 新增 `ensure_project_gitignore`；
+  - 默认 bootstrap `init` 后自动调用，并在 `notes` 输出“已更新/已存在无需改动”。
+- 已实现规则判定与最小写入策略：
+  - 支持无文件创建；
+  - 支持已有内容时仅补缺失规则；
+  - 支持 `.mcp-subagent/` / `.mcp-subagent/**` catch-all 场景跳过更新。
+- 已补测试覆盖：
+  - 缺失文件创建；
+  - 部分规则补齐；
+  - catch-all 已存在保持不变。
