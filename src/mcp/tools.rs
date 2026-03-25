@@ -98,7 +98,7 @@ fn build_usage_output(record: &RunRecord) -> RunUsageOutput {
     let estimated_prompt_bytes = record
         .compiled_context_markdown
         .as_ref()
-        .map(|value| value.as_bytes().len() as u64);
+        .map(|value| value.len() as u64);
     let stdout_bytes = read_text_artifact(record, "stdout.txt").map(|text| text.len() as u64);
     let stderr_bytes = read_text_artifact(record, "stderr.txt").map(|text| text.len() as u64);
     let estimated_output_bytes = match (stdout_bytes, stderr_bytes) {
