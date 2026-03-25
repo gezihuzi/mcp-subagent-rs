@@ -95,6 +95,14 @@ enum Commands {
         #[arg(long)]
         run_host: bool,
     },
+    Clean {
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
     ListAgents {
         #[arg(long)]
         json: bool,
@@ -321,6 +329,23 @@ async fn main() -> ExitCode {
             };
             info!("starting command: connect");
             connect_command(cfg, host, run_host)
+        }
+        Commands::Clean { all, dry_run, json } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: clean");
+            clean_command(cfg, all, dry_run, json)
         }
         Commands::ListAgents { json } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -574,6 +599,124 @@ fn doctor(cfg: RuntimeConfig, json: bool) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CleanEntry {
+    path: PathBuf,
+    bytes: u64,
+    action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CleanReport {
+    state_dir: PathBuf,
+    mode: String,
+    dry_run: bool,
+    reclaimed_bytes: u64,
+    cleaned: Vec<CleanEntry>,
+    missing: Vec<PathBuf>,
+    errors: Vec<String>,
+}
+
+fn clean_command(cfg: RuntimeConfig, all: bool, dry_run: bool, json: bool) -> ExitCode {
+    let report = clean_state_dir(&cfg.state_dir, all, dry_run);
+    if json {
+        print_json(&report);
+    } else {
+        print_clean_report(&report);
+    }
+    if report.errors.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn clean_state_dir(state_dir: &Path, all: bool, dry_run: bool) -> CleanReport {
+    let mut report = CleanReport {
+        state_dir: state_dir.to_path_buf(),
+        mode: if all {
+            "all".to_string()
+        } else {
+            "runtime".to_string()
+        },
+        dry_run,
+        reclaimed_bytes: 0,
+        cleaned: Vec::new(),
+        missing: Vec::new(),
+        errors: Vec::new(),
+    };
+    let targets = if all {
+        vec![state_dir.to_path_buf()]
+    } else {
+        vec![
+            state_dir.join("runs"),
+            state_dir.join("server.log"),
+            state_dir.join("logs"),
+        ]
+    };
+
+    for path in targets {
+        if !path.exists() {
+            report.missing.push(path);
+            continue;
+        }
+
+        let bytes = match estimate_path_size(&path) {
+            Ok(value) => value,
+            Err(err) => {
+                report.errors.push(format!(
+                    "failed to calculate size for `{}`: {err}",
+                    path.display()
+                ));
+                0
+            }
+        };
+
+        if !dry_run {
+            let removal_result = if path.is_dir() {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+            if let Err(err) = removal_result {
+                report
+                    .errors
+                    .push(format!("failed to remove `{}`: {err}", path.display()));
+                continue;
+            }
+        }
+
+        report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(bytes);
+        report.cleaned.push(CleanEntry {
+            path,
+            bytes,
+            action: if dry_run {
+                "would_remove".to_string()
+            } else {
+                "removed".to_string()
+            },
+        });
+    }
+
+    report
+}
+
+fn estimate_path_size(path: &Path) -> std::result::Result<u64, std::io::Error> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_file() || metadata.file_type().is_symlink() {
+        return Ok(metadata.len());
+    }
+    if metadata.is_dir() {
+        let mut total = 0u64;
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            total = total.saturating_add(estimate_path_size(&entry.path())?);
+        }
+        return Ok(total);
+    }
+    Ok(0)
 }
 
 fn init_command(
@@ -1271,6 +1414,37 @@ fn print_init_report(report: &InitReport) {
     }
 }
 
+fn print_clean_report(report: &CleanReport) {
+    println!("# mcp-subagent clean");
+    println!("state_dir: {}", report.state_dir.display());
+    println!("mode: {}", report.mode);
+    println!("dry_run: {}", report.dry_run);
+    if !report.cleaned.is_empty() {
+        println!("cleaned:");
+        for entry in &report.cleaned {
+            println!(
+                "- [{}] {} ({} bytes)",
+                entry.action,
+                entry.path.display(),
+                entry.bytes
+            );
+        }
+    }
+    if !report.missing.is_empty() {
+        println!("missing:");
+        for path in &report.missing {
+            println!("- {}", path.display());
+        }
+    }
+    println!("reclaimed_bytes: {}", report.reclaimed_bytes);
+    if !report.errors.is_empty() {
+        println!("errors:");
+        for err in &report.errors {
+            println!("- {err}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1282,7 +1456,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        bootstrap_bridge_config_template, build_selected_file_inputs,
+        bootstrap_bridge_config_template, build_selected_file_inputs, clean_state_dir,
         ensure_bootstrap_bridge_config, ensure_project_gitignore, resolve_init_root,
         ArtifactKindArg, Cli, Commands, ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput,
         DEFAULT_BOOTSTRAP_ROOT_RELATIVE,
@@ -1551,6 +1725,82 @@ target/
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_clean_command_flags() {
+        let cli = Cli::parse_from(["mcp-subagent", "clean", "--all", "--dry-run", "--json"]);
+        match cli.command {
+            Commands::Clean { all, dry_run, json } => {
+                assert!(all);
+                assert!(dry_run);
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clean_runtime_targets_removes_runs_and_logs() {
+        let dir = tempdir().expect("tempdir");
+        let state_dir = dir.path().join("state");
+        let runs_dir = state_dir.join("runs/handle-1");
+        let logs_dir = state_dir.join("logs");
+        let server_log = state_dir.join("server.log");
+        fs::create_dir_all(&runs_dir).expect("create runs");
+        fs::create_dir_all(&logs_dir).expect("create logs");
+        fs::write(runs_dir.join("stdout.log"), "out").expect("write run log");
+        fs::write(logs_dir.join("app.log"), "log").expect("write app log");
+        fs::write(&server_log, "server").expect("write server log");
+
+        let report = clean_state_dir(&state_dir, false, false);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert!(!state_dir.join("runs").exists());
+        assert!(!state_dir.join("logs").exists());
+        assert!(!server_log.exists());
+        assert!(!report.cleaned.is_empty());
+    }
+
+    #[test]
+    fn clean_dry_run_keeps_files() {
+        let dir = tempdir().expect("tempdir");
+        let state_dir = dir.path().join("state");
+        let runs_dir = state_dir.join("runs/handle-1");
+        fs::create_dir_all(&runs_dir).expect("create runs");
+        fs::write(runs_dir.join("stdout.log"), "out").expect("write run log");
+
+        let report = clean_state_dir(&state_dir, false, true);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert!(state_dir.join("runs").exists());
+        assert!(report
+            .cleaned
+            .iter()
+            .all(|entry| entry.action == "would_remove"));
+    }
+
+    #[test]
+    fn clean_all_removes_state_dir() {
+        let dir = tempdir().expect("tempdir");
+        let state_dir = dir.path().join("state");
+        fs::create_dir_all(state_dir.join("runs/handle-1")).expect("create runs");
+        fs::write(state_dir.join("server.log"), "server").expect("write server log");
+
+        let report = clean_state_dir(&state_dir, true, false);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert!(!state_dir.exists());
+        assert_eq!(report.mode, "all");
     }
 
     #[test]

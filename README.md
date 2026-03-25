@@ -22,6 +22,7 @@ mcp-subagent validate [AGENTS_DIR]
 mcp-subagent init [--preset claude-opus-supervisor|codex-primary-builder|gemini-frontend-team|local-ollama-fallback|minimal-single-provider] [--root-dir ... | --in-place] [--force] [--json]
 mcp-subagent connect --host claude|codex|gemini [--run-host]
 mcp-subagent connect-snippet --host claude|codex|gemini
+mcp-subagent clean [--all] [--dry-run] [--json]
 mcp-subagent list-agents [--json]
 mcp-subagent run <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
 mcp-subagent spawn <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
@@ -128,6 +129,21 @@ Optional local run with Ollama:
 
 - set `provider = "Ollama"` and `core.model = "<local-model>"` in agent spec
 - or set `MCP_SUBAGENT_OLLAMA_MODEL=<local-model>`
+
+## Cleanup
+
+Clear historical run logs/cache under resolved `state_dir`:
+
+```bash
+# default: remove state_dir/runs + state_dir/server.log + state_dir/logs
+mcp-subagent clean
+
+# preview only
+mcp-subagent clean --dry-run
+
+# remove the whole state_dir
+mcp-subagent clean --all
+```
 
 ## Verification Model
 

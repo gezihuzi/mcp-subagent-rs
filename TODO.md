@@ -1763,3 +1763,31 @@
   - `summarize_stderr_prefers_error_lines`
 - 已通过回归：
   - `cargo test -q`（`144 + 21 + 3` tests passed）
+
+## T-070 V0.8-P0-CleanCommandForRunLogCache (Completed 2026-03-25)
+
+任务：新增 `clean` 命令，清理历史 run 日志与缓存目录，降低 `state_dir` 噪音和体积。  
+验收标准：
+
+1. 新增 `mcp-subagent clean`，默认清理 `state_dir/runs`、`state_dir/server.log`、`state_dir/logs`。
+2. 新增 `--dry-run` 预览模式，不实际删除但返回将删除目标。
+3. 新增 `--all`，可清空整个 `state_dir`。
+4. 新增 CLI 解析与 clean 行为测试，`cargo test` 通过。
+5. README 命令面和使用说明同步 `clean`。
+完成记录：
+
+- 已新增 `clean` 命令面：
+  - `mcp-subagent clean [--all] [--dry-run] [--json]`；
+  - 默认模式清理 `state_dir/runs`、`state_dir/server.log`、`state_dir/logs`。
+- 已实现清理执行与报告输出：
+  - 新增 `clean_state_dir`、`estimate_path_size`、`print_clean_report`；
+  - 支持 dry-run 预览 `would_remove`；
+  - 支持 `--all` 清空整个 `state_dir`。
+- 已补测试覆盖：
+  - CLI 解析：`parses_clean_command_flags`
+  - 清理行为：默认清理、dry-run 不删除、all 模式清空 state_dir。
+- 已同步文档：
+  - `README.md` 命令面新增 `clean`；
+  - 新增 Cleanup 使用示例与三种模式说明。
+- 已通过回归：
+  - `cargo test -q`（`144 + 25 + 3` tests passed）。
