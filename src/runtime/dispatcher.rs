@@ -12,6 +12,7 @@ use crate::{
     error::{McpSubagentError, Result},
     runtime::{
         context::ContextCompiler,
+        outcome::{FailureOutcome, RetryClassification, RetryInfo, RunOutcome, UsageStats},
         runners::{AgentRunner, RunnerOutputObserver, RunnerTerminalState},
         summary::{SummaryEnvelope, SummaryParseStatus},
         usage::NativeUsage,
@@ -68,29 +69,9 @@ impl std::fmt::Display for RunStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum RetryClassification {
-    Retryable,
-    NonRetryable,
-    #[default]
-    Unknown,
-}
-
-impl std::fmt::Display for RetryClassification {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::Retryable => "retryable",
-            Self::NonRetryable => "non_retryable",
-            Self::Unknown => "unknown",
-        };
-        write!(f, "{s}")
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RunMetadata {
+pub struct DispatchRunResult {
     pub handle_id: Uuid,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
@@ -113,85 +94,13 @@ pub struct RunMetadata {
     pub retry_classification: RetryClassification,
     #[serde(default)]
     pub retry_classification_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DispatchResult {
-    pub metadata: RunMetadata,
+    pub outcome: RunOutcome,
     pub summary: SummaryEnvelope,
     pub stdout: String,
     pub stderr: String,
     pub compiled_context_markdown: String,
     #[serde(default)]
     pub native_usage: Option<NativeUsage>,
-}
-
-impl DispatchResult {
-    /// Convert to the new `RunOutcome` type.
-    /// This is the migration bridge — consumers should eventually construct
-    /// RunOutcome directly instead of going through DispatchResult.
-    pub fn to_run_outcome(&self) -> crate::runtime::outcome::RunOutcome {
-        use crate::runtime::outcome::*;
-
-        let duration_ms = (self.metadata.updated_at - self.metadata.created_at)
-            .whole_milliseconds()
-            .max(0) as u64;
-
-        let usage = build_usage_from_dispatch(self, duration_ms);
-
-        match &self.metadata.status {
-            RunStatus::Succeeded => RunOutcome::Succeeded(self.summary.to_success_outcome(usage)),
-            RunStatus::Failed => RunOutcome::Failed(FailureOutcome {
-                error: self
-                    .metadata
-                    .error_message
-                    .clone()
-                    .unwrap_or_else(|| "unknown failure".to_string()),
-                retry: RetryInfo {
-                    classification: self.metadata.retry_classification.clone(),
-                    reason: self.metadata.retry_classification_reason.clone(),
-                    attempts_used: self.metadata.attempts_used,
-                },
-                partial_summary: Some(self.summary.summary.summary.clone()),
-                usage,
-            }),
-            RunStatus::TimedOut => RunOutcome::TimedOut {
-                elapsed_secs: duration_ms / 1000,
-            },
-            RunStatus::Cancelled => RunOutcome::Cancelled {
-                reason: self
-                    .metadata
-                    .error_message
-                    .clone()
-                    .unwrap_or_else(|| "cancelled".to_string()),
-            },
-            _ => RunOutcome::Failed(FailureOutcome {
-                error: format!("unexpected terminal status: {}", self.metadata.status),
-                retry: RetryInfo {
-                    classification: RetryClassification::Unknown,
-                    reason: None,
-                    attempts_used: self.metadata.attempts_used,
-                },
-                partial_summary: None,
-                usage,
-            }),
-        }
-    }
-}
-
-fn build_usage_from_dispatch(
-    result: &DispatchResult,
-    duration_ms: u64,
-) -> crate::runtime::outcome::UsageStats {
-    let native = result.native_usage.as_ref();
-    crate::runtime::outcome::UsageStats {
-        duration_ms,
-        input_tokens: native.and_then(|u| u.input_tokens),
-        output_tokens: native.and_then(|u| u.output_tokens),
-        total_tokens: native.and_then(|u| u.total_tokens),
-        provider_exit_code: Some(result.summary.summary.exit_code),
-    }
 }
 
 #[derive(Debug)]
@@ -214,7 +123,7 @@ where
         spec: &crate::spec::AgentSpec,
         request: &RunRequest,
         memory: ResolvedMemory,
-    ) -> Result<DispatchResult> {
+    ) -> Result<DispatchRunResult> {
         self.run_with_observers(spec, request, memory, |_prev, _next| {}, None)
             .await
     }
@@ -225,7 +134,7 @@ where
         request: &RunRequest,
         memory: ResolvedMemory,
         mut on_transition: F,
-    ) -> Result<DispatchResult>
+    ) -> Result<DispatchRunResult>
     where
         F: FnMut(Option<RunStatus>, RunStatus),
     {
@@ -240,7 +149,7 @@ where
         memory: ResolvedMemory,
         mut on_transition: F,
         mut output_observer: Option<&mut dyn RunnerOutputObserver>,
-    ) -> Result<DispatchResult>
+    ) -> Result<DispatchRunResult>
     where
         F: FnMut(Option<RunStatus>, RunStatus),
     {
@@ -248,7 +157,7 @@ where
         let workflow_hints = request.to_workflow_hints();
         let mut tracker = RunTracker::new(spec, request.working_dir.clone());
 
-        let mut previous_status = tracker.metadata.status.clone();
+        let mut previous_status = tracker.status.clone();
         tracker.transition(RunStatus::Validating);
         on_transition(Some(previous_status), RunStatus::Validating);
         validate_agent_spec(spec)?;
@@ -256,17 +165,17 @@ where
         enforce_runtime_depth(spec, request)?;
         enforce_workflow_gate(spec, request)?;
 
-        previous_status = tracker.metadata.status.clone();
+        previous_status = tracker.status.clone();
         tracker.transition(RunStatus::ProbingProvider);
         on_transition(Some(previous_status), RunStatus::ProbingProvider);
-        previous_status = tracker.metadata.status.clone();
+        previous_status = tracker.status.clone();
         tracker.transition(RunStatus::PreparingWorkspace);
         on_transition(Some(previous_status), RunStatus::PreparingWorkspace);
-        previous_status = tracker.metadata.status.clone();
+        previous_status = tracker.status.clone();
         tracker.transition(RunStatus::ResolvingMemory);
         on_transition(Some(previous_status), RunStatus::ResolvingMemory);
 
-        previous_status = tracker.metadata.status.clone();
+        previous_status = tracker.status.clone();
         tracker.transition(RunStatus::CompilingContext);
         on_transition(Some(previous_status), RunStatus::CompilingContext);
         let compiled = self
@@ -290,11 +199,11 @@ where
         let mut final_retry_classification_reason = None;
 
         for attempt in 1..=attempt_budget {
-            tracker.metadata.attempts_used = attempt;
-            previous_status = tracker.metadata.status.clone();
+            tracker.attempts_used = attempt;
+            previous_status = tracker.status.clone();
             tracker.transition(RunStatus::Launching);
             on_transition(Some(previous_status), RunStatus::Launching);
-            previous_status = tracker.metadata.status.clone();
+            previous_status = tracker.status.clone();
             tracker.transition(RunStatus::Running);
             on_transition(Some(previous_status), RunStatus::Running);
             let execution = match output_observer.as_deref_mut() {
@@ -316,10 +225,10 @@ where
                 }
             };
 
-            previous_status = tracker.metadata.status.clone();
+            previous_status = tracker.status.clone();
             tracker.transition(RunStatus::Collecting);
             on_transition(Some(previous_status), RunStatus::Collecting);
-            previous_status = tracker.metadata.status.clone();
+            previous_status = tracker.status.clone();
             tracker.transition(RunStatus::ParsingSummary);
             on_transition(Some(previous_status), RunStatus::ParsingSummary);
             let summary_envelope = self
@@ -377,14 +286,14 @@ where
             )
         })?;
 
-        tracker.metadata.retry_attempts = tracker.metadata.attempts_used.saturating_sub(1);
-        tracker.metadata.retry_classification = final_retry_classification;
-        tracker.metadata.retry_classification_reason = final_retry_classification_reason;
-        previous_status = tracker.metadata.status.clone();
+        tracker.retry_attempts = tracker.attempts_used.saturating_sub(1);
+        tracker.retry_classification = final_retry_classification.clone();
+        tracker.retry_classification_reason = final_retry_classification_reason.clone();
+        previous_status = tracker.status.clone();
         tracker.transition(RunStatus::Finalizing);
         on_transition(Some(previous_status), RunStatus::Finalizing);
-        tracker.metadata.error_message = final_error_message;
-        previous_status = tracker.metadata.status.clone();
+        tracker.error_message = final_error_message.clone();
+        previous_status = tracker.status.clone();
         tracker.transition(final_status.clone());
         on_transition(Some(previous_status), final_status);
         let native_usage = crate::runtime::usage::parse_native_usage(
@@ -392,9 +301,71 @@ where
             &execution.stdout,
             &execution.stderr,
         );
+        let duration_ms = (tracker.updated_at - tracker.created_at)
+            .whole_milliseconds()
+            .max(0) as u64;
+        let usage = UsageStats {
+            duration_ms,
+            input_tokens: native_usage.as_ref().and_then(|u| u.input_tokens),
+            output_tokens: native_usage.as_ref().and_then(|u| u.output_tokens),
+            total_tokens: native_usage.as_ref().and_then(|u| u.total_tokens),
+            provider_exit_code: Some(summary_envelope.summary.exit_code),
+        };
+        let outcome = match tracker.status {
+            RunStatus::Succeeded => {
+                RunOutcome::Succeeded(summary_envelope.to_success_outcome(usage))
+            }
+            RunStatus::Failed => RunOutcome::Failed(FailureOutcome {
+                error: tracker
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "unknown failure".to_string()),
+                retry: RetryInfo {
+                    classification: final_retry_classification,
+                    reason: final_retry_classification_reason,
+                    attempts_used: tracker.attempts_used,
+                },
+                partial_summary: Some(summary_envelope.summary.summary.clone()),
+                usage,
+            }),
+            RunStatus::TimedOut => RunOutcome::TimedOut {
+                elapsed_secs: duration_ms / 1000,
+            },
+            RunStatus::Cancelled => RunOutcome::Cancelled {
+                reason: tracker
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "cancelled".to_string()),
+            },
+            _ => RunOutcome::Failed(FailureOutcome {
+                error: format!("unexpected terminal status: {}", tracker.status),
+                retry: RetryInfo {
+                    classification: RetryClassification::Unknown,
+                    reason: None,
+                    attempts_used: tracker.attempts_used,
+                },
+                partial_summary: None,
+                usage,
+            }),
+        };
 
-        Ok(DispatchResult {
-            metadata: tracker.metadata,
+        Ok(DispatchRunResult {
+            handle_id: tracker.handle_id,
+            created_at: tracker.created_at,
+            updated_at: tracker.updated_at,
+            status: tracker.status,
+            status_history: tracker.status_history,
+            provider: tracker.provider,
+            agent_name: tracker.agent_name,
+            workspace_path: tracker.workspace_path,
+            error_message: tracker.error_message,
+            attempts_used: tracker.attempts_used,
+            retry_attempts: tracker.retry_attempts,
+            max_attempts: tracker.max_attempts,
+            max_turns: tracker.max_turns,
+            retry_classification: tracker.retry_classification,
+            retry_classification_reason: tracker.retry_classification_reason,
+            outcome,
             summary: summary_envelope,
             stdout: execution.stdout,
             stderr: execution.stderr,
@@ -1045,7 +1016,21 @@ fn contains_any_keyword(text: &str, keywords: &[&str]) -> bool {
 
 #[derive(Debug)]
 struct RunTracker {
-    metadata: RunMetadata,
+    handle_id: Uuid,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+    status: RunStatus,
+    status_history: Vec<RunStatus>,
+    provider: Provider,
+    agent_name: String,
+    workspace_path: PathBuf,
+    error_message: Option<String>,
+    attempts_used: u32,
+    retry_attempts: u32,
+    max_attempts: u32,
+    max_turns: Option<u32>,
+    retry_classification: RetryClassification,
+    retry_classification_reason: Option<String>,
 }
 
 impl RunTracker {
@@ -1053,7 +1038,7 @@ impl RunTracker {
         let now = OffsetDateTime::now_utc();
         let handle_id = Uuid::now_v7();
         let status = RunStatus::Received;
-        let metadata = RunMetadata {
+        Self {
             handle_id,
             created_at: now,
             updated_at: now,
@@ -1069,19 +1054,18 @@ impl RunTracker {
             max_turns: None,
             retry_classification: RetryClassification::Unknown,
             retry_classification_reason: None,
-        };
-        Self { metadata }
+        }
     }
 
     fn transition(&mut self, status: RunStatus) {
-        self.metadata.status = status.clone();
-        self.metadata.updated_at = OffsetDateTime::now_utc();
-        self.metadata.status_history.push(status);
+        self.status = status.clone();
+        self.updated_at = OffsetDateTime::now_utc();
+        self.status_history.push(status);
     }
 
     fn set_attempt_budget(&mut self, max_attempts: u32, max_turns: Option<u32>) {
-        self.metadata.max_attempts = max_attempts;
-        self.metadata.max_turns = max_turns;
+        self.max_attempts = max_attempts;
+        self.max_turns = max_turns;
     }
 }
 
@@ -1319,8 +1303,8 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.metadata.status, RunStatus::Succeeded);
-        assert_common_lifecycle(&result.metadata.status_history);
+        assert_eq!(result.status, RunStatus::Succeeded);
+        assert_common_lifecycle(&result.status_history);
         assert_eq!(
             result.summary.summary.verification_status,
             VerificationStatus::Passed
@@ -1342,7 +1326,7 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        let outcome = result.to_run_outcome();
+        let outcome = result.outcome.clone();
         match outcome {
             RunOutcome::Succeeded(success) => {
                 assert_eq!(success.summary, "ok");
@@ -1372,7 +1356,7 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        let outcome = result.to_run_outcome();
+        let outcome = result.outcome.clone();
         match outcome {
             RunOutcome::Failed(failure) => {
                 assert!(failure.error.contains("network timeout from provider"));
@@ -1407,9 +1391,9 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.metadata.status, RunStatus::Succeeded);
+        assert_eq!(result.status, RunStatus::Succeeded);
         assert_eq!(result.summary.parse_status, SummaryParseStatus::Degraded);
-        assert_eq!(result.metadata.error_message, None);
+        assert_eq!(result.error_message, None);
     }
 
     #[tokio::test]
@@ -1430,14 +1414,13 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.metadata.status, RunStatus::Failed);
+        assert_eq!(result.status, RunStatus::Failed);
         assert_eq!(
-            result.metadata.retry_classification,
+            result.retry_classification,
             super::RetryClassification::Retryable
         );
         assert_eq!(result.summary.parse_status, SummaryParseStatus::Degraded);
         assert!(result
-            .metadata
             .error_message
             .as_deref()
             .is_some_and(|msg| msg.contains("structured summary parse status is Degraded")));
@@ -1459,10 +1442,10 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.metadata.status, RunStatus::Failed);
-        assert_common_lifecycle(&result.metadata.status_history);
+        assert_eq!(result.status, RunStatus::Failed);
+        assert_common_lifecycle(&result.status_history);
         assert_eq!(
-            result.metadata.retry_classification,
+            result.retry_classification,
             super::RetryClassification::Unknown
         );
         assert_eq!(result.summary.parse_status, SummaryParseStatus::Degraded);
@@ -1470,10 +1453,7 @@ mod tests {
             result.summary.summary.verification_status,
             VerificationStatus::NotRun
         );
-        assert_eq!(
-            result.metadata.error_message.as_deref(),
-            Some("mock failure")
-        );
+        assert_eq!(result.error_message.as_deref(), Some("mock failure"));
     }
 
     #[tokio::test]
@@ -1488,12 +1468,12 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.metadata.status, RunStatus::TimedOut);
+        assert_eq!(result.status, RunStatus::TimedOut);
         assert_eq!(
-            result.metadata.retry_classification,
+            result.retry_classification,
             super::RetryClassification::Retryable
         );
-        assert_common_lifecycle(&result.metadata.status_history);
+        assert_common_lifecycle(&result.status_history);
     }
 
     #[tokio::test]
@@ -1508,12 +1488,12 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.metadata.status, RunStatus::Cancelled);
+        assert_eq!(result.status, RunStatus::Cancelled);
         assert_eq!(
-            result.metadata.retry_classification,
+            result.retry_classification,
             super::RetryClassification::NonRetryable
         );
-        assert_common_lifecycle(&result.metadata.status_history);
+        assert_common_lifecycle(&result.status_history);
     }
 
     #[tokio::test]
@@ -1542,16 +1522,16 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.metadata.status, RunStatus::Succeeded);
-        assert_eq!(result.metadata.attempts_used, 2);
-        assert_eq!(result.metadata.retry_attempts, 1);
-        assert_eq!(result.metadata.max_attempts, 2);
-        assert_eq!(result.metadata.max_turns, Some(2));
+        assert_eq!(result.status, RunStatus::Succeeded);
+        assert_eq!(result.attempts_used, 2);
+        assert_eq!(result.retry_attempts, 1);
+        assert_eq!(result.max_attempts, 2);
+        assert_eq!(result.max_turns, Some(2));
         assert_eq!(
-            result.metadata.retry_classification,
+            result.retry_classification,
             super::RetryClassification::NonRetryable
         );
-        assert_eq!(result.metadata.error_message, None);
+        assert_eq!(result.error_message, None);
     }
 
     #[tokio::test]
@@ -1580,17 +1560,16 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.metadata.status, RunStatus::Failed);
-        assert_eq!(result.metadata.attempts_used, 1);
-        assert_eq!(result.metadata.retry_attempts, 0);
-        assert_eq!(result.metadata.max_attempts, 3);
-        assert_eq!(result.metadata.max_turns, Some(1));
+        assert_eq!(result.status, RunStatus::Failed);
+        assert_eq!(result.attempts_used, 1);
+        assert_eq!(result.retry_attempts, 0);
+        assert_eq!(result.max_attempts, 3);
+        assert_eq!(result.max_turns, Some(1));
         assert_eq!(
-            result.metadata.retry_classification,
+            result.retry_classification,
             super::RetryClassification::Retryable
         );
         assert!(result
-            .metadata
             .error_message
             .as_deref()
             .is_some_and(|msg| msg.contains("max_turns=1")));
@@ -1655,7 +1634,7 @@ mod tests {
             )
             .await
             .expect("dispatch should pass with plan");
-        assert_eq!(result.metadata.status, RunStatus::Succeeded);
+        assert_eq!(result.status, RunStatus::Succeeded);
     }
 
     #[tokio::test]
@@ -1878,7 +1857,7 @@ mod tests {
             .run(&spec, &request, ResolvedMemory::default())
             .await
             .expect("readonly+gitworktree should pass in research stage");
-        assert_eq!(result.metadata.status, RunStatus::Succeeded);
+        assert_eq!(result.status, RunStatus::Succeeded);
     }
 
     #[tokio::test]
@@ -1969,7 +1948,7 @@ mod tests {
             .run(&spec, &request, ResolvedMemory::default())
             .await
             .expect("plan stage should allow research agent profile");
-        assert_eq!(result.metadata.status, RunStatus::Succeeded);
+        assert_eq!(result.status, RunStatus::Succeeded);
     }
 
     #[tokio::test]
@@ -2015,7 +1994,7 @@ mod tests {
             .run(&spec, &request, ResolvedMemory::default())
             .await
             .expect("review stage should allow reviewer agent");
-        assert_eq!(result.metadata.status, RunStatus::Succeeded);
+        assert_eq!(result.status, RunStatus::Succeeded);
     }
 
     #[tokio::test]
@@ -2105,7 +2084,7 @@ mod tests {
             .run(&spec, &request, ResolvedMemory::default())
             .await
             .expect("parent summary style evidence should satisfy dual review");
-        assert_eq!(result.metadata.status, RunStatus::Succeeded);
+        assert_eq!(result.status, RunStatus::Succeeded);
     }
 
     #[test]

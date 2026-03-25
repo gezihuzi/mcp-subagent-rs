@@ -2,8 +2,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime::summary::{ArtifactRef, SummaryParseStatus, VerificationStatus};
 
-// RetryClassification — re-exported from dispatcher.rs during migration
-pub use crate::runtime::dispatcher::RetryClassification;
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryClassification {
+    Retryable,
+    NonRetryable,
+    #[default]
+    Unknown,
+}
+
+impl std::fmt::Display for RetryClassification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Retryable => "retryable",
+            Self::NonRetryable => "non_retryable",
+            Self::Unknown => "unknown",
+        };
+        write!(f, "{s}")
+    }
+}
 
 // ---------------------------------------------------------------------------
 // RunOutcome — 终态不可变，一旦写入只读

@@ -2500,11 +2500,7 @@ struct ReadLogsOptions {
     json: bool,
 }
 
-async fn read_logs(
-    cfg: RuntimeConfig,
-    handle_id: String,
-    options: ReadLogsOptions,
-) -> ExitCode {
+async fn read_logs(cfg: RuntimeConfig, handle_id: String, options: ReadLogsOptions) -> ExitCode {
     let ReadLogsOptions {
         stdout_only,
         stderr_only,
@@ -2734,10 +2730,7 @@ struct ReadEventsAllOptions {
     json: bool,
 }
 
-async fn read_events_all(
-    cfg: RuntimeConfig,
-    options: ReadEventsAllOptions,
-) -> ExitCode {
+async fn read_events_all(cfg: RuntimeConfig, options: ReadEventsAllOptions) -> ExitCode {
     let ReadEventsAllOptions {
         event,
         phase,
@@ -2988,10 +2981,7 @@ struct ReadEventsOptions {
     json: bool,
 }
 
-async fn read_events(
-    cfg: RuntimeConfig,
-    options: ReadEventsOptions,
-) -> ExitCode {
+async fn read_events(cfg: RuntimeConfig, options: ReadEventsOptions) -> ExitCode {
     let ReadEventsOptions {
         handle_id,
         all,
@@ -3879,10 +3869,7 @@ struct AgentRunCommand {
     json: bool,
 }
 
-async fn run_agent(
-    cfg: RuntimeConfig,
-    options: AgentRunCommand,
-) -> ExitCode {
+async fn run_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
     let AgentRunCommand {
         agent,
         task,
@@ -3951,10 +3938,7 @@ async fn run_agent(
     }
 }
 
-async fn spawn_agent(
-    cfg: RuntimeConfig,
-    options: AgentRunCommand,
-) -> ExitCode {
+async fn spawn_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
     let AgentRunCommand {
         agent,
         task,

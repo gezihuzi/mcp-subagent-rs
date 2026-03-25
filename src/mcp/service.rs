@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use rmcp::ErrorData;
-use uuid::Uuid;
 
 use crate::{
     mcp::{
@@ -11,7 +10,7 @@ use crate::{
     runtime::{
         cleanup::WorkspaceCleanupGuard,
         context::DefaultContextCompiler,
-        dispatcher::{DispatchResult, Dispatcher},
+        dispatcher::{DispatchRunResult, Dispatcher},
         memory::resolve_memory_for_task,
         runners::{
             self,
@@ -29,7 +28,7 @@ use serde_json::json;
 
 #[derive(Debug)]
 pub(crate) struct DispatchEnvelope {
-    pub(crate) result: DispatchResult,
+    pub(crate) result: DispatchRunResult,
     pub(crate) workspace: WorkspaceRecord,
     pub(crate) memory_resolution: MemoryResolutionRecord,
     pub(crate) _workspace_cleanup: Option<WorkspaceCleanupGuard>,
@@ -178,8 +177,7 @@ pub(crate) async fn run_dispatch(
         )
         .await
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
-    result.metadata.handle_id = parse_handle_id(handle_id);
-    result.metadata.workspace_path = effective_request.working_dir.clone();
+    result.workspace_path = effective_request.working_dir.clone();
 
     Ok(DispatchEnvelope {
         result,
@@ -298,10 +296,6 @@ fn to_workspace_record(prepared: &PreparedWorkspace, lock_keys: Vec<String>) -> 
         lock_key,
         lock_keys,
     }
-}
-
-fn parse_handle_id(handle_id: &str) -> Uuid {
-    Uuid::parse_str(handle_id).unwrap_or_else(|_| Uuid::now_v7())
 }
 
 fn attach_plan_section_acceptance_criteria(

@@ -284,7 +284,6 @@ impl RunEventRecord {
             detail,
         }
     }
-
 }
 
 fn build_run_events(record: &RunRecord) -> Vec<RunEventRecord> {

@@ -44,7 +44,7 @@ use crate::{
             RunRecord,
         },
     },
-    runtime::dispatcher::{RetryClassification, RunMetadata, RunStatus},
+    runtime::{dispatcher::RunStatus, outcome::RetryClassification},
     types::RunMode,
 };
 
@@ -190,10 +190,13 @@ fn build_usage_output(record: &RunRecord) -> RunUsageOutput {
     }
 }
 
-fn map_retry_classification(metadata: &RunMetadata) -> RetryClassificationRecord {
+fn map_retry_classification(
+    classification: &RetryClassification,
+    reason: Option<&str>,
+) -> RetryClassificationRecord {
     RetryClassificationRecord {
-        classification: format!("{}", metadata.retry_classification),
-        reason: metadata.retry_classification_reason.clone(),
+        classification: format!("{classification}"),
+        reason: reason.map(str::to_string),
     }
 }
 
@@ -1329,8 +1332,8 @@ impl McpSubagentServer {
         let mut execution_policy = Some(execution_policy);
         apply_execution_policy_outcome(
             &mut execution_policy,
-            result.metadata.attempts_used,
-            result.metadata.retry_attempts,
+            result.attempts_used,
+            result.retry_attempts,
         );
         let mut artifact_index = artifact_index;
         let mut artifacts = artifacts;
@@ -1344,7 +1347,7 @@ impl McpSubagentServer {
         apply_archive_hook(
             &loaded.spec,
             &request,
-            &result.metadata.status,
+            &result.status,
             &handle_id,
             &workspace,
             &result.summary,
@@ -1354,17 +1357,20 @@ impl McpSubagentServer {
             },
         );
         let native_usage = result.native_usage;
-        let retry_classification = map_retry_classification(&result.metadata);
+        let retry_classification = map_retry_classification(
+            &result.retry_classification,
+            result.retry_classification_reason.as_deref(),
+        );
 
         let record = RunRecord {
-            status: result.metadata.status,
+            status: result.status,
             created_at: run_created_at,
             updated_at: OffsetDateTime::now_utc(),
-            status_history: result.metadata.status_history,
+            status_history: result.status_history,
             summary: Some(result.summary),
             artifact_index,
             artifacts,
-            error_message: result.metadata.error_message,
+            error_message: result.error_message,
             task: request.task,
             request_snapshot: Some(request_snapshot),
             spec_snapshot: Some(spec_snapshot),
@@ -1712,8 +1718,8 @@ impl McpSubagentServer {
                     let mut artifacts = artifacts;
                     apply_execution_policy_outcome(
                         &mut record.execution_policy,
-                        dispatch_result.metadata.attempts_used,
-                        dispatch_result.metadata.retry_attempts,
+                        dispatch_result.attempts_used,
+                        dispatch_result.retry_attempts,
                     );
                     apply_review_evidence_hook(
                         &loaded.spec,
@@ -1725,7 +1731,7 @@ impl McpSubagentServer {
                     apply_archive_hook(
                         &loaded.spec,
                         &request,
-                        &dispatch_result.metadata.status,
+                        &dispatch_result.status,
                         &task_handle_id,
                         &workspace,
                         &dispatch_result.summary,
@@ -1734,11 +1740,14 @@ impl McpSubagentServer {
                             data: &mut artifacts,
                         },
                     );
-                    let retry_classification = map_retry_classification(&dispatch_result.metadata);
-                    record.status = dispatch_result.metadata.status;
+                    let retry_classification = map_retry_classification(
+                        &dispatch_result.retry_classification,
+                        dispatch_result.retry_classification_reason.as_deref(),
+                    );
+                    record.status = dispatch_result.status;
                     record.updated_at = OffsetDateTime::now_utc();
-                    record.status_history = dispatch_result.metadata.status_history;
-                    record.error_message = dispatch_result.metadata.error_message;
+                    record.status_history = dispatch_result.status_history;
+                    record.error_message = dispatch_result.error_message;
                     record.summary = Some(dispatch_result.summary);
                     record.artifact_index = artifact_index;
                     record.artifacts = artifacts;

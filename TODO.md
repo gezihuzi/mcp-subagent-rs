@@ -3095,3 +3095,28 @@
 - 已验证：
   - `cargo test --workspace` 通过。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-118 Refactor-TaskData-HardCut-DispatcherResultModel (Completed 2026-03-26)
+
+任务：继续硬切 dispatcher 返回模型，删除 `RunMetadata/DispatchResult` 和 `to_run_outcome()` 迁移桥接，改为 dispatcher 直接产出 `RunOutcome`。  
+验收标准：
+
+1. `RetryClassification` 从 `dispatcher.rs` 迁出，归属 `runtime/outcome.rs`。
+2. `dispatcher` 不再定义/返回 `RunMetadata` 与 `DispatchResult`。
+3. dispatcher 结束时直接构建 `RunOutcome`（成功/失败/超时/取消）并随执行结果返回。
+4. `mcp/service.rs` 与 `mcp/tools.rs` 消费新结果结构，不再访问 `result.metadata.*`。
+5. 全量 `cargo test --workspace` 和 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已在 `src/runtime/outcome.rs` 定义 `RetryClassification`，移除对 dispatcher re-export 的依赖。
+- 已重构 `src/runtime/dispatcher.rs`：
+  - 删除 `RunMetadata`、`DispatchResult` 和 `to_run_outcome()` 迁移桥接；
+  - 新增 `DispatchRunResult`，直接携带 `outcome: RunOutcome` 与运行统计字段；
+  - dispatcher 在终态分支直接构建 `RunOutcome`（含失败 retry 信息与 usage）。
+- 已改造调用链：
+  - `src/mcp/service.rs` 使用 `DispatchRunResult`；
+  - `src/mcp/tools.rs` 从 `DispatchRunResult` 读取状态/重试字段并写入 `RunRecord`，不再依赖 `RunMetadata`。
+- 已更新 `dispatcher` 测试断言到新字段访问路径（`result.status/result.outcome`）。
+- 已验证：
+  - `cargo test --workspace` 通过。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
