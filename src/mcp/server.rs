@@ -1193,6 +1193,9 @@ sandbox = "read_only"
         assert!(stats_json.get("usage").is_some());
         assert!(stats_json.get("wall_ms").is_some());
         assert!(stats_json.get("block_reason").is_some());
+        assert!(stats_json.get("workspace_prepare_ms").is_some());
+        assert!(stats_json.get("provider_boot_ms").is_some());
+        assert!(stats_json.get("wait_reasons").is_some());
 
         let events_res = client
             .call_tool(

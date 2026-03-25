@@ -332,6 +332,14 @@ fn first_event_time(events: &[RunEventOutput], name: &str) -> Option<OffsetDateT
         .and_then(event_time)
 }
 
+fn first_event_timestamp(events: &[RunEventOutput], name: &str) -> Option<String> {
+    events
+        .iter()
+        .find(|event| event.event == name)
+        .map(|event| event.timestamp.clone())
+        .filter(|value| !value.is_empty())
+}
+
 fn latest_event(events: &[RunEventOutput]) -> Option<&RunEventOutput> {
     events.last()
 }
@@ -604,6 +612,33 @@ fn classify_block_reason(
     None
 }
 
+fn wait_reason_from_event_name(name: &str) -> Option<&'static str> {
+    match name {
+        "provider.waiting_for_trust" => Some("trust_required"),
+        "provider.waiting_for_auth" => Some("auth_required"),
+        "provider.waiting_for_tool_approval" => Some("tool_approval_required"),
+        "provider.waiting_for_consent" => Some("consent_required"),
+        "provider.waiting_for_skill_discovery" => Some("skill_discovery"),
+        "provider.waiting_for_workspace_scan" => Some("workspace_scan"),
+        _ => None,
+    }
+}
+
+fn collect_wait_reasons(events: &[RunEventOutput]) -> (Vec<String>, Option<String>) {
+    let mut reasons = Vec::new();
+    for event in events {
+        let Some(reason) = wait_reason_from_event_name(&event.event) else {
+            continue;
+        };
+        if reasons.iter().any(|existing| existing == reason) {
+            continue;
+        }
+        reasons.push(reason.to_string());
+    }
+    let current = reasons.last().cloned();
+    (reasons, current)
+}
+
 #[derive(Debug, Clone, Default)]
 struct EventRuntimeSnapshot {
     state: Option<String>,
@@ -657,7 +692,10 @@ fn build_agent_stats_output(
     let probe_started = first_event_time(events, "provider.probe.started");
     let probe_completed = first_event_time(events, "provider.probe.completed");
     let workspace_started = first_event_time(events, "workspace.prepare.started");
+    let provider_boot_started = first_event_time(events, "provider.boot.started");
     let first_output = first_event_time(events, "provider.first_output");
+    let first_output_warning_at = first_event_timestamp(events, "provider.first_output.warning");
+    let first_output_warned = first_output_warning_at.is_some();
     let terminal_at = if is_terminal_status(&record.status) {
         Some(record.updated_at)
     } else {
@@ -667,6 +705,11 @@ fn build_agent_stats_output(
 
     let queue_ms = duration_between(accepted_at, probe_started.or(workspace_started));
     let provider_probe_ms = duration_between(probe_started, probe_completed);
+    let workspace_prepare_ms = duration_between(
+        workspace_started,
+        provider_boot_started.or(first_output).or(end_at),
+    );
+    let provider_boot_ms = duration_between(provider_boot_started, first_output.or(end_at));
     let execution_start = workspace_started
         .or(probe_completed)
         .or(probe_started)
@@ -697,6 +740,7 @@ fn build_agent_stats_output(
         events,
         record.error_message.as_deref(),
     );
+    let (wait_reasons, current_wait_reason) = collect_wait_reasons(events);
 
     GetAgentStatsOutput {
         handle_id: handle_id.to_string(),
@@ -709,8 +753,14 @@ fn build_agent_stats_output(
         block_reason,
         queue_ms,
         provider_probe_ms,
+        workspace_prepare_ms,
+        provider_boot_ms,
         execution_ms,
         first_output_ms,
+        first_output_warned,
+        first_output_warning_at,
+        current_wait_reason,
+        wait_reasons,
         wall_ms,
         usage: build_usage_output(record),
     }
@@ -1644,7 +1694,10 @@ impl McpSubagentServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_block_reason_from_events, detect_provider_wait_signal, RunEventOutput};
+    use super::{
+        classify_block_reason_from_events, collect_wait_reasons, detect_provider_wait_signal,
+        RunEventOutput,
+    };
 
     #[test]
     fn detect_provider_wait_signal_matches_trust_prompt() {
@@ -1668,5 +1721,47 @@ mod tests {
         }];
         let reason = classify_block_reason_from_events(&events, true);
         assert_eq!(reason, Some("provider_output_wait"));
+    }
+
+    #[test]
+    fn collect_wait_reasons_deduplicates_and_tracks_latest() {
+        let events = vec![
+            RunEventOutput {
+                seq: Some(1),
+                event: "provider.waiting_for_auth".to_string(),
+                timestamp: "2026-03-25T00:00:00Z".to_string(),
+                state: None,
+                phase: None,
+                source: None,
+                message: None,
+                detail: serde_json::json!({}),
+            },
+            RunEventOutput {
+                seq: Some(2),
+                event: "provider.waiting_for_auth".to_string(),
+                timestamp: "2026-03-25T00:00:01Z".to_string(),
+                state: None,
+                phase: None,
+                source: None,
+                message: None,
+                detail: serde_json::json!({}),
+            },
+            RunEventOutput {
+                seq: Some(3),
+                event: "provider.waiting_for_trust".to_string(),
+                timestamp: "2026-03-25T00:00:02Z".to_string(),
+                state: None,
+                phase: None,
+                source: None,
+                message: None,
+                detail: serde_json::json!({}),
+            },
+        ];
+        let (reasons, current) = collect_wait_reasons(&events);
+        assert_eq!(
+            reasons,
+            vec!["auth_required".to_string(), "trust_required".to_string()]
+        );
+        assert_eq!(current.as_deref(), Some("trust_required"));
     }
 }

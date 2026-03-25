@@ -2446,3 +2446,33 @@
   - `src/main.rs` 新增 wait event 归因单测。
 - 已同步 README 示例：
   - 新增 `events --event provider.first_output.warning --follow`。
+
+## T-093 V0.10-P1-StatsPhaseSplitsAndWaitSummary (Completed 2026-03-25)
+
+任务：增强 `stats` 结果面，补齐 phase 细分耗时和 wait 信号汇总，降低“只有总耗时”的排障成本。  
+验收标准：
+
+1. `get_agent_stats`（MCP）新增：`workspace_prepare_ms`、`provider_boot_ms`、`first_output_warned`、`first_output_warning_at`、`current_wait_reason`、`wait_reasons`。
+2. CLI `stats` 文本输出展示上述新增字段。
+3. CLI `build_run_stats_output` 与 MCP `build_agent_stats_output` 都基于事件流计算新增字段，口径一致。
+4. MCP roundtrip 测试新增 stats 字段存在性断言。
+5. README 说明补充 stats 新字段能力。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 stats 数据模型：
+  - `src/mcp/dto.rs::GetAgentStatsOutput` 新增 phase split 与 wait summary 字段。
+- 已升级 MCP stats 计算：
+  - `src/mcp/tools.rs` 新增 `workspace_prepare_ms/provider_boot_ms` 计算；
+  - 新增 `first_output_warned/first_output_warning_at`；
+  - 新增 `wait_reasons/current_wait_reason` 汇总（由 `provider.waiting_for_*` 事件派生）。
+- 已升级 CLI stats：
+  - `src/main.rs::RunStatsOutput` 同步新增字段；
+  - `read_stats` 文本输出新增字段打印；
+  - `build_run_stats_output` 计算口径与 MCP 对齐。
+- 已补测试：
+  - `build_run_stats_output_derives_phase_and_durations_from_events` 覆盖新增时序字段；
+  - `mcp_transport_roundtrip_for_all_tools` 新增 stats 字段断言；
+  - 保留并通过 wait reason/block reason 相关测试。
+- 已同步 README：
+  - 新增 stats 能力说明（phase splits + first-output watchdog + wait reasons）。

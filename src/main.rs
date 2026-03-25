@@ -1291,8 +1291,14 @@ struct RunStatsOutput {
     block_reason: Option<String>,
     queue_ms: Option<u64>,
     provider_probe_ms: Option<u64>,
+    workspace_prepare_ms: Option<u64>,
+    provider_boot_ms: Option<u64>,
     execution_ms: Option<u64>,
     first_output_ms: Option<u64>,
+    first_output_warned: bool,
+    first_output_warning_at: Option<String>,
+    current_wait_reason: Option<String>,
+    wait_reasons: Vec<String>,
     wall_ms: Option<u64>,
     usage: UsageStatsOutput,
 }
@@ -1488,6 +1494,14 @@ fn first_event_time(events: &[RunTimelineEvent], name: &str) -> Option<OffsetDat
         .and_then(event_time)
 }
 
+fn first_event_timestamp(events: &[RunTimelineEvent], name: &str) -> Option<String> {
+    events
+        .iter()
+        .find(|event| event.event == name)
+        .map(|event| event.display_timestamp().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn latest_event(events: &[RunTimelineEvent]) -> Option<&RunTimelineEvent> {
     events.last()
 }
@@ -1658,6 +1672,33 @@ fn classify_block_reason(
         return Some(fallback.to_string());
     }
     None
+}
+
+fn wait_reason_from_event_name(name: &str) -> Option<&'static str> {
+    match name {
+        "provider.waiting_for_trust" => Some("trust_required"),
+        "provider.waiting_for_auth" => Some("auth_required"),
+        "provider.waiting_for_tool_approval" => Some("tool_approval_required"),
+        "provider.waiting_for_consent" => Some("consent_required"),
+        "provider.waiting_for_skill_discovery" => Some("skill_discovery"),
+        "provider.waiting_for_workspace_scan" => Some("workspace_scan"),
+        _ => None,
+    }
+}
+
+fn collect_wait_reasons(events: &[RunTimelineEvent]) -> (Vec<String>, Option<String>) {
+    let mut reasons = Vec::new();
+    for event in events {
+        let Some(reason) = wait_reason_from_event_name(&event.event) else {
+            continue;
+        };
+        if reasons.iter().any(|existing| existing == reason) {
+            continue;
+        }
+        reasons.push(reason.to_string());
+    }
+    let current = reasons.last().cloned();
+    (reasons, current)
 }
 
 fn compute_duration_ms(started_at: Option<&str>, finished_at: &str) -> Option<u64> {
@@ -2533,11 +2574,52 @@ fn read_stats(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
                 .unwrap_or_else(|| "unknown".to_string())
         );
         println!(
+            "workspace_prepare_ms: {}",
+            output
+                .workspace_prepare_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        println!(
+            "provider_boot_ms: {}",
+            output
+                .provider_boot_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        println!(
             "execution_ms: {}",
             output
                 .execution_ms
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".to_string())
+        );
+        println!(
+            "first_output_ms: {}",
+            output
+                .first_output_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        println!("first_output_warned: {}", output.first_output_warned);
+        println!(
+            "first_output_warning_at: {}",
+            output
+                .first_output_warning_at
+                .as_deref()
+                .unwrap_or("unknown")
+        );
+        println!(
+            "current_wait_reason: {}",
+            output.current_wait_reason.as_deref().unwrap_or("-")
+        );
+        println!(
+            "wait_reasons: {}",
+            if output.wait_reasons.is_empty() {
+                "-".to_string()
+            } else {
+                output.wait_reasons.join(",")
+            }
         );
         println!(
             "last_event_at: {}",
@@ -2580,7 +2662,10 @@ fn build_run_stats_output(
     let probe_started = first_event_time(&events, "provider.probe.started");
     let probe_completed = first_event_time(&events, "provider.probe.completed");
     let workspace_started = first_event_time(&events, "workspace.prepare.started");
+    let provider_boot_started = first_event_time(&events, "provider.boot.started");
     let first_output = first_event_time(&events, "provider.first_output");
+    let first_output_warning_at = first_event_timestamp(&events, "provider.first_output.warning");
+    let first_output_warned = first_output_warning_at.is_some();
     let terminal_at = if is_terminal_status(record.status.as_str()) {
         parse_rfc3339(&record.updated_at)
     } else {
@@ -2590,6 +2675,11 @@ fn build_run_stats_output(
 
     let queue_ms = duration_between(accepted_at, probe_started.or(workspace_started));
     let provider_probe_ms = duration_between(probe_started, probe_completed);
+    let workspace_prepare_ms = duration_between(
+        workspace_started,
+        provider_boot_started.or(first_output).or(end_at),
+    );
+    let provider_boot_ms = duration_between(provider_boot_started, first_output.or(end_at));
     let execution_start = workspace_started
         .or(probe_completed)
         .or(probe_started)
@@ -2620,6 +2710,7 @@ fn build_run_stats_output(
         &events,
         record.error_message.as_deref(),
     );
+    let (wait_reasons, current_wait_reason) = collect_wait_reasons(&events);
 
     RunStatsOutput {
         handle_id: handle_id.to_string(),
@@ -2632,8 +2723,14 @@ fn build_run_stats_output(
         block_reason,
         queue_ms,
         provider_probe_ms,
+        workspace_prepare_ms,
+        provider_boot_ms,
         execution_ms,
         first_output_ms,
+        first_output_warned,
+        first_output_warning_at,
+        current_wait_reason,
+        wait_reasons,
         wall_ms,
         usage,
     }
@@ -4209,7 +4306,11 @@ target/
                 "{\"event\":\"provider.probe.started\",\"timestamp\":\"2026-03-25T00:00:01Z\",\"detail\":{},\"state\":\"preparing\",\"phase\":\"provider_probe\",\"seq\":2}\n",
                 "{\"event\":\"provider.probe.completed\",\"timestamp\":\"2026-03-25T00:00:02Z\",\"detail\":{},\"state\":\"preparing\",\"phase\":\"provider_probe\",\"seq\":3}\n",
                 "{\"event\":\"workspace.prepare.started\",\"timestamp\":\"2026-03-25T00:00:03Z\",\"detail\":{},\"state\":\"preparing\",\"phase\":\"workspace_prepare\",\"seq\":4}\n",
-                "{\"event\":\"run.completed\",\"timestamp\":\"2026-03-25T00:00:05Z\",\"detail\":{},\"state\":\"succeeded\",\"phase\":\"completed\",\"seq\":5}\n"
+                "{\"event\":\"provider.boot.started\",\"timestamp\":\"2026-03-25T00:00:04Z\",\"detail\":{},\"state\":\"running\",\"phase\":\"provider_boot\",\"seq\":5}\n",
+                "{\"event\":\"provider.waiting_for_auth\",\"timestamp\":\"2026-03-25T00:00:05Z\",\"detail\":{},\"state\":\"running\",\"phase\":\"waiting_for_auth\",\"seq\":6}\n",
+                "{\"event\":\"provider.first_output.warning\",\"timestamp\":\"2026-03-25T00:00:06Z\",\"detail\":{},\"state\":\"running\",\"phase\":\"provider_boot\",\"seq\":7}\n",
+                "{\"event\":\"provider.first_output\",\"timestamp\":\"2026-03-25T00:00:07Z\",\"detail\":{},\"state\":\"running\",\"phase\":\"running\",\"seq\":8}\n",
+                "{\"event\":\"run.completed\",\"timestamp\":\"2026-03-25T00:00:08Z\",\"detail\":{},\"state\":\"succeeded\",\"phase\":\"completed\",\"seq\":9}\n"
             ),
         )
         .expect("write events");
@@ -4217,17 +4318,27 @@ target/
         let record = StoredRunRecord {
             status: "succeeded".to_string(),
             created_at: Some("2026-03-25T00:00:00Z".to_string()),
-            updated_at: "2026-03-25T00:00:05Z".to_string(),
+            updated_at: "2026-03-25T00:00:08Z".to_string(),
             ..StoredRunRecord::default()
         };
-        let now = super::parse_rfc3339("2026-03-25T00:00:05Z").expect("parse now");
+        let now = super::parse_rfc3339("2026-03-25T00:00:08Z").expect("parse now");
         let stats = super::build_run_stats_output(dir.path(), "handle-1", &record, now);
         assert_eq!(stats.queue_ms, Some(1_000));
         assert_eq!(stats.provider_probe_ms, Some(1_000));
-        assert_eq!(stats.execution_ms, Some(2_000));
-        assert_eq!(stats.wall_ms, Some(5_000));
+        assert_eq!(stats.workspace_prepare_ms, Some(1_000));
+        assert_eq!(stats.provider_boot_ms, Some(3_000));
+        assert_eq!(stats.execution_ms, Some(5_000));
+        assert_eq!(stats.first_output_ms, Some(7_000));
+        assert_eq!(stats.wall_ms, Some(8_000));
         assert_eq!(stats.state.as_deref(), Some("succeeded"));
         assert_eq!(stats.phase.as_deref(), Some("completed"));
+        assert!(stats.first_output_warned);
+        assert_eq!(
+            stats.first_output_warning_at.as_deref(),
+            Some("2026-03-25T00:00:06Z")
+        );
+        assert_eq!(stats.current_wait_reason.as_deref(), Some("auth_required"));
+        assert_eq!(stats.wait_reasons, vec!["auth_required".to_string()]);
         assert!(!stats.stalled);
     }
 

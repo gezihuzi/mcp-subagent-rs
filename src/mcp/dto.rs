@@ -303,9 +303,21 @@ pub struct GetAgentStatsOutput {
     #[serde(default)]
     pub provider_probe_ms: Option<u64>,
     #[serde(default)]
+    pub workspace_prepare_ms: Option<u64>,
+    #[serde(default)]
+    pub provider_boot_ms: Option<u64>,
+    #[serde(default)]
     pub execution_ms: Option<u64>,
     #[serde(default)]
     pub first_output_ms: Option<u64>,
+    #[serde(default)]
+    pub first_output_warned: bool,
+    #[serde(default)]
+    pub first_output_warning_at: Option<String>,
+    #[serde(default)]
+    pub current_wait_reason: Option<String>,
+    #[serde(default)]
+    pub wait_reasons: Vec<String>,
     #[serde(default)]
     pub wall_ms: Option<u64>,
     pub usage: RunUsageOutput,
