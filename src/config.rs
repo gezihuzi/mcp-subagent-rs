@@ -10,6 +10,7 @@ use crate::error::{McpSubagentError, Result};
 const DEFAULT_AGENTS_DIR: &str = "./agents";
 const DEFAULT_STATE_DIR: &str = ".mcp-subagent/state";
 const DEFAULT_LOG_LEVEL: &str = "info";
+const DEFAULT_PROJECT_CONFIG_PATH: &str = "./.mcp-subagent/config.toml";
 const ENV_CONFIG_PATH: &str = "MCP_SUBAGENT_CONFIG";
 const ENV_AGENTS_DIRS: &str = "MCP_SUBAGENT_AGENTS_DIRS";
 const ENV_STATE_DIR: &str = "MCP_SUBAGENT_STATE_DIR";
@@ -88,27 +89,54 @@ struct FilePaths {
 }
 
 fn resolve_config_path(cli_path: Option<&PathBuf>) -> PathBuf {
+    let env_config = env::var(ENV_CONFIG_PATH).ok();
+    let cwd = env::current_dir().ok();
+    let home = env::var("HOME").ok().map(PathBuf::from);
+    resolve_config_path_with(
+        cli_path,
+        env_config.as_deref(),
+        cwd.as_deref(),
+        home.as_deref(),
+    )
+}
+
+fn resolve_config_path_with(
+    cli_path: Option<&PathBuf>,
+    env_config_path: Option<&str>,
+    cwd: Option<&Path>,
+    home_dir: Option<&Path>,
+) -> PathBuf {
     if let Some(path) = cli_path {
         return path.clone();
     }
-    if let Ok(raw) = env::var(ENV_CONFIG_PATH) {
+    if let Some(raw) = env_config_path {
         let path = raw.trim();
         if !path.is_empty() {
             return PathBuf::from(path);
         }
     }
 
-    default_config_path()
+    if let Some(project_config_path) = cwd.map(default_project_config_path) {
+        if project_config_path.exists() {
+            return project_config_path;
+        }
+    }
+
+    default_config_path(home_dir)
 }
 
-fn default_config_path() -> PathBuf {
-    if let Ok(home) = env::var("HOME") {
-        return Path::new(&home)
+fn default_project_config_path(cwd: &Path) -> PathBuf {
+    cwd.join(".mcp-subagent").join("config.toml")
+}
+
+fn default_config_path(home_dir: Option<&Path>) -> PathBuf {
+    if let Some(home) = home_dir {
+        return home
             .join(".config")
             .join("mcp-subagent")
             .join("config.toml");
     }
-    PathBuf::from("./.mcp-subagent/config.toml")
+    PathBuf::from(DEFAULT_PROJECT_CONFIG_PATH)
 }
 
 fn load_file_config(path: PathBuf) -> Result<Option<FileConfig>> {
@@ -235,9 +263,11 @@ fn merge_layers(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
 
-    use super::{merge_layers, ConfigLayer};
+    use tempfile::tempdir;
+
+    use super::{merge_layers, resolve_config_path_with, ConfigLayer};
 
     #[test]
     fn merge_uses_precedence_cli_env_file_defaults() {
@@ -290,5 +320,64 @@ mod tests {
         assert_eq!(merged.agents_dirs, vec![PathBuf::from("file-agents")]);
         assert_eq!(merged.state_dir, PathBuf::from("file-state"));
         assert_eq!(merged.log_level, "warn");
+    }
+
+    #[test]
+    fn resolve_config_path_prefers_cli_override() {
+        let resolved = resolve_config_path_with(
+            Some(&PathBuf::from("/tmp/cli.toml")),
+            Some("/tmp/env.toml"),
+            None,
+            None,
+        );
+        assert_eq!(resolved, PathBuf::from("/tmp/cli.toml"));
+    }
+
+    #[test]
+    fn resolve_config_path_prefers_env_when_cli_missing() {
+        let resolved = resolve_config_path_with(
+            None,
+            Some("/tmp/env.toml"),
+            None,
+            Some(PathBuf::from("/home/user").as_path()),
+        );
+        assert_eq!(resolved, PathBuf::from("/tmp/env.toml"));
+    }
+
+    #[test]
+    fn resolve_config_path_prefers_project_config_when_present() {
+        let cwd = tempdir().expect("tempdir");
+        let config = cwd.path().join(".mcp-subagent/config.toml");
+        fs::create_dir_all(config.parent().expect("parent")).expect("create dir");
+        fs::write(&config, "[server]\nlog_level='info'\n").expect("write");
+
+        let resolved = resolve_config_path_with(
+            None,
+            None,
+            Some(cwd.path()),
+            Some(PathBuf::from("/home/user").as_path()),
+        );
+        assert_eq!(resolved, config);
+    }
+
+    #[test]
+    fn resolve_config_path_falls_back_to_home_when_project_config_missing() {
+        let cwd = tempdir().expect("tempdir");
+        let resolved = resolve_config_path_with(
+            None,
+            None,
+            Some(cwd.path()),
+            Some(PathBuf::from("/home/user").as_path()),
+        );
+        assert_eq!(
+            resolved,
+            PathBuf::from("/home/user/.config/mcp-subagent/config.toml")
+        );
+    }
+
+    #[test]
+    fn resolve_config_path_falls_back_to_project_relative_without_home() {
+        let resolved = resolve_config_path_with(None, None, None, None);
+        assert_eq!(resolved, PathBuf::from("./.mcp-subagent/config.toml"));
     }
 }

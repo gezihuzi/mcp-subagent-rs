@@ -1663,3 +1663,26 @@
   - `cargo fmt`
   - `cargo test -q`（`134 + 13 + 3` tests passed）
   - `./scripts/smoke_v08.sh` 全链路通过。
+
+## T-066 V0.8-P0-ProjectRootAutodiscoveryAndGitignore (Completed 2026-03-25)
+
+任务：收口默认 bootstrap 模式的可用性，确保 `init` 后在项目根目录即可直接执行 `validate/doctor/connect-snippet`，并补充运行态目录忽略规则。  
+验收标准：
+
+1. `init` 在默认 bootstrap 模式下自动生成项目根桥接配置，且不覆盖用户已有配置（除非 `--force`）。
+2. 配置解析优先识别项目根 `./.mcp-subagent/config.toml`（当文件存在时），实现“cd 到项目根即可自动识别”。
+3. README 的 Happy Path 改为无需手动传 `--agents-dir/--state-dir`。
+4. `.gitignore` 忽略 `.mcp-subagent` 运行态目录（state/logs/bootstrap），避免仓库噪音。
+5. 回归通过：`cargo fmt`、`cargo test -q`、`./scripts/smoke_v08.sh`。
+完成记录：
+
+- 已在 `init` 默认 bootstrap 分支补齐桥接配置写入：
+  - `src/main.rs` 新增 `ensure_bootstrap_bridge_config` 与模板生成逻辑；
+  - 默认模式下自动生成 `./.mcp-subagent/config.toml`；
+  - 既有配置默认保留，`--force` 时覆盖，且新增单测覆盖三种行为。
+- 已修复配置自动识别路径：
+  - `src/config.rs` 增加项目根配置优先识别（文件存在时优先于 home config）；
+  - 新增路径决策单测覆盖 CLI/ENV/项目配置/home fallback。
+- 已同步文档与忽略规则：
+  - `README.md` Quick Onboarding 改为 `init -> validate -> doctor -> connect-snippet --host ...`；
+  - `.gitignore` 新增 `.mcp-subagent/state/`、`.mcp-subagent/logs/`、`.mcp-subagent/bootstrap/`。

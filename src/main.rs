@@ -26,6 +26,11 @@ use rmcp::handler::server::wrapper::Parameters;
 use serde::Serialize;
 use tracing::info;
 
+const DEFAULT_BOOTSTRAP_ROOT_RELATIVE: &str = ".mcp-subagent/bootstrap";
+const PROJECT_BRIDGE_CONFIG_RELATIVE: &str = ".mcp-subagent/config.toml";
+const BRIDGE_AGENTS_DIR_RELATIVE: &str = "./.mcp-subagent/bootstrap/agents";
+const BRIDGE_STATE_DIR_RELATIVE: &str = "./.mcp-subagent/bootstrap/.mcp-subagent/state";
+
 #[derive(Debug, Parser)]
 #[command(name = "mcp-subagent", version, about = "MCP subagent runtime")]
 struct Cli {
@@ -535,6 +540,7 @@ fn init_command(
     force: bool,
     json: bool,
 ) -> ExitCode {
+    let use_default_bootstrap_root = root_dir.is_none() && !in_place;
     let cwd = match std::env::current_dir() {
         Ok(path) => path,
         Err(err) => {
@@ -550,7 +556,23 @@ fn init_command(
         }
     };
     match init_workspace(&root, preset.into(), force) {
-        Ok(report) => {
+        Ok(mut report) => {
+            if use_default_bootstrap_root {
+                match ensure_bootstrap_bridge_config(&cwd, force) {
+                    Ok((path, true)) => report.notes.push(format!(
+                        "Generated project bridge config at `{}`; you can run mcp-subagent commands from project root without extra --agents-dir/--state-dir flags.",
+                        path.display()
+                    )),
+                    Ok((path, false)) => report.notes.push(format!(
+                        "Using existing project config `{}` (preserved).",
+                        path.display()
+                    )),
+                    Err(err) => {
+                        eprintln!("init failed: {err}");
+                        return ExitCode::from(1);
+                    }
+                }
+            }
             if json {
                 print_json(&report);
             } else {
@@ -576,7 +598,51 @@ fn resolve_init_root(
     if in_place {
         return Ok(cwd.to_path_buf());
     }
-    Ok(cwd.join(".mcp-subagent").join("bootstrap"))
+    Ok(cwd.join(DEFAULT_BOOTSTRAP_ROOT_RELATIVE))
+}
+
+fn ensure_bootstrap_bridge_config(
+    cwd: &Path,
+    force: bool,
+) -> std::result::Result<(PathBuf, bool), String> {
+    let config_path = cwd.join(PROJECT_BRIDGE_CONFIG_RELATIVE);
+    if config_path.exists() && !force {
+        if !config_path.is_file() {
+            return Err(format!(
+                "project bridge config path is not a file: {}",
+                config_path.display()
+            ));
+        }
+        return Ok((config_path, false));
+    }
+    if config_path.is_dir() {
+        return Err(format!(
+            "project bridge config path is a directory: {}",
+            config_path.display()
+        ));
+    }
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create project config directory: {err}"))?;
+    }
+    fs::write(&config_path, bootstrap_bridge_config_template())
+        .map_err(|err| format!("failed to write project bridge config: {err}"))?;
+    Ok((config_path, true))
+}
+
+fn bootstrap_bridge_config_template() -> String {
+    format!(
+        r#"[server]
+transport = "stdio"
+log_level = "info"
+
+[paths]
+agents_dirs = ["{agents_dir}"]
+state_dir = "{state_dir}"
+"#,
+        agents_dir = BRIDGE_AGENTS_DIR_RELATIVE,
+        state_dir = BRIDGE_STATE_DIR_RELATIVE
+    )
 }
 
 fn connect_snippet_command(cfg: RuntimeConfig, host: ConnectHostArg) -> ExitCode {
@@ -980,8 +1046,9 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        build_selected_file_inputs, resolve_init_root, ArtifactKindArg, Cli, Commands,
-        ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput,
+        bootstrap_bridge_config_template, build_selected_file_inputs,
+        ensure_bootstrap_bridge_config, resolve_init_root, ArtifactKindArg, Cli, Commands,
+        ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput, DEFAULT_BOOTSTRAP_ROOT_RELATIVE,
     };
 
     #[test]
@@ -1115,7 +1182,7 @@ mod tests {
         let root = resolve_init_root(cwd, None, false).expect("resolve");
         assert_eq!(
             root,
-            PathBuf::from("/tmp/workspace/.mcp-subagent/bootstrap")
+            PathBuf::from(format!("/tmp/workspace/{DEFAULT_BOOTSTRAP_ROOT_RELATIVE}"))
         );
     }
 
@@ -1124,6 +1191,45 @@ mod tests {
         let cwd = Path::new("/tmp/workspace");
         let root = resolve_init_root(cwd, None, true).expect("resolve");
         assert_eq!(root, PathBuf::from("/tmp/workspace"));
+    }
+
+    #[test]
+    fn writes_bootstrap_bridge_config_when_missing() {
+        let dir = tempdir().expect("tempdir");
+        let (path, written) = ensure_bootstrap_bridge_config(dir.path(), false).expect("write");
+        assert!(written);
+        let content = fs::read_to_string(path).expect("read");
+        assert_eq!(content, bootstrap_bridge_config_template());
+    }
+
+    #[test]
+    fn preserves_existing_bridge_config_without_force() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(".mcp-subagent/config.toml");
+        fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+        fs::write(&path, "custom = true\n").expect("write custom");
+
+        let (resolved, written) =
+            ensure_bootstrap_bridge_config(dir.path(), false).expect("ensure bridge");
+        assert_eq!(resolved, path);
+        assert!(!written);
+        let content = fs::read_to_string(&resolved).expect("read");
+        assert_eq!(content, "custom = true\n");
+    }
+
+    #[test]
+    fn overwrites_existing_bridge_config_with_force() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(".mcp-subagent/config.toml");
+        fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+        fs::write(&path, "custom = true\n").expect("write custom");
+
+        let (resolved, written) =
+            ensure_bootstrap_bridge_config(dir.path(), true).expect("ensure bridge");
+        assert_eq!(resolved, path);
+        assert!(written);
+        let content = fs::read_to_string(&resolved).expect("read");
+        assert_eq!(content, bootstrap_bridge_config_template());
     }
 
     #[test]
