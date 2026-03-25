@@ -294,7 +294,15 @@ Gemini CLI:
 {}
 ```
 
-Regenerate connect snippets at any time:
+Apply integration directly at any time:
+
+```bash
+mcp-subagent connect --host claude
+mcp-subagent connect --host codex
+mcp-subagent connect --host gemini
+```
+
+Or print connect snippets only:
 
 ```bash
 mcp-subagent connect-snippet --host claude

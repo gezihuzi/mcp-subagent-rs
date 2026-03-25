@@ -20,6 +20,7 @@ mcp-subagent mcp [AGENTS_DIR]
 mcp-subagent doctor [AGENTS_DIR] [--json]
 mcp-subagent validate [AGENTS_DIR]
 mcp-subagent init [--preset claude-opus-supervisor|codex-primary-builder|gemini-frontend-team|local-ollama-fallback|minimal-single-provider] [--root-dir ... | --in-place] [--force] [--json]
+mcp-subagent connect --host claude|codex|gemini [--run-host]
 mcp-subagent connect-snippet --host claude|codex|gemini
 mcp-subagent list-agents [--json]
 mcp-subagent run <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
@@ -90,10 +91,16 @@ Use this fixed order for first-time setup:
 mcp-subagent init --preset claude-opus-supervisor
 mcp-subagent validate
 mcp-subagent doctor
-mcp-subagent connect-snippet --host claude
+mcp-subagent connect --host claude
 ```
 
 If you explicitly want old in-place behavior, run `init --in-place`.
+
+If you only want to print and inspect the host command without executing it, use:
+
+```bash
+mcp-subagent connect-snippet --host claude
+```
 
 Other preset examples:
 

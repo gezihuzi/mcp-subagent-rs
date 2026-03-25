@@ -1710,3 +1710,33 @@
   - 缺失文件创建；
   - 部分规则补齐；
   - catch-all 已存在保持不变。
+
+## T-068 V0.8-P0-ConnectApplyAndHostLaunch (Completed 2026-03-25)
+
+任务：新增可直接执行的 `connect` 命令，支持一键接入 host，并可选立即启动对应 host，保留 `connect-snippet` 作为只输出文本路径。  
+验收标准：
+
+1. 新增 `mcp-subagent connect --host claude|codex|gemini`，默认直接执行对应 host 的 MCP 注册命令。
+2. 新增 `--run-host`，在注册成功后直接启动对应 host CLI。
+3. 保持 `connect-snippet` 兼容；两者都复用同一套路径解析与 host 参数映射。
+4. 新增 CLI 解析测试与 connect 构建测试，`cargo test` 通过。
+5. README 命令面与 onboarding 同步新命令，并说明 `connect-snippet` 用于仅打印命令。
+完成记录：
+
+- 已新增 `connect` 命令面并保持 `connect-snippet` 兼容：
+  - `mcp-subagent connect --host claude|codex|gemini [--run-host]`；
+  - `connect` 默认直接执行 host MCP 注册命令；
+  - `--run-host` 在注册成功后立即启动对应 host CLI。
+- 已在 connect 模块收口 host 参数映射：
+  - `src/connect.rs` 新增 `ConnectInvocation`；
+  - 新增 `build_connect_invocation` 和 `build_host_launch_invocation`，用于执行态命令构建；
+  - `connect-snippet` 保持原输出格式，继续用于只打印命令。
+- 已在主命令层新增执行逻辑：
+  - `src/main.rs` 新增 `Commands::Connect` 分支；
+  - 新增 `connect_command`、`resolve_connect_paths`、`run_invocation` 执行链路与错误处理。
+- 已同步文档：
+  - `README.md` 命令面和 Quick Onboarding 改为优先 `connect --host ...`；
+  - `src/init.rs` 生成模板新增“直接接入”示例，并保留 snippet-only 指令。
+- 已通过回归：
+  - `cargo test -q`（`141 + 21 + 3` tests passed）
+  - `./scripts/smoke_v08.sh`（使用 provider stub 避免本机外部 CLI probe 阻塞）通过。

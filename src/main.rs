@@ -1,13 +1,16 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{Command, ExitCode, Stdio},
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mcp_subagent::{
     config::{resolve_runtime_config, ConfigOverrides, RuntimeConfig},
-    connect::{build_connect_snippet, resolve_connect_snippet_paths, ConnectHost},
+    connect::{
+        build_connect_invocation, build_connect_snippet, build_host_launch_invocation,
+        resolve_connect_snippet_paths, ConnectHost, ConnectInvocation,
+    },
     doctor::{build_doctor_report, render_doctor_report},
     init::{init_workspace, InitPreset, InitReport},
     logging::{init_logging, LoggingGuard},
@@ -85,6 +88,12 @@ enum Commands {
     ConnectSnippet {
         #[arg(long, value_enum)]
         host: ConnectHostArg,
+    },
+    Connect {
+        #[arg(long, value_enum)]
+        host: ConnectHostArg,
+        #[arg(long)]
+        run_host: bool,
     },
     ListAgents {
         #[arg(long)]
@@ -199,6 +208,16 @@ impl From<ConnectHostArg> for ConnectHost {
     }
 }
 
+impl ConnectHostArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            ConnectHostArg::Claude => "claude",
+            ConnectHostArg::Codex => "codex",
+            ConnectHostArg::Gemini => "gemini",
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -285,6 +304,23 @@ async fn main() -> ExitCode {
             };
             info!("starting command: connect-snippet");
             connect_snippet_command(cfg, host)
+        }
+        Commands::Connect { host, run_host } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: connect");
+            connect_command(cfg, host, run_host)
         }
         Commands::ListAgents { json } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -755,30 +791,114 @@ fn gitignore_rule_matches_target(rule: &str, target: &str) -> bool {
 }
 
 fn connect_snippet_command(cfg: RuntimeConfig, host: ConnectHostArg) -> ExitCode {
-    let Some(first_agents_dir) = cfg.agents_dirs.first().cloned() else {
-        eprintln!("connect-snippet failed: no agents directory configured");
+    let paths = match resolve_connect_paths(cfg, "connect-snippet") {
+        Ok(paths) => paths,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let snippet = build_connect_snippet(host.into(), &paths);
+    println!("{snippet}");
+    ExitCode::SUCCESS
+}
+
+fn connect_command(cfg: RuntimeConfig, host: ConnectHostArg, run_host: bool) -> ExitCode {
+    let connect_host = host.into();
+    let paths = match resolve_connect_paths(cfg, "connect") {
+        Ok(paths) => paths,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let invocation = build_connect_invocation(connect_host, &paths);
+    if let Err(err) = run_connect_invocation(&invocation) {
+        eprintln!("connect failed: {err}");
         return ExitCode::from(1);
+    }
+    println!(
+        "registered mcp-subagent for host `{}` (agents_dir={}, state_dir={})",
+        host.as_str(),
+        paths.agents_dir.display(),
+        paths.state_dir.display()
+    );
+    if run_host {
+        let launch = build_host_launch_invocation(connect_host);
+        if let Err(err) = run_host_invocation(&launch) {
+            eprintln!("connect failed: {err}");
+            return ExitCode::from(1);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn resolve_connect_paths(
+    cfg: RuntimeConfig,
+    command_label: &str,
+) -> std::result::Result<mcp_subagent::connect::ConnectSnippetPaths, String> {
+    let Some(first_agents_dir) = cfg.agents_dirs.first().cloned() else {
+        return Err(format!(
+            "{command_label} failed: no agents directory configured"
+        ));
     };
 
     let cwd = match std::env::current_dir() {
         Ok(path) => path,
         Err(err) => {
-            eprintln!("connect-snippet failed: unable to resolve current directory: {err}");
-            return ExitCode::from(1);
+            return Err(format!(
+                "{command_label} failed: unable to resolve current directory: {err}"
+            ));
         }
     };
     let binary = match std::env::current_exe() {
         Ok(path) => path,
         Err(err) => {
-            eprintln!("connect-snippet failed: unable to resolve current executable: {err}");
-            return ExitCode::from(1);
+            return Err(format!(
+                "{command_label} failed: unable to resolve current executable: {err}"
+            ));
         }
     };
+    Ok(resolve_connect_snippet_paths(
+        &cwd,
+        binary,
+        first_agents_dir,
+        cfg.state_dir,
+    ))
+}
 
-    let paths = resolve_connect_snippet_paths(&cwd, binary, first_agents_dir, cfg.state_dir);
-    let snippet = build_connect_snippet(host.into(), &paths);
-    println!("{snippet}");
-    ExitCode::SUCCESS
+fn run_connect_invocation(invocation: &ConnectInvocation) -> std::result::Result<(), String> {
+    run_invocation(invocation, false)
+}
+
+fn run_host_invocation(invocation: &ConnectInvocation) -> std::result::Result<(), String> {
+    run_invocation(invocation, true)
+}
+
+fn run_invocation(
+    invocation: &ConnectInvocation,
+    interactive: bool,
+) -> std::result::Result<(), String> {
+    let mut command = Command::new(&invocation.executable);
+    command.args(&invocation.args);
+    if interactive {
+        command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+    }
+
+    let status = command
+        .status()
+        .map_err(|err| format!("failed to execute `{}`: {err}", invocation.executable))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{}` exited with status {}",
+            invocation.executable, status
+        ))
+    }
 }
 
 async fn list_agents(cfg: RuntimeConfig, json: bool) -> ExitCode {
@@ -1397,6 +1517,30 @@ target/
         match cli.command {
             Commands::ConnectSnippet { host } => {
                 assert!(matches!(host, ConnectHostArg::Claude));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_connect_host() {
+        let cli = Cli::parse_from(["mcp-subagent", "connect", "--host", "codex"]);
+        match cli.command {
+            Commands::Connect { host, run_host } => {
+                assert!(matches!(host, ConnectHostArg::Codex));
+                assert!(!run_host);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_connect_with_run_host_flag() {
+        let cli = Cli::parse_from(["mcp-subagent", "connect", "--host", "gemini", "--run-host"]);
+        match cli.command {
+            Commands::Connect { host, run_host } => {
+                assert!(matches!(host, ConnectHostArg::Gemini));
+                assert!(run_host);
             }
             other => panic!("unexpected command: {other:?}"),
         }
