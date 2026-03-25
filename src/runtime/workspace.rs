@@ -10,15 +10,18 @@ use walkdir::WalkDir;
 use crate::{
     error::{McpSubagentError, Result},
     spec::{
-        runtime_policy::{SandboxPolicy, WorkingDirPolicy},
-        AgentSpec,
+        runtime_policy::{DelegationContextPolicy, SandboxPolicy, WorkingDirPolicy},
+        AgentSpec, Provider,
     },
     types::RunRequest,
 };
 
+const GEMINI_RESEARCH_SCRATCH_ENV: &str = "MCP_SUBAGENT_GEMINI_RESEARCH_SCRATCH_DIR";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum WorkspaceMode {
     InPlace,
+    StableScratch,
     TempCopy,
     GitWorktree,
     GitWorktreeFallbackTempCopy,
@@ -67,6 +70,24 @@ fn prepare_auto_workspace(
     state_dir: &Path,
     handle_id: &str,
 ) -> Result<PreparedWorkspace> {
+    prepare_auto_workspace_with_scratch_override(
+        spec,
+        request,
+        source_path,
+        state_dir,
+        handle_id,
+        None,
+    )
+}
+
+fn prepare_auto_workspace_with_scratch_override(
+    spec: &AgentSpec,
+    request: &RunRequest,
+    source_path: PathBuf,
+    state_dir: &Path,
+    handle_id: &str,
+    scratch_override: Option<&Path>,
+) -> Result<PreparedWorkspace> {
     let stage = request
         .stage
         .as_deref()
@@ -74,6 +95,17 @@ fn prepare_auto_workspace(
         .to_ascii_lowercase();
     let read_stage = matches!(stage.as_str(), "research" | "plan");
     let read_only = matches!(spec.runtime.sandbox, SandboxPolicy::ReadOnly);
+
+    if let Some(prepared) = maybe_prepare_gemini_research_scratch_workspace(
+        spec,
+        request,
+        &source_path,
+        &stage,
+        read_only,
+        scratch_override,
+    )? {
+        return Ok(prepared);
+    }
 
     if read_only || read_stage {
         let mut notes = Vec::new();
@@ -95,6 +127,119 @@ fn prepare_auto_workspace(
     }
 
     prepare_git_worktree_workspace(source_path, state_dir, handle_id)
+}
+
+fn maybe_prepare_gemini_research_scratch_workspace(
+    spec: &AgentSpec,
+    request: &RunRequest,
+    source_path: &Path,
+    stage: &str,
+    read_only: bool,
+    scratch_override: Option<&Path>,
+) -> Result<Option<PreparedWorkspace>> {
+    if !should_use_gemini_research_scratch(spec, request, stage, read_only) {
+        return Ok(None);
+    }
+
+    let workspace_path = resolve_stable_gemini_research_scratch_dir(scratch_override)?;
+    let notes = vec![
+        format!(
+            "auto policy selected stable scratch workspace for Gemini research-only task: {}",
+            workspace_path.display()
+        ),
+        format!("original working_dir: {}", source_path.display()),
+    ];
+
+    Ok(Some(PreparedWorkspace {
+        source_path: source_path.to_path_buf(),
+        workspace_path,
+        mode: WorkspaceMode::StableScratch,
+        notes,
+    }))
+}
+
+fn should_use_gemini_research_scratch(
+    spec: &AgentSpec,
+    request: &RunRequest,
+    stage: &str,
+    read_only: bool,
+) -> bool {
+    if !matches!(spec.core.provider, Provider::Gemini) {
+        return false;
+    }
+    if !read_only {
+        return false;
+    }
+    if !matches!(
+        spec.runtime.delegation_context,
+        DelegationContextPolicy::Minimal
+    ) {
+        return false;
+    }
+    if !request.selected_files.is_empty() || request.plan_ref.is_some() {
+        return false;
+    }
+
+    let stage_research = matches!(stage, "research" | "plan");
+    let tag_research = spec
+        .core
+        .tags
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case("research"));
+    stage_research || tag_research
+}
+
+fn resolve_stable_gemini_research_scratch_dir(override_path: Option<&Path>) -> Result<PathBuf> {
+    let cwd = std::env::current_dir().map_err(McpSubagentError::Io)?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let env_override = std::env::var(GEMINI_RESEARCH_SCRATCH_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    resolve_stable_gemini_research_scratch_dir_with(
+        override_path,
+        env_override.as_deref(),
+        &cwd,
+        home.as_deref(),
+    )
+}
+
+fn resolve_stable_gemini_research_scratch_dir_with(
+    override_path: Option<&Path>,
+    env_override: Option<&str>,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Result<PathBuf> {
+    let mut candidate = if let Some(path) = override_path {
+        path.to_path_buf()
+    } else if let Some(path) = env_override {
+        PathBuf::from(path)
+    } else if let Some(home_dir) = home {
+        home_dir
+            .join(".mcp-subagent")
+            .join("provider-workspaces")
+            .join("gemini")
+            .join("research")
+    } else {
+        cwd.join(".mcp-subagent")
+            .join("provider-workspaces")
+            .join("gemini")
+            .join("research")
+    };
+
+    if !candidate.is_absolute() {
+        candidate = cwd.join(candidate);
+    }
+    fs::create_dir_all(&candidate).map_err(McpSubagentError::Io)?;
+    candidate.canonicalize().map_err(|err| {
+        McpSubagentError::Io(std::io::Error::new(
+            err.kind(),
+            format!(
+                "failed to resolve stable Gemini scratch workspace ({}): {err}",
+                candidate.display()
+            ),
+        ))
+    })
 }
 
 pub fn resolve_source_path(path: &Path) -> Result<PathBuf> {
@@ -253,25 +398,38 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        runtime::workspace::{prepare_workspace, WorkspaceMode},
+        runtime::workspace::{
+            prepare_auto_workspace_with_scratch_override, prepare_workspace, WorkspaceMode,
+        },
         spec::{
             core::{AgentSpecCore, Provider},
-            runtime_policy::{FileConflictPolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
+            runtime_policy::{
+                DelegationContextPolicy, FileConflictPolicy, RuntimePolicy, SandboxPolicy,
+                WorkingDirPolicy,
+            },
             AgentSpec,
         },
         types::{RunMode, RunRequest},
     };
 
     fn sample_spec(policy: WorkingDirPolicy) -> AgentSpec {
-        sample_spec_with_sandbox(policy, SandboxPolicy::WorkspaceWrite)
+        sample_spec_with_provider(policy, SandboxPolicy::WorkspaceWrite, Provider::Mock)
     }
 
     fn sample_spec_with_sandbox(policy: WorkingDirPolicy, sandbox: SandboxPolicy) -> AgentSpec {
+        sample_spec_with_provider(policy, sandbox, Provider::Mock)
+    }
+
+    fn sample_spec_with_provider(
+        policy: WorkingDirPolicy,
+        sandbox: SandboxPolicy,
+        provider: Provider,
+    ) -> AgentSpec {
         AgentSpec {
             core: AgentSpecCore {
                 name: "writer".to_string(),
                 description: "write code".to_string(),
-                provider: Provider::Mock,
+                provider,
                 model: None,
                 instructions: "do work".to_string(),
                 allowed_tools: Vec::new(),
@@ -436,5 +594,126 @@ mod tests {
             prepared.mode,
             WorkspaceMode::GitWorktree | WorkspaceMode::GitWorktreeFallbackTempCopy
         ));
+    }
+
+    #[test]
+    fn auto_policy_routes_gemini_research_profile_to_stable_scratch() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let scratch = temp.path().join("scratch").join("gemini-research");
+        std::fs::create_dir_all(&source).expect("create source");
+
+        let request = RunRequest {
+            task: "Search official website".to_string(),
+            task_brief: None,
+            parent_summary: None,
+            selected_files: Vec::new(),
+            stage: Some("research".to_string()),
+            plan_ref: None,
+            working_dir: source.clone(),
+            run_mode: RunMode::Sync,
+            acceptance_criteria: Vec::new(),
+        };
+
+        let mut spec = sample_spec_with_provider(
+            WorkingDirPolicy::Auto,
+            SandboxPolicy::ReadOnly,
+            Provider::Gemini,
+        );
+        spec.runtime.delegation_context = DelegationContextPolicy::Minimal;
+        spec.core.tags = vec!["research".to_string()];
+
+        let prepared = prepare_auto_workspace_with_scratch_override(
+            &spec,
+            &request,
+            source.canonicalize().expect("source canonicalized"),
+            temp.path(),
+            "h6",
+            Some(&scratch),
+        )
+        .expect("prepare");
+
+        assert_eq!(prepared.mode, WorkspaceMode::StableScratch);
+        assert_eq!(
+            prepared.workspace_path,
+            scratch.canonicalize().expect("scratch canonicalized")
+        );
+        assert_eq!(
+            prepared.source_path,
+            source.canonicalize().expect("source canonicalized")
+        );
+        assert!(prepared
+            .notes
+            .iter()
+            .any(|note| note.contains("stable scratch workspace")));
+    }
+
+    #[test]
+    fn auto_policy_keeps_in_place_when_gemini_research_has_selected_files() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let scratch = temp.path().join("scratch").join("gemini-research");
+        std::fs::create_dir_all(&source).expect("create source");
+
+        let request = RunRequest {
+            task: "Inspect src/lib.rs".to_string(),
+            task_brief: None,
+            parent_summary: None,
+            selected_files: vec![crate::types::SelectedFile {
+                path: std::path::PathBuf::from("src/lib.rs"),
+                rationale: None,
+                content: None,
+            }],
+            stage: Some("research".to_string()),
+            plan_ref: None,
+            working_dir: source.clone(),
+            run_mode: RunMode::Sync,
+            acceptance_criteria: Vec::new(),
+        };
+
+        let mut spec = sample_spec_with_provider(
+            WorkingDirPolicy::Auto,
+            SandboxPolicy::ReadOnly,
+            Provider::Gemini,
+        );
+        spec.runtime.delegation_context = DelegationContextPolicy::Minimal;
+        spec.core.tags = vec!["research".to_string()];
+
+        let prepared = prepare_auto_workspace_with_scratch_override(
+            &spec,
+            &request,
+            source.canonicalize().expect("source canonicalized"),
+            temp.path(),
+            "h7",
+            Some(&scratch),
+        )
+        .expect("prepare");
+
+        assert_eq!(prepared.mode, WorkspaceMode::InPlace);
+        assert_eq!(
+            prepared.workspace_path,
+            source.canonicalize().expect("source canonicalized")
+        );
+    }
+
+    #[test]
+    fn resolve_stable_gemini_scratch_dir_uses_home_when_unset() {
+        let temp = tempdir().expect("tempdir");
+        let cwd = temp.path().join("cwd");
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        std::fs::create_dir_all(&home).expect("create home");
+
+        let resolved =
+            super::resolve_stable_gemini_research_scratch_dir_with(None, None, &cwd, Some(&home))
+                .expect("resolve scratch");
+        let expected = home
+            .join(".mcp-subagent")
+            .join("provider-workspaces")
+            .join("gemini")
+            .join("research")
+            .canonicalize()
+            .expect("canonicalize expected");
+        assert_eq!(resolved, expected);
     }
 }

@@ -82,6 +82,7 @@ fn to_workspace_record(prepared: &PreparedWorkspace, lock_keys: Vec<String>) -> 
     WorkspaceRecord {
         mode: match prepared.mode {
             WorkspaceMode::InPlace => "in_place",
+            WorkspaceMode::StableScratch => "stable_scratch",
             WorkspaceMode::TempCopy => "temp_copy",
             WorkspaceMode::GitWorktree => "git_worktree",
             WorkspaceMode::GitWorktreeFallbackTempCopy => "git_worktree_fallback_temp_copy",

@@ -2650,3 +2650,39 @@
   - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 新增 `status_after_done` 与 `stats` 的 `advice` 字段断言。
 - 已同步 README：
   - MCP 工具说明补充 `get_agent_status/get_agent_stats` 返回 `block_reason/advice`。
+
+## T-100 V0.10-P1-GeminiResearchStableScratchWorkspace (Completed 2026-03-25)
+
+任务：把 Gemini 简单 research 任务从“默认继承当前仓库 working_dir”改为“默认长期复用 stable scratch workspace”，降低 trust/skills/discovery 噪音。  
+验收标准：
+
+1. `working_dir_policy=auto` 下，满足以下条件时默认切到 stable scratch workspace：
+   - provider=`gemini`
+   - sandbox=`read_only`
+   - delegation_context=`minimal`
+   - 无 `selected_files`、无 `plan_ref`
+   - 任务有 research 信号（`stage=research|plan` 或 agent tag 含 `research`）
+2. scratch 路径长期复用，默认落到 `~/.mcp-subagent/provider-workspaces/gemini/research`，并支持环境变量覆盖。
+3. run metadata `workspace.mode` 能区分该路径（新增 `stable_scratch`）。
+4. cleanup 不会删除 stable scratch 目录。
+5. 新增单测覆盖：scratch 路由命中、selected_files 保护分支、scratch 路径解析、cleanup 语义。
+6. README 补充默认行为与覆盖方式说明。
+7. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/runtime/workspace.rs`：
+  - 新增 `WorkspaceMode::StableScratch`；
+  - 新增 Gemini research-only 自动路由判定；
+  - 新增 stable scratch 路径解析逻辑（默认 HOME 下路径，支持 `MCP_SUBAGENT_GEMINI_RESEARCH_SCRATCH_DIR` 覆盖）。
+- 已升级 `src/runtime/cleanup.rs`：
+  - `StableScratch` 与 `InPlace` 一样不创建 cleanup guard，不做目录删除。
+- 已升级 `src/mcp/service.rs`：
+  - workspace metadata 映射新增 `stable_scratch`。
+- 已补测试：
+  - `auto_policy_routes_gemini_research_profile_to_stable_scratch`
+  - `auto_policy_keeps_in_place_when_gemini_research_has_selected_files`
+  - `resolve_stable_gemini_scratch_dir_uses_home_when_unset`
+  - `stable_scratch_workspace_has_no_cleanup_guard`
+- 已同步 README：
+  - 配置环境变量段新增 `MCP_SUBAGENT_GEMINI_RESEARCH_SCRATCH_DIR`；
+  - 推荐命令流补充 stable scratch 默认行为说明。

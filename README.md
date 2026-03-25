@@ -89,6 +89,7 @@ Runtime policy note:
 - `MCP_SUBAGENT_AGENTS_DIRS`
 - `MCP_SUBAGENT_STATE_DIR`
 - `MCP_SUBAGENT_LOG_LEVEL`
+- `MCP_SUBAGENT_GEMINI_RESEARCH_SCRATCH_DIR` (optional: overrides stable scratch path for Gemini research-only auto routing)
 
 Default paths:
 
@@ -162,6 +163,10 @@ mcp-subagent run fast-researcher \
   --task "Search the official site of Octoclip and return JSON: {name,url,description}" \
   --json
 ```
+
+For Gemini read-only + minimal-delegation research profiles (no selected files / no `plan_ref`), `working_dir_policy=auto` now routes execution to a stable scratch workspace by default:
+`~/.mcp-subagent/provider-workspaces/gemini/research`.
+Use `MCP_SUBAGENT_GEMINI_RESEARCH_SCRATCH_DIR` to override this path.
 
 Asynchronous task (recommended for coding/review jobs):
 
