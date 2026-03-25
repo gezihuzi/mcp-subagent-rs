@@ -2686,3 +2686,52 @@
 - 已同步 README：
   - 配置环境变量段新增 `MCP_SUBAGENT_GEMINI_RESEARCH_SCRATCH_DIR`；
   - 推荐命令流补充 stable scratch 默认行为说明。
+
+## T-101 V0.10-P1-GeminiStableScratchDiscoveryOverride (Completed 2026-03-25)
+
+任务：解决 stable scratch 命中后 Gemini 仍因 `native_discovery=isolated` 触发 auth fallback 慢启动的问题，在运行时自动降级 discovery 策略。  
+验收标准：
+
+1. 当 workspace mode=`stable_scratch` 且 provider=`gemini` 且 `native_discovery=isolated` 时，运行时自动改为 `minimal`。
+2. override 仅作用于本次执行，不改写 agent 文件。
+3. workspace notes 记录 override 原因，便于 run 审计。
+4. 新增单测覆盖 override 触发与 notes 写入。
+5. README 补充 stable scratch + discovery override 行为说明。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/mcp/service.rs`：
+  - 新增 `apply_workspace_runtime_overrides`；
+  - `run_dispatch` 改为基于 `effective_spec` 执行（memory resolve + dispatcher + runner 统一吃 override 后 spec）；
+  - 命中 stable scratch 时把 Gemini `native_discovery` 从 `isolated` 降级到 `minimal`，并写入 workspace note。
+- 已补测试：
+  - `stable_scratch_overrides_gemini_isolated_discovery_to_minimal`。
+- 已同步 README：
+  - stable scratch 段补充“自动降级 isolated->minimal 避免 auth/trust fallback loops”说明。
+
+## T-102 V0.10-P1-GlobalEventsFollow (Completed 2026-03-25)
+
+任务：补齐全局事件流命令面，让排障时不必先拿单个 handle，再能直接观察所有 run 的事件推进。  
+验收标准：
+
+1. `events` 子命令支持 `--all`，形成命令面：`events [<handle-id>] [--all] ...`。
+2. `events --all`（非 follow）可聚合输出所有 run 的事件（支持 `--event/--phase` 过滤）。
+3. `events --all --follow` 支持跨 run 增量输出（含 handle 前缀），并支持 `--timeout-secs/--phase-timeout-secs`。
+4. 单 handle 行为保持兼容（原有 `events <handle-id>` 路径不变）。
+5. CLI 解析测试覆盖 `events --all` 参数组合。
+6. 新增聚合快照测试覆盖多 handle 事件加载与过滤。
+7. README 命令面和示例补充 `events --all --follow`。
+8. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/main.rs`：
+  - `Commands::Events` 新增 `all: bool`，`handle_id` 改为可选并与 `--all` 互斥；
+  - `read_events` 新增 all 分支校验与分流；
+  - 新增 `collect_run_event_snapshots` 与 `read_events_all`，实现全局一次性/跟随模式；
+  - follow 全局模式支持 `--event/--phase` 过滤、全局 timeout、phase-timeout。
+- 已补测试：
+  - `parses_events_all_command_flags`；
+  - `collect_run_event_snapshots_loads_all_handles_and_filters`。
+- 已同步 README：
+  - command surface 改为 `events [<handle-id>] [--all] ...`；
+  - 示例新增 `mcp-subagent events --all --follow`。

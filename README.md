@@ -29,7 +29,7 @@ mcp-subagent show <handle-id> [--json]
 mcp-subagent result <handle-id> [--raw | --normalized | --summary] [--json]
 mcp-subagent logs <handle-id> [--stdout | --stderr] [--phase ...] [--follow] [--interval-ms ...] [--timeout-secs ...] [--phase-timeout-secs ...] [--json]
 mcp-subagent timeline <handle-id> [--event ...] [--json]
-mcp-subagent events <handle-id> [--event ...] [--phase ...] [--follow] [--interval-ms ...] [--timeout-secs ...] [--phase-timeout-secs ...] [--json]
+mcp-subagent events [<handle-id>] [--all] [--event ...] [--phase ...] [--follow] [--interval-ms ...] [--timeout-secs ...] [--phase-timeout-secs ...] [--json]
 mcp-subagent watch <handle-id> [--phase ...] [--interval-ms ...] [--timeout-secs ...] [--phase-timeout-secs ...] [--json]
 mcp-subagent wait <handle-id> [--interval-ms ...] [--timeout-secs ...] [--json]
 mcp-subagent stats <handle-id> [--json]
@@ -166,6 +166,7 @@ mcp-subagent run fast-researcher \
 
 For Gemini read-only + minimal-delegation research profiles (no selected files / no `plan_ref`), `working_dir_policy=auto` now routes execution to a stable scratch workspace by default:
 `~/.mcp-subagent/provider-workspaces/gemini/research`.
+When this stable scratch route is active, runtime will auto-downgrade Gemini `native_discovery="isolated"` to `minimal` to avoid auth/trust startup fallback loops.
 Use `MCP_SUBAGENT_GEMINI_RESEARCH_SCRATCH_DIR` to override this path.
 
 Asynchronous task (recommended for coding/review jobs):
@@ -192,6 +193,7 @@ mcp-subagent logs <handle-id> --follow
 mcp-subagent events <handle-id> --json
 mcp-subagent events <handle-id> --event provider.heartbeat --follow
 mcp-subagent events <handle-id> --event provider.first_output.warning --follow
+mcp-subagent events --all --follow
 ```
 
 `timeline` is kept as a compatibility alias; prefer `events`.

@@ -17,7 +17,7 @@ use crate::{
         },
         workspace::{prepare_workspace, PreparedWorkspace, WorkspaceMode},
     },
-    spec::runtime_policy::DelegationContextPolicy,
+    spec::runtime_policy::{DelegationContextPolicy, NativeDiscoveryPolicy},
     spec::AgentSpec,
     spec::Provider,
     types::RunRequest,
@@ -38,22 +38,27 @@ pub(crate) async fn run_dispatch(
     state_dir: &Path,
     lock_keys: Vec<String>,
 ) -> std::result::Result<DispatchEnvelope, ErrorData> {
-    let prepared_workspace = prepare_workspace(spec, request, state_dir, handle_id)
+    let mut prepared_workspace = prepare_workspace(spec, request, state_dir, handle_id)
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+    let effective_spec = apply_workspace_runtime_overrides(spec, &mut prepared_workspace);
     let workspace_cleanup = WorkspaceCleanupGuard::for_workspace(&prepared_workspace);
     let workspace_record = to_workspace_record(&prepared_workspace, lock_keys);
 
     let mut effective_request = request.clone();
     effective_request.working_dir = prepared_workspace.workspace_path;
-    let resolved_memory = resolve_memory(spec, &effective_request)
+    let resolved_memory = resolve_memory(&effective_spec, &effective_request)
         .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
-    attach_plan_section_acceptance_criteria(spec, &mut effective_request, &resolved_memory);
+    attach_plan_section_acceptance_criteria(
+        &effective_spec,
+        &mut effective_request,
+        &resolved_memory,
+    );
     let memory_resolution = build_memory_resolution_snapshot(&resolved_memory);
 
-    let runner = select_runner(&spec.core.provider);
+    let runner = select_runner(&effective_spec.core.provider);
     let dispatcher = Dispatcher::new(DefaultContextCompiler, runner);
     let mut result = dispatcher
-        .run(spec, &effective_request, resolved_memory)
+        .run(&effective_spec, &effective_request, resolved_memory)
         .await
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     result.metadata.handle_id = parse_handle_id(handle_id);
@@ -65,6 +70,27 @@ pub(crate) async fn run_dispatch(
         memory_resolution,
         _workspace_cleanup: workspace_cleanup,
     })
+}
+
+fn apply_workspace_runtime_overrides(
+    spec: &AgentSpec,
+    prepared: &mut PreparedWorkspace,
+) -> AgentSpec {
+    let mut effective_spec = spec.clone();
+    if matches!(prepared.mode, WorkspaceMode::StableScratch)
+        && matches!(effective_spec.core.provider, Provider::Gemini)
+        && matches!(
+            effective_spec.runtime.native_discovery,
+            NativeDiscoveryPolicy::Isolated
+        )
+    {
+        effective_spec.runtime.native_discovery = NativeDiscoveryPolicy::Minimal;
+        prepared.notes.push(
+            "runtime override: stable_scratch forces Gemini native_discovery from isolated to minimal to avoid auth/trust startup loops"
+                .to_string(),
+        );
+    }
+    effective_spec
 }
 
 fn select_runner(provider: &Provider) -> Box<dyn AgentRunner> {
@@ -198,11 +224,12 @@ mod tests {
 
     use crate::{
         mcp::service::run_dispatch,
+        runtime::workspace::{PreparedWorkspace, WorkspaceMode},
         spec::{
             core::{AgentSpecCore, Provider},
             runtime_policy::{
                 ContextMode, DelegationContextPolicy, FileConflictPolicy, MemorySource,
-                RuntimePolicy, SandboxPolicy, WorkingDirPolicy,
+                NativeDiscoveryPolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy,
             },
             AgentSpec,
         },
@@ -251,6 +278,38 @@ mod tests {
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
         }
+    }
+
+    #[test]
+    fn stable_scratch_overrides_gemini_isolated_discovery_to_minimal() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let scratch = temp.path().join("scratch");
+        fs::create_dir_all(&source).expect("create source");
+        fs::create_dir_all(&scratch).expect("create scratch");
+
+        let mut spec = sample_spec(
+            WorkingDirPolicy::Auto,
+            vec![MemorySource::AutoProjectMemory],
+        );
+        spec.core.provider = Provider::Gemini;
+        spec.runtime.native_discovery = NativeDiscoveryPolicy::Isolated;
+        let mut prepared = PreparedWorkspace {
+            source_path: source.clone(),
+            workspace_path: scratch,
+            mode: WorkspaceMode::StableScratch,
+            notes: Vec::new(),
+        };
+
+        let effective = super::apply_workspace_runtime_overrides(&spec, &mut prepared);
+        assert_eq!(
+            effective.runtime.native_discovery,
+            NativeDiscoveryPolicy::Minimal
+        );
+        assert!(prepared
+            .notes
+            .iter()
+            .any(|note| note.contains("forces Gemini native_discovery")));
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::IsTerminal,
     path::{Path, PathBuf},
@@ -160,7 +161,10 @@ enum Commands {
         json: bool,
     },
     Events {
-        handle_id: String,
+        #[arg(conflicts_with = "all")]
+        handle_id: Option<String>,
+        #[arg(long, conflicts_with = "handle_id")]
+        all: bool,
         #[arg(long)]
         event: Option<String>,
         #[arg(long)]
@@ -602,6 +606,7 @@ async fn main() -> ExitCode {
         }
         Commands::Events {
             handle_id,
+            all,
             event,
             phase,
             follow,
@@ -627,6 +632,7 @@ async fn main() -> ExitCode {
             read_events(
                 cfg,
                 handle_id,
+                all,
                 event,
                 phase,
                 follow,
@@ -1299,6 +1305,18 @@ impl RunTimelineEvent {
 #[derive(Debug, Clone, Serialize)]
 struct RunTimelineOutput {
     handle_id: String,
+    events: Vec<RunTimelineEvent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunTimelineAllOutput {
+    runs: Vec<RunTimelineOutput>,
+}
+
+#[derive(Debug, Clone)]
+struct RunEventsSnapshot {
+    handle_id: String,
+    status: String,
     events: Vec<RunTimelineEvent>,
 }
 
@@ -2525,6 +2543,226 @@ fn filter_timeline_events(
     events
 }
 
+fn collect_run_event_snapshots(
+    state_dir: &Path,
+    event: Option<&str>,
+    phase: Option<&str>,
+) -> std::result::Result<Vec<RunEventsSnapshot>, String> {
+    let entries = list_run_records(state_dir)?;
+    let mut snapshots = Vec::new();
+    for (handle_id, record) in entries {
+        let events = if run_events_path(state_dir, &handle_id).exists()
+            || run_events_legacy_path(state_dir, &handle_id).exists()
+        {
+            load_run_events(state_dir, &handle_id)?
+        } else {
+            Vec::new()
+        };
+        snapshots.push(RunEventsSnapshot {
+            handle_id,
+            status: record.status,
+            events: filter_timeline_events(events, event, phase),
+        });
+    }
+    Ok(snapshots)
+}
+
+async fn read_events_all(
+    cfg: RuntimeConfig,
+    event: Option<String>,
+    phase: Option<String>,
+    follow: bool,
+    interval_ms: u64,
+    timeout_secs: Option<u64>,
+    phase_timeout_secs: Option<u64>,
+    json: bool,
+) -> ExitCode {
+    if !follow {
+        let snapshots =
+            match collect_run_event_snapshots(&cfg.state_dir, event.as_deref(), phase.as_deref()) {
+                Ok(items) => items,
+                Err(err) => {
+                    eprintln!("events failed: {err}");
+                    return ExitCode::from(1);
+                }
+            };
+        let runs = snapshots
+            .into_iter()
+            .filter(|snapshot| !snapshot.events.is_empty())
+            .map(|snapshot| RunTimelineOutput {
+                handle_id: snapshot.handle_id,
+                events: snapshot.events,
+            })
+            .collect::<Vec<_>>();
+
+        if json {
+            print_json(&RunTimelineAllOutput { runs });
+            return ExitCode::SUCCESS;
+        }
+        if runs.is_empty() {
+            println!("no events found");
+            return ExitCode::SUCCESS;
+        }
+        for run in runs {
+            for item in run.events {
+                let detail =
+                    serde_json::to_string(&item.detail).unwrap_or_else(|_| "null".to_string());
+                let message = item.message.as_deref().unwrap_or("");
+                if message.is_empty() {
+                    println!(
+                        "[{}] {} [{}] {}",
+                        run.handle_id,
+                        item.display_timestamp(),
+                        item.event,
+                        detail
+                    );
+                } else {
+                    println!(
+                        "[{}] {} [{}] {} {}",
+                        run.handle_id,
+                        item.display_timestamp(),
+                        item.event,
+                        message,
+                        detail
+                    );
+                }
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    let started = Instant::now();
+    let sleep_ms = interval_ms.max(50);
+    let mut seen_counts: HashMap<String, usize> = HashMap::new();
+    let mut phase_track: HashMap<String, (Option<String>, Instant)> = HashMap::new();
+    let mut last_phase_progress: HashMap<String, String> = HashMap::new();
+    let mut saw_active_run = false;
+    loop {
+        let snapshots =
+            match collect_run_event_snapshots(&cfg.state_dir, event.as_deref(), phase.as_deref()) {
+                Ok(items) => items,
+                Err(err) => {
+                    eprintln!("events failed: {err}");
+                    return ExitCode::from(1);
+                }
+            };
+
+        let mut active_runs = 0usize;
+        for snapshot in &snapshots {
+            if !is_terminal_status(snapshot.status.as_str()) {
+                active_runs += 1;
+            }
+            let seen = seen_counts
+                .entry(snapshot.handle_id.clone())
+                .or_insert(0usize);
+            if *seen > snapshot.events.len() {
+                *seen = snapshot.events.len();
+            }
+            for evt in snapshot.events.iter().skip(*seen) {
+                if json {
+                    if let Err(err) = print_json_line(&serde_json::json!({
+                        "kind": "event",
+                        "handle_id": snapshot.handle_id,
+                        "seq": evt.seq,
+                        "event": evt.event,
+                        "timestamp": evt.display_timestamp(),
+                        "state": evt.state,
+                        "phase": evt.phase,
+                        "source": evt.source,
+                        "message": evt.message,
+                        "detail": evt.detail,
+                    })) {
+                        eprintln!("events failed: {err}");
+                        return ExitCode::from(1);
+                    }
+                } else {
+                    let detail =
+                        serde_json::to_string(&evt.detail).unwrap_or_else(|_| "null".to_string());
+                    let message = evt.message.as_deref().unwrap_or("");
+                    if message.is_empty() {
+                        println!(
+                            "[{}] {} [{}] {}",
+                            snapshot.handle_id,
+                            evt.display_timestamp(),
+                            evt.event,
+                            detail
+                        );
+                    } else {
+                        println!(
+                            "[{}] {} [{}] {} {}",
+                            snapshot.handle_id,
+                            evt.display_timestamp(),
+                            evt.event,
+                            message,
+                            detail
+                        );
+                    }
+                }
+            }
+            *seen = snapshot.events.len();
+
+            let current_phase = latest_event(&snapshot.events).and_then(|evt| evt.phase.clone());
+            let entry = phase_track
+                .entry(snapshot.handle_id.clone())
+                .or_insert((current_phase.clone(), Instant::now()));
+            if entry.0 != current_phase {
+                *entry = (current_phase, Instant::now());
+            }
+
+            if !json {
+                if let Some(line) = build_phase_progress_line(
+                    &snapshot.events,
+                    is_terminal_status(snapshot.status.as_str()),
+                    OffsetDateTime::now_utc(),
+                    phase.as_deref(),
+                ) {
+                    let last = last_phase_progress
+                        .entry(snapshot.handle_id.clone())
+                        .or_default();
+                    if *last != line {
+                        println!("[{}] {line}", snapshot.handle_id);
+                        *last = line;
+                    }
+                }
+            }
+        }
+
+        if active_runs > 0 {
+            saw_active_run = true;
+        }
+        if saw_active_run && active_runs == 0 {
+            return ExitCode::SUCCESS;
+        }
+        if phase_timeout_secs.is_some() {
+            let timeout = phase_timeout_secs.unwrap_or_default();
+            for snapshot in &snapshots {
+                if is_terminal_status(snapshot.status.as_str()) {
+                    continue;
+                }
+                if let Some((phase_name, phase_started)) = phase_track.get(&snapshot.handle_id) {
+                    if phase_started.elapsed().as_secs() >= timeout {
+                        eprintln!(
+                            "events --all follow phase timeout after {}s in phase `{}` for handle `{}`",
+                            timeout,
+                            phase_name.as_deref().unwrap_or("unknown"),
+                            snapshot.handle_id
+                        );
+                        return ExitCode::from(124);
+                    }
+                }
+            }
+        }
+        if timeout_secs.is_some_and(|secs| started.elapsed().as_secs() >= secs) {
+            eprintln!(
+                "events --all follow timed out after {}s",
+                timeout_secs.unwrap_or_default()
+            );
+            return ExitCode::from(1);
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
+    }
+}
+
 fn read_timeline(
     cfg: RuntimeConfig,
     handle_id: String,
@@ -2560,7 +2798,8 @@ fn read_timeline(
 
 async fn read_events(
     cfg: RuntimeConfig,
-    handle_id: String,
+    handle_id: Option<String>,
+    all: bool,
     event: Option<String>,
     phase: Option<String>,
     follow: bool,
@@ -2569,6 +2808,28 @@ async fn read_events(
     phase_timeout_secs: Option<u64>,
     json: bool,
 ) -> ExitCode {
+    if handle_id.is_none() && !all {
+        eprintln!("events failed: missing handle_id (or pass --all)");
+        return ExitCode::from(2);
+    }
+    if handle_id.is_some() && all {
+        eprintln!("events failed: --all conflicts with <handle-id>");
+        return ExitCode::from(2);
+    }
+    let Some(handle_id) = handle_id else {
+        return read_events_all(
+            cfg,
+            event,
+            phase,
+            follow,
+            interval_ms,
+            timeout_secs,
+            phase_timeout_secs,
+            json,
+        )
+        .await;
+    };
+
     if !follow {
         return read_timeline(cfg, handle_id, event, phase, json);
     }
@@ -4503,6 +4764,7 @@ target/
         match cli.command {
             Commands::Events {
                 handle_id,
+                all,
                 event,
                 phase,
                 follow,
@@ -4511,7 +4773,8 @@ target/
                 phase_timeout_secs,
                 json,
             } => {
-                assert_eq!(handle_id, "handle-1");
+                assert_eq!(handle_id.as_deref(), Some("handle-1"));
+                assert!(!all);
                 assert_eq!(event.as_deref(), Some("provider.heartbeat"));
                 assert_eq!(phase.as_deref(), Some("running"));
                 assert!(follow);
@@ -4519,6 +4782,50 @@ target/
                 assert_eq!(timeout_secs, Some(12));
                 assert_eq!(phase_timeout_secs, Some(8));
                 assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_events_all_command_flags() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "events",
+            "--all",
+            "--follow",
+            "--event",
+            "provider.first_output",
+            "--phase",
+            "provider_boot",
+            "--interval-ms",
+            "300",
+            "--timeout-secs",
+            "20",
+            "--phase-timeout-secs",
+            "10",
+        ]);
+        match cli.command {
+            Commands::Events {
+                handle_id,
+                all,
+                event,
+                phase,
+                follow,
+                interval_ms,
+                timeout_secs,
+                phase_timeout_secs,
+                json,
+            } => {
+                assert!(handle_id.is_none());
+                assert!(all);
+                assert_eq!(event.as_deref(), Some("provider.first_output"));
+                assert_eq!(phase.as_deref(), Some("provider_boot"));
+                assert!(follow);
+                assert_eq!(interval_ms, 300);
+                assert_eq!(timeout_secs, Some(20));
+                assert_eq!(phase_timeout_secs, Some(10));
+                assert!(!json);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -4566,6 +4873,39 @@ target/
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event, "canonical");
         assert_eq!(events[0].seq, Some(1));
+    }
+
+    #[test]
+    fn collect_run_event_snapshots_loads_all_handles_and_filters() {
+        let dir = tempdir().expect("tempdir");
+        for (handle, status) in [("handle-a", "running"), ("handle-b", "succeeded")] {
+            let run_dir = dir.path().join("runs").join(handle);
+            fs::create_dir_all(&run_dir).expect("mkdir run");
+            fs::write(
+                run_dir.join("run.json"),
+                serde_json::json!({
+                    "status": status,
+                    "updated_at": "2026-03-25T00:00:00Z"
+                })
+                .to_string(),
+            )
+            .expect("write run.json");
+            fs::write(
+                run_dir.join("events.jsonl"),
+                "{\"event\":\"provider.first_output\",\"timestamp\":\"2026-03-25T00:00:01Z\",\"detail\":{},\"seq\":1,\"phase\":\"running\"}\n",
+            )
+            .expect("write events");
+        }
+
+        let snapshots = super::collect_run_event_snapshots(
+            dir.path(),
+            Some("provider.first_output"),
+            Some("running"),
+        )
+        .expect("collect snapshots");
+        assert_eq!(snapshots.len(), 2);
+        assert!(snapshots.iter().all(|snapshot| snapshot.events.len() == 1
+            && snapshot.events[0].event == "provider.first_output"));
     }
 
     #[test]
