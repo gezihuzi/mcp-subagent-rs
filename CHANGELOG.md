@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.1 - 2026-03-25
+
+### Highlights
+
+- Fixed first-time bootstrap onboarding ergonomics: `init` now generates project bridge config and root autodiscovery works from project root.
+- Added idempotent target-project `.gitignore` autopatch in bootstrap mode to suppress runtime artifact noise.
+- Added test coverage for project config path resolution and `.gitignore` merge behavior (create/append/skip-catch-all).
+
+### Provider Status (Current Build)
+
+- `Codex`: Primary
+- `Claude`: Beta
+- `Gemini`: Experimental
+- `Mock`: Stable local debug
+- `Ollama`: Local
+
 ## 0.8.0 - 2026-03-25
 
 ### Highlights

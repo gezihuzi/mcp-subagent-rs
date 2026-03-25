@@ -19,7 +19,7 @@ Rust implementation of an MCP subagent runtime aligned to the technical design b
 mcp-subagent mcp [AGENTS_DIR]
 mcp-subagent doctor [AGENTS_DIR] [--json]
 mcp-subagent validate [AGENTS_DIR]
-mcp-subagent init [--preset claude-opus-supervisor|codex-primary-builder|gemini-frontend-team|local-ollama-fallback|minimal-single-provider] [--root-dir ...] [--force] [--json]
+mcp-subagent init [--preset claude-opus-supervisor|codex-primary-builder|gemini-frontend-team|local-ollama-fallback|minimal-single-provider] [--root-dir ... | --in-place] [--force] [--json]
 mcp-subagent connect-snippet --host claude|codex|gemini
 mcp-subagent list-agents [--json]
 mcp-subagent run <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
@@ -81,14 +81,19 @@ Run one command for minimal local acceptance:
 
 ## Quick Onboarding (Happy Path)
 
+Default `init` writes to an isolated bootstrap root (`./.mcp-subagent/bootstrap`) to avoid clobbering existing repo files.
+It also writes a project bridge config at `./.mcp-subagent/config.toml`, so running from project root auto-resolves bootstrap `agents_dir/state_dir`.
+For bootstrap mode, `init` also patches project `.gitignore` idempotently to ignore runtime artifacts.
 Use this fixed order for first-time setup:
 
 ```bash
 mcp-subagent init --preset claude-opus-supervisor
-mcp-subagent validate --agents-dir ./agents
-mcp-subagent doctor --agents-dir ./agents
+mcp-subagent validate
+mcp-subagent doctor
 mcp-subagent connect-snippet --host claude
 ```
+
+If you explicitly want old in-place behavior, run `init --in-place`.
 
 Other preset examples:
 

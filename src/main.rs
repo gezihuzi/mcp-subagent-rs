@@ -26,6 +26,18 @@ use rmcp::handler::server::wrapper::Parameters;
 use serde::Serialize;
 use tracing::info;
 
+const DEFAULT_BOOTSTRAP_ROOT_RELATIVE: &str = ".mcp-subagent/bootstrap";
+const PROJECT_BRIDGE_CONFIG_RELATIVE: &str = ".mcp-subagent/config.toml";
+const PROJECT_GITIGNORE_RELATIVE: &str = ".gitignore";
+const BRIDGE_AGENTS_DIR_RELATIVE: &str = "./.mcp-subagent/bootstrap/agents";
+const BRIDGE_STATE_DIR_RELATIVE: &str = "./.mcp-subagent/bootstrap/.mcp-subagent/state";
+const GITIGNORE_RUNTIME_HEADER: &str = "# mcp-subagent runtime artifacts";
+const GITIGNORE_RUNTIME_RULES: [&str; 3] = [
+    ".mcp-subagent/state/",
+    ".mcp-subagent/logs/",
+    ".mcp-subagent/bootstrap/",
+];
+
 #[derive(Debug, Parser)]
 #[command(name = "mcp-subagent", version, about = "MCP subagent runtime")]
 struct Cli {
@@ -63,6 +75,8 @@ enum Commands {
         preset: InitPresetArg,
         #[arg(long, value_name = "ROOT_DIR")]
         root_dir: Option<PathBuf>,
+        #[arg(long, conflicts_with = "root_dir")]
+        in_place: bool,
         #[arg(long)]
         force: bool,
         #[arg(long)]
@@ -248,11 +262,12 @@ async fn main() -> ExitCode {
         Commands::Init {
             preset,
             root_dir,
+            in_place,
             force,
             json,
         } => {
             info!("starting command: init");
-            init_command(preset, root_dir, force, json)
+            init_command(preset, root_dir, in_place, force, json)
         }
         Commands::ConnectSnippet { host } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -528,21 +543,57 @@ fn doctor(cfg: RuntimeConfig, json: bool) -> ExitCode {
 fn init_command(
     preset: InitPresetArg,
     root_dir: Option<PathBuf>,
+    in_place: bool,
     force: bool,
     json: bool,
 ) -> ExitCode {
-    let root = match root_dir {
-        Some(path) => path,
-        None => match std::env::current_dir() {
-            Ok(path) => path,
-            Err(err) => {
-                eprintln!("init failed: unable to resolve current directory: {err}");
-                return ExitCode::from(1);
-            }
-        },
+    let use_default_bootstrap_root = root_dir.is_none() && !in_place;
+    let cwd = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("init failed: unable to resolve current directory: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let root = match resolve_init_root(&cwd, root_dir, in_place) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("init failed: {err}");
+            return ExitCode::from(1);
+        }
     };
     match init_workspace(&root, preset.into(), force) {
-        Ok(report) => {
+        Ok(mut report) => {
+            if use_default_bootstrap_root {
+                match ensure_bootstrap_bridge_config(&cwd, force) {
+                    Ok((path, true)) => report.notes.push(format!(
+                        "Generated project bridge config at `{}`; you can run mcp-subagent commands from project root without extra --agents-dir/--state-dir flags.",
+                        path.display()
+                    )),
+                    Ok((path, false)) => report.notes.push(format!(
+                        "Using existing project config `{}` (preserved).",
+                        path.display()
+                    )),
+                    Err(err) => {
+                        eprintln!("init failed: {err}");
+                        return ExitCode::from(1);
+                    }
+                }
+                match ensure_project_gitignore(&cwd) {
+                    Ok((path, true)) => report.notes.push(format!(
+                        "Updated `{}` with mcp-subagent runtime ignore rules.",
+                        path.display()
+                    )),
+                    Ok((path, false)) => report.notes.push(format!(
+                        "Using existing `.gitignore` rules in `{}` (no changes).",
+                        path.display()
+                    )),
+                    Err(err) => {
+                        eprintln!("init failed: {err}");
+                        return ExitCode::from(1);
+                    }
+                }
+            }
             if json {
                 print_json(&report);
             } else {
@@ -555,6 +606,152 @@ fn init_command(
             ExitCode::from(1)
         }
     }
+}
+
+fn resolve_init_root(
+    cwd: &Path,
+    root_dir: Option<PathBuf>,
+    in_place: bool,
+) -> std::result::Result<PathBuf, String> {
+    if let Some(root) = root_dir {
+        return Ok(root);
+    }
+    if in_place {
+        return Ok(cwd.to_path_buf());
+    }
+    Ok(cwd.join(DEFAULT_BOOTSTRAP_ROOT_RELATIVE))
+}
+
+fn ensure_bootstrap_bridge_config(
+    cwd: &Path,
+    force: bool,
+) -> std::result::Result<(PathBuf, bool), String> {
+    let config_path = cwd.join(PROJECT_BRIDGE_CONFIG_RELATIVE);
+    if config_path.exists() && !force {
+        if !config_path.is_file() {
+            return Err(format!(
+                "project bridge config path is not a file: {}",
+                config_path.display()
+            ));
+        }
+        return Ok((config_path, false));
+    }
+    if config_path.is_dir() {
+        return Err(format!(
+            "project bridge config path is a directory: {}",
+            config_path.display()
+        ));
+    }
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create project config directory: {err}"))?;
+    }
+    fs::write(&config_path, bootstrap_bridge_config_template())
+        .map_err(|err| format!("failed to write project bridge config: {err}"))?;
+    Ok((config_path, true))
+}
+
+fn bootstrap_bridge_config_template() -> String {
+    format!(
+        r#"[server]
+transport = "stdio"
+log_level = "info"
+
+[paths]
+agents_dirs = ["{agents_dir}"]
+state_dir = "{state_dir}"
+"#,
+        agents_dir = BRIDGE_AGENTS_DIR_RELATIVE,
+        state_dir = BRIDGE_STATE_DIR_RELATIVE
+    )
+}
+
+fn ensure_project_gitignore(cwd: &Path) -> std::result::Result<(PathBuf, bool), String> {
+    let gitignore_path = cwd.join(PROJECT_GITIGNORE_RELATIVE);
+    if gitignore_path.is_dir() {
+        return Err(format!(
+            "project .gitignore path is a directory: {}",
+            gitignore_path.display()
+        ));
+    }
+
+    let mut content = if gitignore_path.exists() {
+        fs::read_to_string(&gitignore_path)
+            .map_err(|err| format!("failed to read .gitignore: {err}"))?
+    } else {
+        String::new()
+    };
+
+    let existing_rules = content
+        .lines()
+        .filter_map(normalize_gitignore_rule)
+        .collect::<Vec<_>>();
+    if existing_rules
+        .iter()
+        .any(|rule| is_mcp_subagent_catch_all(rule))
+    {
+        return Ok((gitignore_path, false));
+    }
+
+    let missing_rules = GITIGNORE_RUNTIME_RULES
+        .iter()
+        .filter(|target| {
+            !existing_rules
+                .iter()
+                .any(|rule| gitignore_rule_matches_target(rule, target))
+        })
+        .copied()
+        .collect::<Vec<_>>();
+
+    if missing_rules.is_empty() {
+        return Ok((gitignore_path, false));
+    }
+
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    if !content.is_empty() {
+        content.push('\n');
+    }
+    content.push_str(GITIGNORE_RUNTIME_HEADER);
+    content.push('\n');
+    for rule in missing_rules {
+        content.push_str(rule);
+        content.push('\n');
+    }
+
+    fs::write(&gitignore_path, content)
+        .map_err(|err| format!("failed to write .gitignore: {err}"))?;
+    Ok((gitignore_path, true))
+}
+
+fn normalize_gitignore_rule(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') {
+        return None;
+    }
+    let without_dot = trimmed.strip_prefix("./").unwrap_or(trimmed);
+    let normalized = without_dot.strip_prefix('/').unwrap_or(without_dot);
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(normalized.to_string())
+}
+
+fn is_mcp_subagent_catch_all(rule: &str) -> bool {
+    matches!(rule.trim_end_matches('/'), ".mcp-subagent") || matches!(rule, ".mcp-subagent/**")
+}
+
+fn gitignore_rule_matches_target(rule: &str, target: &str) -> bool {
+    if is_mcp_subagent_catch_all(rule) {
+        return true;
+    }
+    let normalized_target = target
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .trim_end_matches('/');
+    rule.trim_end_matches('/') == normalized_target
 }
 
 fn connect_snippet_command(cfg: RuntimeConfig, host: ConnectHostArg) -> ExitCode {
@@ -949,14 +1146,19 @@ fn print_init_report(report: &InitReport) {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use clap::Parser;
     use tempfile::tempdir;
 
     use crate::{
-        build_selected_file_inputs, ArtifactKindArg, Cli, Commands, ConnectHostArg, InitPresetArg,
-        RunAgentSelectedFileInput,
+        bootstrap_bridge_config_template, build_selected_file_inputs,
+        ensure_bootstrap_bridge_config, ensure_project_gitignore, resolve_init_root,
+        ArtifactKindArg, Cli, Commands, ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput,
+        DEFAULT_BOOTSTRAP_ROOT_RELATIVE,
     };
 
     #[test]
@@ -1034,17 +1236,20 @@ mod tests {
             "init",
             "--preset",
             "claude-opus-supervisor",
+            "--in-place",
             "--force",
             "--json",
         ]);
         match cli.command {
             Commands::Init {
                 preset,
+                in_place,
                 force,
                 json,
                 ..
             } => {
                 assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisor));
+                assert!(in_place);
                 assert!(force);
                 assert!(json);
             }
@@ -1061,11 +1266,129 @@ mod tests {
             "minimal-single-provider",
         ]);
         match cli.command {
-            Commands::Init { preset, .. } => {
+            Commands::Init {
+                preset, in_place, ..
+            } => {
                 assert!(matches!(preset, InitPresetArg::MinimalSingleProvider));
+                assert!(!in_place);
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn init_rejects_in_place_with_root_dir() {
+        let result =
+            Cli::try_parse_from(["mcp-subagent", "init", "--in-place", "--root-dir", "tmp"]);
+        assert!(
+            result.is_err(),
+            "init should reject --in-place with --root-dir"
+        );
+    }
+
+    #[test]
+    fn init_defaults_to_bootstrap_root_when_not_in_place() {
+        let cwd = Path::new("/tmp/workspace");
+        let root = resolve_init_root(cwd, None, false).expect("resolve");
+        assert_eq!(
+            root,
+            PathBuf::from(format!("/tmp/workspace/{DEFAULT_BOOTSTRAP_ROOT_RELATIVE}"))
+        );
+    }
+
+    #[test]
+    fn init_in_place_uses_current_directory() {
+        let cwd = Path::new("/tmp/workspace");
+        let root = resolve_init_root(cwd, None, true).expect("resolve");
+        assert_eq!(root, PathBuf::from("/tmp/workspace"));
+    }
+
+    #[test]
+    fn writes_bootstrap_bridge_config_when_missing() {
+        let dir = tempdir().expect("tempdir");
+        let (path, written) = ensure_bootstrap_bridge_config(dir.path(), false).expect("write");
+        assert!(written);
+        let content = fs::read_to_string(path).expect("read");
+        assert_eq!(content, bootstrap_bridge_config_template());
+    }
+
+    #[test]
+    fn preserves_existing_bridge_config_without_force() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(".mcp-subagent/config.toml");
+        fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+        fs::write(&path, "custom = true\n").expect("write custom");
+
+        let (resolved, written) =
+            ensure_bootstrap_bridge_config(dir.path(), false).expect("ensure bridge");
+        assert_eq!(resolved, path);
+        assert!(!written);
+        let content = fs::read_to_string(&resolved).expect("read");
+        assert_eq!(content, "custom = true\n");
+    }
+
+    #[test]
+    fn overwrites_existing_bridge_config_with_force() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(".mcp-subagent/config.toml");
+        fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+        fs::write(&path, "custom = true\n").expect("write custom");
+
+        let (resolved, written) =
+            ensure_bootstrap_bridge_config(dir.path(), true).expect("ensure bridge");
+        assert_eq!(resolved, path);
+        assert!(written);
+        let content = fs::read_to_string(&resolved).expect("read");
+        assert_eq!(content, bootstrap_bridge_config_template());
+    }
+
+    #[test]
+    fn creates_gitignore_when_missing() {
+        let dir = tempdir().expect("tempdir");
+        let (path, updated) = ensure_project_gitignore(dir.path()).expect("ensure gitignore");
+        assert!(updated);
+        assert_eq!(path, dir.path().join(".gitignore"));
+        let content = fs::read_to_string(path).expect("read");
+        assert!(content.contains("# mcp-subagent runtime artifacts"));
+        assert!(content.contains(".mcp-subagent/state/"));
+        assert!(content.contains(".mcp-subagent/logs/"));
+        assert!(content.contains(".mcp-subagent/bootstrap/"));
+    }
+
+    #[test]
+    fn appends_only_missing_gitignore_rules() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(".gitignore");
+        fs::write(
+            &path,
+            "\
+target/
+.mcp-subagent/state/
+",
+        )
+        .expect("write gitignore");
+
+        let (resolved, updated) = ensure_project_gitignore(dir.path()).expect("ensure gitignore");
+        assert_eq!(resolved, path);
+        assert!(updated);
+        let content = fs::read_to_string(resolved).expect("read");
+        assert!(content.contains("target/"));
+        assert!(content.contains(".mcp-subagent/state/"));
+        assert!(content.contains(".mcp-subagent/logs/"));
+        assert!(content.contains(".mcp-subagent/bootstrap/"));
+    }
+
+    #[test]
+    fn preserves_gitignore_when_catch_all_rule_exists() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(".gitignore");
+        fs::write(&path, ".mcp-subagent/\n").expect("write gitignore");
+
+        let (resolved, updated) = ensure_project_gitignore(dir.path()).expect("ensure gitignore");
+        assert_eq!(resolved, path);
+        assert!(!updated);
+        let content = fs::read_to_string(resolved).expect("read");
+        assert_eq!(content, ".mcp-subagent/\n");
     }
 
     #[test]

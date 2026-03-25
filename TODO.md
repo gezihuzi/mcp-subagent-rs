@@ -1598,6 +1598,26 @@
   - `cargo test -q`（`134 + 10 + 3` tests passed）
   - `./scripts/smoke_v08.sh` 全链路通过。
 
+## T-064 V0.8-P0-CiProbeReliabilityAndNode24Warning (Completed 2026-03-25)
+
+任务：修复 CI 中 codex provider probe 误判 MissingBinary 导致 smoke 失败，并处理 Node.js 20 actions 警告。  
+验收标准：
+
+1. `scripts/smoke_v08.sh` 中 codex fake binary 能被 provider probe 识别为 PATH 内 `codex`，避免 `run codex_runner` 前置可用性失败。
+2. CI workflow 不再使用 `actions/checkout@v4`，升级到支持 Node.js 24 的版本。
+3. 本地通过：`./scripts/smoke_v08.sh`。
+完成记录：
+
+- 已修复 smoke codex probe 路径：
+  - `scripts/smoke_v08.sh` 将 fake binary 命名为 `codex`；
+  - fake binary 新增 `--version` 输出分支，满足 provider probe 前置探测；
+  - 将 `TMP_DIR` 注入 `PATH`，确保 probe 执行 `codex --version` 命中 fake binary。
+- 已更新 CI action 版本：
+  - `.github/workflows/ci.yml` `actions/checkout@v4` 升级为 `actions/checkout@v5`。
+- 已通过验收回归：
+  - `cargo test -q`（`134 + 10 + 3` tests passed）
+  - `./scripts/smoke_v08.sh` 全链路通过。
+
 ## T-063 Refactoring-DisplayFormattingForEnums (Completed 2026-03-25)
 
 任务：对于某些需要格式化的数据类型，将 `{:?}` 换成 `{}` 并支持 `Display`。
@@ -1613,3 +1633,80 @@
 - 修复了格式化降级警告。
 - 基于反馈，移除了原生命周期钩子中回避性的 `#[allow(clippy::too_many_arguments)]`，通过提炼专属上下文结构体 `ArtifactCollector` 从根本上优化了 `apply_archive_hook` 和 `upsert_artifact` 的 API 设计，清除了 Clippy 警告。
 - 已通过 `cargo clippy` 和 `cargo test` 全量检查。
+
+## T-065 V0.8-P0-InitDefaultBootstrapRoot (Completed 2026-03-25)
+
+任务：将 `init` 默认行为切换为写入独立 bootstrap 目录，避免覆盖当前仓库已有 `PLAN.md` 等文件；提供显式 `--in-place` 回退。  
+验收标准：
+
+1. `mcp-subagent init --preset ...` 在未指定 `--root-dir` 时默认写入 `./.mcp-subagent/bootstrap`。
+2. 新增 `--in-place` 开关，显式指定后使用当前目录作为 root（兼容旧行为）。
+3. `--in-place` 与 `--root-dir` 互斥，CLI 解析可校验。
+4. README 命令面和 onboarding 文案与新默认行为一致。
+5. 回归通过：`cargo fmt`、`cargo test -q`、`./scripts/smoke_v08.sh`。
+完成记录：
+
+- 已切换 `init` 默认 root 解析：
+  - `src/main.rs` 新增 `resolve_init_root`，默认路径改为 `./.mcp-subagent/bootstrap`；
+  - 保留显式 `--root-dir` 覆盖。
+- 已新增 `--in-place` 回退开关：
+  - `src/main.rs` 的 `init` 子命令新增 `--in-place`；
+  - `--in-place` 与 `--root-dir` 互斥（clap 约束）；
+  - 新增解析测试覆盖默认 bootstrap、in-place、互斥校验。
+- 已更新 init 结果提示：
+  - `src/init.rs` 的 `notes` 改为输出实际 `agents_dir/state_dir` 路径，避免默认 bootstrap 下误导 `./agents`。
+- 已同步 README：
+  - 命令面新增 `--in-place`；
+  - Quick Onboarding 按默认 bootstrap 路径给出可复制命令；
+  - 说明可用 `--in-place` 恢复旧行为。
+- 已通过验收回归：
+  - `cargo fmt`
+  - `cargo test -q`（`134 + 13 + 3` tests passed）
+  - `./scripts/smoke_v08.sh` 全链路通过。
+
+## T-066 V0.8-P0-ProjectRootAutodiscoveryAndGitignore (Completed 2026-03-25)
+
+任务：收口默认 bootstrap 模式的可用性，确保 `init` 后在项目根目录即可直接执行 `validate/doctor/connect-snippet`，并补充运行态目录忽略规则。  
+验收标准：
+
+1. `init` 在默认 bootstrap 模式下自动生成项目根桥接配置，且不覆盖用户已有配置（除非 `--force`）。
+2. 配置解析优先识别项目根 `./.mcp-subagent/config.toml`（当文件存在时），实现“cd 到项目根即可自动识别”。
+3. README 的 Happy Path 改为无需手动传 `--agents-dir/--state-dir`。
+4. `.gitignore` 忽略 `.mcp-subagent` 运行态目录（state/logs/bootstrap），避免仓库噪音。
+5. 回归通过：`cargo fmt`、`cargo test -q`、`./scripts/smoke_v08.sh`。
+完成记录：
+
+- 已在 `init` 默认 bootstrap 分支补齐桥接配置写入：
+  - `src/main.rs` 新增 `ensure_bootstrap_bridge_config` 与模板生成逻辑；
+  - 默认模式下自动生成 `./.mcp-subagent/config.toml`；
+  - 既有配置默认保留，`--force` 时覆盖，且新增单测覆盖三种行为。
+- 已修复配置自动识别路径：
+  - `src/config.rs` 增加项目根配置优先识别（文件存在时优先于 home config）；
+  - 新增路径决策单测覆盖 CLI/ENV/项目配置/home fallback。
+- 已同步文档与忽略规则：
+  - `README.md` Quick Onboarding 改为 `init -> validate -> doctor -> connect-snippet --host ...`；
+  - `.gitignore` 新增 `.mcp-subagent/state/`、`.mcp-subagent/logs/`、`.mcp-subagent/bootstrap/`。
+
+## T-067 V0.8-P0-InitTargetGitignoreAutopatch (Completed 2026-03-25)
+
+任务：在默认 bootstrap `init` 路径中自动收口“目标项目 `.gitignore` 规则”，避免用户手工维护运行态忽略项。  
+验收标准：
+
+1. 默认 bootstrap 模式执行 `init` 时自动处理目标项目根 `.gitignore`。
+2. 若 `.gitignore` 不存在，则自动创建并写入 mcp-subagent 运行态忽略规则。
+3. 若 `.gitignore` 已存在且仅缺少部分规则，则只追加缺失项，不破坏既有内容。
+4. 若已有 catch-all 规则（如 `.mcp-subagent/`），则不重复写入。
+5. 回归通过：`cargo fmt`、`cargo test -q`、`./scripts/smoke_v08.sh`。
+完成记录：
+
+- 已新增目标项目 `.gitignore` 幂等补丁逻辑：
+  - `src/main.rs` 新增 `ensure_project_gitignore`；
+  - 默认 bootstrap `init` 后自动调用，并在 `notes` 输出“已更新/已存在无需改动”。
+- 已实现规则判定与最小写入策略：
+  - 支持无文件创建；
+  - 支持已有内容时仅补缺失规则；
+  - 支持 `.mcp-subagent/` / `.mcp-subagent/**` catch-all 场景跳过更新。
+- 已补测试覆盖：
+  - 缺失文件创建；
+  - 部分规则补齐；
+  - catch-all 已存在保持不变。

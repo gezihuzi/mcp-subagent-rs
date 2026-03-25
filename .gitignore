@@ -16,3 +16,8 @@ target/
 # .DS_Store is a file that stores custom attributes of its containing folder, such as folder view options, icon positions, and other visual information.
 # The name is an abbreviation of Desktop Services Store, reflecting its purpose.
 .DS_Store
+
+# mcp-subagent runtime artifacts
+.mcp-subagent/state/
+.mcp-subagent/logs/
+.mcp-subagent/bootstrap/
