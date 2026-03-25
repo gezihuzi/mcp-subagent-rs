@@ -56,7 +56,7 @@ impl CodexRunner {
         let schema_json = serde_json::to_string_pretty(&schema).map_err(McpSubagentError::Json)?;
         fs::write(&schema_file, schema_json).map_err(McpSubagentError::Io)?;
         let timeout = Duration::from_secs(spec.runtime.timeout_secs.max(1));
-        let approval_mode = resolve_approval_mode(spec)?;
+        validate_approval_policy(spec)?;
 
         let mut command = tokio::process::Command::new(&self.executable);
         command
@@ -64,8 +64,6 @@ impl CodexRunner {
             .arg("--skip-git-repo-check")
             .arg("--sandbox")
             .arg(resolve_sandbox(spec))
-            .arg("--ask-for-approval")
-            .arg(approval_mode)
             .arg("--cd")
             .arg(&request.working_dir)
             .arg("--output-last-message")
@@ -199,9 +197,9 @@ fn map_reasoning_effort(value: &ReasoningEffort) -> &'static str {
     }
 }
 
-fn resolve_approval_mode(spec: &AgentSpec) -> Result<&'static str> {
+fn validate_approval_policy(spec: &AgentSpec) -> Result<()> {
     match spec.runtime.approval {
-        ApprovalPolicy::ProviderDefault | ApprovalPolicy::DenyByDefault => Ok("never"),
+        ApprovalPolicy::ProviderDefault | ApprovalPolicy::DenyByDefault => Ok(()),
         ApprovalPolicy::Ask => Err(McpSubagentError::SpecValidation(
             "Codex approval policy `Ask` is not yet validated for current CLI mapping".to_string(),
         )),
