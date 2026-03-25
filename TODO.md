@@ -1565,3 +1565,35 @@
   - `cargo fmt`
   - `cargo test -q`（`134 + 10 + 3` tests passed）
   - `./scripts/smoke_v08.sh` 全链路通过。
+
+## T-062 V0.8-P0-RealExamplesAndReadmeOnboardingPath (Completed 2026-03-25)
+
+任务：新增两个真实示例工作区（Rust 后端、前端 UI），并把根 README onboarding 固定为 `init -> validate -> doctor -> connect-snippet` 最短路径。  
+验收标准：
+
+1. 新增 `examples/workspaces/rust_service_refactor/`，至少包含 `PROJECT.md`、`PLAN.md`、示例代码文件与使用说明。
+2. 新增 `examples/workspaces/frontend_landing_page/`，至少包含 `PROJECT.md`、`PLAN.md`、示例代码文件与使用说明。
+3. 根 `README.md` 明确给出固定 onboarding 顺序：`init` -> `validate` -> `doctor` -> `connect-snippet`，并可直接复制。
+4. README 示例区同步列出新增两个工作区，避免“只有 workflow_demo”的漂移。
+5. 本地通过：`cargo fmt`、`cargo test -q`、`./scripts/smoke_v08.sh`。
+完成记录：
+
+- 已新增 Rust 后端真实示例工作区：
+  - `examples/workspaces/rust_service_refactor/PROJECT.md`
+  - `examples/workspaces/rust_service_refactor/PLAN.md`
+  - `examples/workspaces/rust_service_refactor/README.md`
+  - `examples/workspaces/rust_service_refactor/src/lib.rs`
+- 已新增前端 UI 真实示例工作区：
+  - `examples/workspaces/frontend_landing_page/PROJECT.md`
+  - `examples/workspaces/frontend_landing_page/PLAN.md`
+  - `examples/workspaces/frontend_landing_page/README.md`
+  - `examples/workspaces/frontend_landing_page/web/index.html`
+  - `examples/workspaces/frontend_landing_page/web/styles.css`
+- 已收口根文档 onboarding 路径：
+  - `README.md` 新增固定 `Quick Onboarding (Happy Path)` 顺序：`init -> validate -> doctor -> connect-snippet`；
+  - `README.md` smoke 校验项已与 `smoke_v08.sh` 对齐；
+  - `README.md` 示例列表已纳入两个新增工作区。
+- 已通过验收回归：
+  - `cargo fmt`
+  - `cargo test -q`（`134 + 10 + 3` tests passed）
+  - `./scripts/smoke_v08.sh` 全链路通过。

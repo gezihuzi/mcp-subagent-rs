@@ -79,15 +79,14 @@ Run one command for minimal local acceptance:
 ./scripts/smoke_v08.sh
 ```
 
-Initialize a local preset workspace:
+## Quick Onboarding (Happy Path)
+
+Use this fixed order for first-time setup:
 
 ```bash
 mcp-subagent init --preset claude-opus-supervisor
-```
-
-Generate a host integration snippet with resolved absolute paths:
-
-```bash
+mcp-subagent validate --agents-dir ./agents
+mcp-subagent doctor --agents-dir ./agents
 mcp-subagent connect-snippet --host claude
 ```
 
@@ -102,15 +101,15 @@ mcp-subagent init --preset minimal-single-provider
 
 This script validates:
 
-1. `doctor`
-2. `doctor --json`
-3. `validate`
+1. `validate`
+2. `doctor`
+3. `doctor --json`
 4. `list-agents`
 5. `run` on `Mock`
 6. async policy gate (`run` fail + `spawn/status` path)
 7. review evidence artifact generation and readback
-8. `run` on `Codex` (optional)
-9. `run` on `Ollama` (optional)
+8. `run` on `Codex` via fake runner (required)
+9. `connect-snippet --host claude|codex|gemini`
 10. `mcp` boot via short-lived `timeout`
 
 Optional local run with Ollama:
@@ -135,6 +134,8 @@ Repository examples used by CI and regression tests:
 
 - `examples/agents/workflow_builder.agent.toml`
 - `examples/workspaces/workflow_demo/`
+- `examples/workspaces/rust_service_refactor/`
+- `examples/workspaces/frontend_landing_page/`
 
 Quick validation against example specs:
 

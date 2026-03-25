@@ -1,0 +1,139 @@
+:root {
+  --bg: #f4f4f0;
+  --panel: #ffffff;
+  --text: #1e1f24;
+  --muted: #5f6170;
+  --accent: #0d7a63;
+  --accent-strong: #085f4d;
+  --line: #d7d8dd;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  color: var(--text);
+  background: radial-gradient(circle at top right, #fef9eb 0%, var(--bg) 55%);
+  line-height: 1.5;
+}
+
+.hero {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 4rem 1.25rem 2.5rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(2rem, 6vw, 3.3rem);
+  line-height: 1.08;
+  max-width: 18ch;
+}
+
+.subtitle {
+  margin: 1.1rem 0 0;
+  max-width: 56ch;
+  color: var(--muted);
+}
+
+.hero-actions {
+  margin-top: 1.4rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.6rem;
+  padding: 0.35rem 1rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background: var(--accent-strong);
+}
+
+.btn-secondary {
+  border-color: var(--line);
+  color: var(--text);
+  background: var(--panel);
+}
+
+main {
+  max-width: 920px;
+  margin: 0 auto 3rem;
+  padding: 0 1.25rem;
+}
+
+.feature-grid {
+  display: grid;
+  gap: 0.9rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.feature-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 1rem;
+}
+
+.feature-card h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.feature-card p {
+  margin: 0.6rem 0 0;
+  color: var(--muted);
+}
+
+.cta {
+  margin-top: 1.1rem;
+  padding: 1.3rem;
+  background: #141920;
+  color: #f5f7fa;
+  border-radius: 14px;
+}
+
+.cta h2 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.cta p {
+  margin: 0.6rem 0 1rem;
+  color: #b8c1cf;
+}
+
+@media (max-width: 840px) {
+  .feature-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .hero {
+    padding-top: 2.8rem;
+  }
+}
