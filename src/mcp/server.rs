@@ -1182,6 +1182,8 @@ sandbox = "read_only"
         assert!(watch_json.get("current_phase").is_some());
         assert!(watch_json.get("current_phase_age_ms").is_some());
         assert!(watch_json.get("phase_timeout_hit").is_some());
+        assert!(watch_json.get("block_reason").is_some());
+        assert!(watch_json.get("advice").is_some());
 
         let stats_res = client
             .call_tool(
@@ -1234,6 +1236,8 @@ sandbox = "read_only"
         assert!(events_json.get("current_phase").is_some());
         assert!(events_json.get("current_phase_age_ms").is_some());
         assert!(events_json.get("phase_timeout_hit").is_some());
+        assert!(events_json.get("block_reason").is_some());
+        assert!(events_json.get("advice").is_some());
 
         let second_spawn_res = client
             .call_tool(

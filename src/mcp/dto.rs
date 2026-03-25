@@ -247,6 +247,10 @@ pub struct WatchRunOutput {
     pub current_phase_age_ms: Option<u64>,
     #[serde(default)]
     pub phase_timeout_hit: bool,
+    #[serde(default)]
+    pub block_reason: Option<String>,
+    #[serde(default)]
+    pub advice: Vec<String>,
     pub terminal: bool,
     pub timed_out: bool,
 }
@@ -296,6 +300,10 @@ pub struct WatchAgentEventsOutput {
     pub current_phase_age_ms: Option<u64>,
     #[serde(default)]
     pub phase_timeout_hit: bool,
+    #[serde(default)]
+    pub block_reason: Option<String>,
+    #[serde(default)]
+    pub advice: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]

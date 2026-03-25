@@ -649,6 +649,93 @@ fn classify_block_reason(
     None
 }
 
+fn push_advice(advice: &mut Vec<String>, item: &str) {
+    if advice.iter().any(|existing| existing == item) {
+        return;
+    }
+    advice.push(item.to_string());
+}
+
+fn build_watch_advice(
+    status: &RunStatus,
+    phase: Option<&str>,
+    block_reason: Option<&str>,
+    phase_timeout_hit: bool,
+) -> Vec<String> {
+    let mut advice = Vec::new();
+    if phase_timeout_hit {
+        let phase_label = phase.unwrap_or("unknown");
+        push_advice(
+            &mut advice,
+            &format!(
+                "phase timeout hit in `{phase_label}`; inspect events/logs for this phase and consider cancel/retry"
+            ),
+        );
+    }
+    if let Some(reason) = block_reason {
+        match reason {
+            "trust_required" => push_advice(
+                &mut advice,
+                "provider is waiting for trust; mark the workspace as trusted and retry",
+            ),
+            "auth_required" => push_advice(
+                &mut advice,
+                "provider is waiting for authentication; refresh login/session credentials",
+            ),
+            "tool_approval_required" | "consent_required" => push_advice(
+                &mut advice,
+                "provider is waiting for approval; adjust approval mode or confirm prompt",
+            ),
+            "skill_discovery" => push_advice(
+                &mut advice,
+                "skill discovery is noisy; prefer isolated scratch workspace for simple research tasks",
+            ),
+            "workspace_scan" => push_advice(
+                &mut advice,
+                "workspace scan is slow; reduce include scope or switch to minimal delegation context",
+            ),
+            "provider_unavailable" => push_advice(
+                &mut advice,
+                "provider binary is unavailable; install it or fix PATH before retrying",
+            ),
+            "network_error" => push_advice(
+                &mut advice,
+                "network connectivity looks unstable; retry or switch transport/network",
+            ),
+            "normalization_failed" => push_advice(
+                &mut advice,
+                "normalization failed; consume native result/logs and tighten output contract if needed",
+            ),
+            "provider_output_wait" | "provider_boot" => push_advice(
+                &mut advice,
+                "provider has not produced output; check auth/trust/approval prompts and provider startup logs",
+            ),
+            _ => {}
+        }
+    }
+
+    match status {
+        RunStatus::Succeeded => push_advice(
+            &mut advice,
+            "run completed; use get_run_result/read_run_logs/read_agent_artifact for outputs",
+        ),
+        RunStatus::Failed => push_advice(
+            &mut advice,
+            "run failed; inspect summary.json and stderr.txt for root cause before retry",
+        ),
+        RunStatus::TimedOut => push_advice(
+            &mut advice,
+            "run timed out; increase timeout or narrow task/context scope",
+        ),
+        RunStatus::Cancelled => push_advice(
+            &mut advice,
+            "run was cancelled; restart with spawn/run if still needed",
+        ),
+        _ => {}
+    }
+    advice
+}
+
 fn wait_reason_from_event_name(name: &str) -> Option<&'static str> {
     match name {
         "provider.waiting_for_trust" => Some("trust_required"),
@@ -1048,7 +1135,14 @@ impl McpSubagentServer {
             let record = self.get_or_load_run_record(&input.handle_id).await?;
             let events = load_run_events(self.state_dir(), &input.handle_id)?;
             let now = OffsetDateTime::now_utc();
+            let runtime = build_event_runtime_snapshot(
+                &record.status,
+                &events,
+                now,
+                record.error_message.as_deref(),
+            );
             let (current_phase, phase_age_ms) = current_phase_age_ms(&events, now);
+            let block_reason = runtime.block_reason.clone();
             let phase_timeout_hit = input.phase_timeout_secs.is_some_and(|timeout_secs| {
                 let matches_phase = input.phase.as_deref().map_or(true, |phase| {
                     current_phase
@@ -1060,6 +1154,12 @@ impl McpSubagentServer {
                         .is_some_and(|age_ms| age_ms >= timeout_secs.saturating_mul(1000))
             });
             if is_terminal_status(&record.status) {
+                let advice = build_watch_advice(
+                    &record.status,
+                    current_phase.as_deref(),
+                    block_reason.as_deref(),
+                    false,
+                );
                 return Ok(Json(WatchRunOutput {
                     handle_id: input.handle_id,
                     status: format!("{}", record.status),
@@ -1068,11 +1168,19 @@ impl McpSubagentServer {
                     current_phase,
                     current_phase_age_ms: phase_age_ms,
                     phase_timeout_hit: false,
+                    block_reason,
+                    advice,
                     terminal: true,
                     timed_out: false,
                 }));
             }
             if phase_timeout_hit {
+                let advice = build_watch_advice(
+                    &record.status,
+                    current_phase.as_deref(),
+                    block_reason.as_deref(),
+                    true,
+                );
                 return Ok(Json(WatchRunOutput {
                     handle_id: input.handle_id,
                     status: format!("{}", record.status),
@@ -1081,11 +1189,19 @@ impl McpSubagentServer {
                     current_phase,
                     current_phase_age_ms: phase_age_ms,
                     phase_timeout_hit: true,
+                    block_reason,
+                    advice,
                     terminal: false,
                     timed_out: true,
                 }));
             }
             if timeout_secs.is_some_and(|secs| started.elapsed().as_secs() >= secs) {
+                let advice = build_watch_advice(
+                    &record.status,
+                    current_phase.as_deref(),
+                    block_reason.as_deref(),
+                    false,
+                );
                 return Ok(Json(WatchRunOutput {
                     handle_id: input.handle_id,
                     status: format!("{}", record.status),
@@ -1094,6 +1210,8 @@ impl McpSubagentServer {
                     current_phase,
                     current_phase_age_ms: phase_age_ms,
                     phase_timeout_hit: false,
+                    block_reason,
+                    advice,
                     terminal: false,
                     timed_out: true,
                 }));
@@ -1110,7 +1228,14 @@ impl McpSubagentServer {
         let record = self.get_or_load_run_record(&input.handle_id).await?;
         let all_events = load_run_events(self.state_dir(), &input.handle_id)?;
         let now = OffsetDateTime::now_utc();
+        let runtime = build_event_runtime_snapshot(
+            &record.status,
+            &all_events,
+            now,
+            record.error_message.as_deref(),
+        );
         let (current_phase, current_phase_age_ms) = current_phase_age_ms(&all_events, now);
+        let block_reason = runtime.block_reason.clone();
         let phase_timeout_hit = input.phase_timeout_secs.is_some_and(|timeout_secs| {
             let matches_phase = input.phase.as_deref().map_or(true, |phase| {
                 current_phase
@@ -1143,6 +1268,12 @@ impl McpSubagentServer {
             .max()
             .map(|seq| seq + 1)
             .or(input.since_seq);
+        let advice = build_watch_advice(
+            &record.status,
+            current_phase.as_deref(),
+            block_reason.as_deref(),
+            phase_timeout_hit,
+        );
 
         Ok(Json(WatchAgentEventsOutput {
             handle_id: input.handle_id,
@@ -1154,6 +1285,8 @@ impl McpSubagentServer {
             current_phase,
             current_phase_age_ms,
             phase_timeout_hit,
+            block_reason,
+            advice,
         }))
     }
 
@@ -1784,9 +1917,10 @@ impl McpSubagentServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_block_reason_from_events, collect_wait_reasons, current_phase_age_ms,
-        detect_provider_wait_signal, parse_rfc3339, RunEventOutput,
+        build_watch_advice, classify_block_reason_from_events, collect_wait_reasons,
+        current_phase_age_ms, detect_provider_wait_signal, parse_rfc3339, RunEventOutput,
     };
+    use crate::runtime::dispatcher::RunStatus;
 
     #[test]
     fn detect_provider_wait_signal_matches_trust_prompt() {
@@ -1882,5 +2016,34 @@ mod tests {
         let (phase, age_ms) = current_phase_age_ms(&events, now);
         assert_eq!(phase.as_deref(), Some("provider_boot"));
         assert_eq!(age_ms, Some(5_000));
+    }
+
+    #[test]
+    fn build_watch_advice_includes_timeout_and_reason_guidance() {
+        let advice = build_watch_advice(
+            &RunStatus::Running,
+            Some("provider_boot"),
+            Some("auth_required"),
+            true,
+        );
+        assert!(
+            advice
+                .iter()
+                .any(|item| item.contains("phase timeout hit in `provider_boot`")),
+            "{advice:?}"
+        );
+        assert!(
+            advice.iter().any(|item| item.contains("authentication")),
+            "{advice:?}"
+        );
+    }
+
+    #[test]
+    fn build_watch_advice_includes_terminal_next_step() {
+        let advice = build_watch_advice(&RunStatus::Succeeded, Some("completed"), None, false);
+        assert!(
+            advice.iter().any(|item| item.contains("get_run_result")),
+            "{advice:?}"
+        );
     }
 }

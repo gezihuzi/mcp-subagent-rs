@@ -2595,3 +2595,33 @@
   - 新增 `current_phase/current_phase_age_ms/phase_timeout_hit` 字段断言。
 - 已同步 README：
   - MCP tools 段补充 `watch_run` phase/watchdog 能力说明。
+
+## T-098 V0.10-P1-WatchAdviceSurface (Completed 2026-03-25)
+
+任务：为 MCP watch 工具补齐统一 `advice` 输出，降低 Host 端“拿到状态但不知道下一步做什么”的集成成本。  
+验收标准：
+
+1. `WatchRunOutput` 与 `WatchAgentEventsOutput` 新增 `block_reason` 与 `advice` 字段。
+2. `watch_run/watch_agent_events` 统一生成建议：
+   - phase timeout 命中时给出阶段排障建议；
+   - 常见阻塞原因（trust/auth/approval/workspace/skills/network/provider unavailable）给出操作建议；
+   - 终态给出下一步动作建议（如 `get_run_result` / 查 `stderr`）。
+3. MCP roundtrip 断言新增字段存在。
+4. README MCP 工具说明更新到 `advice`。
+5. 新增单测覆盖建议生成逻辑。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 DTO：
+  - `src/mcp/dto.rs::WatchRunOutput` 新增 `block_reason/advice`；
+  - `src/mcp/dto.rs::WatchAgentEventsOutput` 新增 `block_reason/advice`。
+- 已升级工具实现：
+  - `src/mcp/tools.rs` 新增 `build_watch_advice`；
+  - `watch_run/watch_agent_events` 接入 `build_event_runtime_snapshot` 的 `block_reason`；
+  - 输出 `advice` 支持 phase-timeout + reason + terminal next step 组合。
+- 已补测试：
+  - `build_watch_advice_includes_timeout_and_reason_guidance`；
+  - `build_watch_advice_includes_terminal_next_step`；
+  - MCP roundtrip 新增 `watch_run/watch_agent_events` 的 `block_reason/advice` 字段断言。
+- 已同步 README：
+  - `watch_run/watch_agent_events` 输出说明补充 `block_reason/advice`。
