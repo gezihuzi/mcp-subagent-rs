@@ -351,7 +351,7 @@ instructions = "Implement scoped changes from PLAN.md. Keep diffs minimal and re
 tags = ["build", "backend", "rust", "codex"]
 
 [runtime]
-context_mode = { SelectedFiles = ["src/**", "Cargo.toml", "PLAN.md"] }
+context_mode = { selected_files = ["src/**", "Cargo.toml", "PLAN.md"] }
 memory_sources = ["auto_project_memory", "active_plan"]
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
@@ -378,7 +378,7 @@ instructions = "Implement frontend changes from PLAN.md with usable, reviewable 
 tags = ["build", "frontend", "ui", "gemini"]
 
 [runtime]
-context_mode = { SelectedFiles = ["web/**", "src/**", "package.json", "PLAN.md"] }
+context_mode = { selected_files = ["web/**", "src/**", "package.json", "PLAN.md"] }
 memory_sources = ["auto_project_memory", "active_plan"]
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
@@ -507,7 +507,7 @@ instructions = "Implement small scoped changes. If uncertain, return open questi
 tags = ["build", "local", "ollama", "fallback"]
 
 [runtime]
-context_mode = { SelectedFiles = ["src/**", "PLAN.md"] }
+context_mode = { selected_files = ["src/**", "PLAN.md"] }
 memory_sources = ["auto_project_memory", "active_plan"]
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
@@ -531,7 +531,7 @@ instructions = "Implement scoped changes and return concise structured summary."
 tags = ["build", "codex", "minimal"]
 
 [runtime]
-context_mode = { SelectedFiles = ["src/**", "PLAN.md"] }
+context_mode = { selected_files = ["src/**", "PLAN.md"] }
 memory_sources = ["auto_project_memory", "active_plan"]
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"

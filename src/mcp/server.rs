@@ -681,7 +681,7 @@ sandbox = "read_only"
         write_agent_spec_with_provider_and_runtime(
             &agents_dir,
             "mock",
-            r#"spawn_policy = "Async""#,
+            r#"spawn_policy = "async""#,
         );
         let server = make_server(agents_dir, state_dir);
 
