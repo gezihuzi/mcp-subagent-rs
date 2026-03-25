@@ -27,11 +27,12 @@ use crate::{
 };
 
 pub use crate::mcp::dto::{
-    AgentListing, AgentStatusOutput, ArtifactOutput, CancelAgentOutput, GetRunResultInput,
-    GetRunResultOutput, HandleInput, ListAgentsOutput, ListRunsInput, ListRunsOutput,
-    ReadAgentArtifactInput, ReadAgentArtifactOutput, ReadRunLogsInput, ReadRunLogsOutput,
-    RunAgentInput, RunAgentOutput, RunAgentSelectedFileInput, RunListingOutput, RunUsageOutput,
-    RuntimePolicySummary, SpawnAgentOutput, SummaryOutput, WatchRunInput, WatchRunOutput,
+    AgentListing, AgentStatusOutput, ArtifactOutput, CancelAgentOutput, GetAgentStatsInput,
+    GetAgentStatsOutput, GetRunResultInput, GetRunResultOutput, HandleInput, ListAgentsOutput,
+    ListRunsInput, ListRunsOutput, ReadAgentArtifactInput, ReadAgentArtifactOutput,
+    ReadRunLogsInput, ReadRunLogsOutput, RunAgentInput, RunAgentOutput, RunAgentSelectedFileInput,
+    RunEventOutput, RunListingOutput, RunUsageOutput, RuntimePolicySummary, SpawnAgentOutput,
+    SummaryOutput, WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput, WatchRunOutput,
 };
 
 #[tool_handler(router = self.tool_router)]
@@ -983,6 +984,8 @@ sandbox = "read_only"
             "spawn_agent",
             "get_agent_status",
             "get_run_result",
+            "get_agent_stats",
+            "watch_agent_events",
             "cancel_agent",
             "read_agent_artifact",
             "read_run_logs",
@@ -1144,6 +1147,45 @@ sandbox = "read_only"
             watch_json.get("terminal").and_then(|value| value.as_bool()),
             Some(true)
         );
+
+        let stats_res = client
+            .call_tool(
+                CallToolRequestParams::new("get_agent_stats").with_arguments(
+                    json!({ "handle_id": handle_id.clone() })
+                        .as_object()
+                        .expect("object")
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("get stats");
+        let stats_json = stats_res
+            .structured_content
+            .expect("get_agent_stats has structured content");
+        assert_eq!(structured_field(&stats_json, "status"), "succeeded");
+        assert!(stats_json.get("usage").is_some());
+        assert!(stats_json.get("wall_ms").is_some());
+
+        let events_res = client
+            .call_tool(
+                CallToolRequestParams::new("watch_agent_events").with_arguments(
+                    json!({ "handle_id": handle_id.clone(), "since_seq": 0, "limit": 50 })
+                        .as_object()
+                        .expect("object")
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("watch events");
+        let events_json = events_res
+            .structured_content
+            .expect("watch_agent_events has structured content");
+        assert_eq!(structured_field(&events_json, "status"), "succeeded");
+        let events = events_json
+            .get("events")
+            .and_then(|value| value.as_array())
+            .expect("events array");
+        assert!(!events.is_empty(), "expected incremental events");
 
         let second_spawn_res = client
             .call_tool(

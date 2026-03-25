@@ -2326,3 +2326,32 @@
 - 已通过回归：
   - `cargo fmt`
   - `cargo test -q`（`170 + 46 + 3` tests passed）。
+
+## T-089 V0.10-P1-McpWatchEventsAndStatsTools (Completed 2026-03-25)
+
+任务：在 MCP 协议面补齐 v0.10 可观察能力：新增增量事件读取与统计读取工具，供 Host 侧低成本轮询。  
+验收标准：
+
+1. MCP 新增 `watch_agent_events(handle_id, since_seq?, limit?)`，支持按 seq 增量读取。
+2. MCP 新增 `get_agent_stats(handle_id)`，返回阶段耗时、last event/stalled 与 usage。
+3. 事件读取优先 `events.jsonl`，缺失时回退 `events.ndjson`。
+4. 现有 MCP tool 链路不回退，新增 tool 与旧 tool 可同时工作。
+5. MCP roundtrip 测试覆盖新工具调用与关键字段断言。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 MCP DTO：
+  - `src/mcp/dto.rs` 新增 `WatchAgentEventsInput/Output`、`RunEventOutput`、`GetAgentStatsInput/Output`。
+- 已落地工具实现：
+  - `src/mcp/tools.rs` 新增 `watch_agent_events`（支持 `since_seq/limit`）与 `get_agent_stats`；
+  - 增加事件文件解析与 stats 计算辅助函数（queue/probe/execution/wall + stalled）。
+- 已完成兼容读取策略：
+  - MCP 事件读取优先 `events.jsonl`，自动回退 `events.ndjson`。
+- 已补协议级回归：
+  - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 新增工具名断言；
+  - roundtrip 新增 `get_agent_stats` 与 `watch_agent_events` 调用断言。
+- 已同步文档：
+  - `README.md` MCP tools 列表新增 `watch_agent_events`、`get_agent_stats`。
+- 已通过回归：
+  - `cargo fmt`
+  - `cargo test -q`（`170 + 46 + 3` tests passed）。

@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -8,6 +9,7 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     tool, tool_router, ErrorData, Json,
 };
+use serde::Deserialize;
 use serde_json::json;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -20,11 +22,13 @@ use crate::{
             sanitize_relative_artifact_path,
         },
         dto::{
-            AgentListing, AgentStatusOutput, CancelAgentOutput, GetRunResultInput,
-            GetRunResultOutput, HandleInput, ListAgentsOutput, ListRunsInput, ListRunsOutput,
-            ReadAgentArtifactInput, ReadAgentArtifactOutput, ReadRunLogsInput, ReadRunLogsOutput,
-            RunAgentInput, RunAgentOutput, RunListingOutput, RunUsageOutput, RuntimePolicySummary,
-            SpawnAgentOutput, WatchRunInput, WatchRunOutput,
+            AgentListing, AgentStatusOutput, CancelAgentOutput, GetAgentStatsInput,
+            GetAgentStatsOutput, GetRunResultInput, GetRunResultOutput, HandleInput,
+            ListAgentsOutput, ListRunsInput, ListRunsOutput, ReadAgentArtifactInput,
+            ReadAgentArtifactOutput, ReadRunLogsInput, ReadRunLogsOutput, RunAgentInput,
+            RunAgentOutput, RunEventOutput, RunListingOutput, RunUsageOutput, RuntimePolicySummary,
+            SpawnAgentOutput, WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput,
+            WatchRunOutput,
         },
         helpers::{
             build_capability_notes, cancelled_summary, failed_summary, format_time,
@@ -205,6 +209,179 @@ fn resolve_retry_classification(record: &RunRecord) -> (String, Option<String>) 
             (normalized, value.reason.clone())
         }
         None => (format!("{}", RetryClassification::Unknown), None),
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct StoredRunEventLine {
+    event: String,
+    timestamp: String,
+    detail: serde_json::Value,
+    seq: Option<u64>,
+    ts: Option<String>,
+    state: Option<String>,
+    phase: Option<String>,
+    source: Option<String>,
+    message: Option<String>,
+}
+
+impl StoredRunEventLine {
+    fn into_output(self) -> RunEventOutput {
+        RunEventOutput {
+            seq: self.seq,
+            event: self.event,
+            timestamp: if self.timestamp.is_empty() {
+                self.ts.unwrap_or_default()
+            } else {
+                self.timestamp
+            },
+            state: self.state,
+            phase: self.phase,
+            source: self.source,
+            message: self.message,
+            detail: self.detail,
+        }
+    }
+}
+
+fn run_events_jsonl_path(state_dir: &std::path::Path, handle_id: &str) -> PathBuf {
+    run_root_dir(state_dir).join(handle_id).join("events.jsonl")
+}
+
+fn run_events_legacy_path(state_dir: &std::path::Path, handle_id: &str) -> PathBuf {
+    run_root_dir(state_dir)
+        .join(handle_id)
+        .join("events.ndjson")
+}
+
+fn load_run_events(
+    state_dir: &std::path::Path,
+    handle_id: &str,
+) -> std::result::Result<Vec<RunEventOutput>, ErrorData> {
+    let canonical = run_events_jsonl_path(state_dir, handle_id);
+    let path = if canonical.exists() {
+        canonical
+    } else {
+        run_events_legacy_path(state_dir, handle_id)
+    };
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = fs::read_to_string(&path).map_err(|err| {
+        ErrorData::internal_error(
+            format!("failed to read events file {}: {err}", path.display()),
+            None,
+        )
+    })?;
+
+    let mut events = Vec::new();
+    for (line_no, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parsed = serde_json::from_str::<StoredRunEventLine>(line).map_err(|err| {
+            ErrorData::internal_error(
+                format!(
+                    "failed to parse events file {} line {}: {err}",
+                    path.display(),
+                    line_no + 1
+                ),
+                None,
+            )
+        })?;
+        events.push(parsed.into_output());
+    }
+    Ok(events)
+}
+
+fn parse_rfc3339(value: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
+}
+
+fn event_time(event: &RunEventOutput) -> Option<OffsetDateTime> {
+    parse_rfc3339(&event.timestamp)
+}
+
+fn duration_between(start: Option<OffsetDateTime>, end: Option<OffsetDateTime>) -> Option<u64> {
+    let start = start?;
+    let end = end?;
+    if end < start {
+        return None;
+    }
+    Some((end - start).whole_milliseconds().max(0) as u64)
+}
+
+fn first_event_time(events: &[RunEventOutput], name: &str) -> Option<OffsetDateTime> {
+    events
+        .iter()
+        .find(|event| event.event == name)
+        .and_then(event_time)
+}
+
+fn latest_event(events: &[RunEventOutput]) -> Option<&RunEventOutput> {
+    events.last()
+}
+
+fn build_agent_stats_output(
+    handle_id: &str,
+    record: &RunRecord,
+    events: &[RunEventOutput],
+    now: OffsetDateTime,
+) -> GetAgentStatsOutput {
+    let created_at = Some(record.created_at);
+    let accepted_at = first_event_time(events, "run.accepted").or(created_at);
+    let probe_started = first_event_time(events, "provider.probe.started");
+    let probe_completed = first_event_time(events, "provider.probe.completed");
+    let workspace_started = first_event_time(events, "workspace.prepare.started");
+    let first_output = first_event_time(events, "provider.first_output");
+    let terminal_at = if is_terminal_status(&record.status) {
+        Some(record.updated_at)
+    } else {
+        None
+    };
+    let end_at = terminal_at.or(Some(now));
+
+    let queue_ms = duration_between(accepted_at, probe_started.or(workspace_started));
+    let provider_probe_ms = duration_between(probe_started, probe_completed);
+    let execution_start = workspace_started
+        .or(probe_completed)
+        .or(probe_started)
+        .or(accepted_at);
+    let execution_ms = duration_between(execution_start, end_at);
+    let first_output_ms = duration_between(accepted_at, first_output);
+    let wall_ms = duration_between(accepted_at.or(created_at), end_at);
+
+    let latest = latest_event(events);
+    let last_event_at = latest
+        .map(|event| event.timestamp.clone())
+        .filter(|v| !v.is_empty());
+    let last_event_age_ms = latest.and_then(event_time).and_then(|ts| {
+        if now < ts {
+            None
+        } else {
+            Some((now - ts).whole_milliseconds().max(0) as u64)
+        }
+    });
+    let state = latest.and_then(|event| event.state.clone());
+    let phase = latest.and_then(|event| event.phase.clone());
+    let stalled =
+        !is_terminal_status(&record.status) && last_event_age_ms.is_some_and(|ms| ms >= 8_000);
+
+    GetAgentStatsOutput {
+        handle_id: handle_id.to_string(),
+        status: format!("{}", record.status),
+        state,
+        phase,
+        last_event_at,
+        last_event_age_ms,
+        stalled,
+        queue_ms,
+        provider_probe_ms,
+        execution_ms,
+        first_output_ms,
+        wall_ms,
+        usage: build_usage_output(record),
     }
 }
 
@@ -450,6 +627,57 @@ impl McpSubagentServer {
             }
             tokio::time::sleep(Duration::from_millis(interval_ms)).await;
         }
+    }
+
+    #[tool(description = "Read run events with incremental cursor support.")]
+    pub async fn watch_agent_events(
+        &self,
+        Parameters(input): Parameters<WatchAgentEventsInput>,
+    ) -> std::result::Result<Json<WatchAgentEventsOutput>, ErrorData> {
+        let record = self.get_or_load_run_record(&input.handle_id).await?;
+        let mut events = load_run_events(self.state_dir(), &input.handle_id)?;
+
+        if let Some(since_seq) = input.since_seq {
+            events.retain(|event| event.seq.is_some_and(|seq| seq > since_seq));
+        }
+
+        let limit = input.limit.unwrap_or(200).max(1);
+        if events.len() > limit {
+            let start = events.len() - limit;
+            events = events.split_off(start);
+        }
+
+        let next_seq = events
+            .iter()
+            .filter_map(|event| event.seq)
+            .max()
+            .map(|seq| seq + 1)
+            .or(input.since_seq);
+
+        Ok(Json(WatchAgentEventsOutput {
+            handle_id: input.handle_id,
+            status: format!("{}", record.status),
+            updated_at: format_time(record.updated_at),
+            terminal: is_terminal_status(&record.status),
+            events,
+            next_seq,
+        }))
+    }
+
+    #[tool(description = "Return run stats summary including phase timings and stall signal.")]
+    pub async fn get_agent_stats(
+        &self,
+        Parameters(input): Parameters<GetAgentStatsInput>,
+    ) -> std::result::Result<Json<GetAgentStatsOutput>, ErrorData> {
+        let record = self.get_or_load_run_record(&input.handle_id).await?;
+        let events = load_run_events(self.state_dir(), &input.handle_id)?;
+        let output = build_agent_stats_output(
+            &input.handle_id,
+            &record,
+            &events,
+            OffsetDateTime::now_utc(),
+        );
+        Ok(Json(output))
     }
 
     #[tool(description = "Run an agent synchronously and return structured summary.")]

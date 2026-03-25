@@ -214,3 +214,71 @@ pub struct WatchRunOutput {
     pub terminal: bool,
     pub timed_out: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct WatchAgentEventsInput {
+    pub handle_id: String,
+    #[serde(default)]
+    pub since_seq: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct RunEventOutput {
+    #[serde(default)]
+    pub seq: Option<u64>,
+    pub event: String,
+    pub timestamp: String,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    pub detail: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct WatchAgentEventsOutput {
+    pub handle_id: String,
+    pub status: String,
+    pub updated_at: String,
+    pub terminal: bool,
+    pub events: Vec<RunEventOutput>,
+    #[serde(default)]
+    pub next_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct GetAgentStatsInput {
+    pub handle_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct GetAgentStatsOutput {
+    pub handle_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub last_event_at: Option<String>,
+    #[serde(default)]
+    pub last_event_age_ms: Option<u64>,
+    pub stalled: bool,
+    #[serde(default)]
+    pub queue_ms: Option<u64>,
+    #[serde(default)]
+    pub provider_probe_ms: Option<u64>,
+    #[serde(default)]
+    pub execution_ms: Option<u64>,
+    #[serde(default)]
+    pub first_output_ms: Option<u64>,
+    #[serde(default)]
+    pub wall_ms: Option<u64>,
+    pub usage: RunUsageOutput,
+}

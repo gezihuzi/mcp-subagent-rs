@@ -58,6 +58,7 @@ MCP tools:
 
 - `list_agents`, `run_agent`, `spawn_agent`, `get_agent_status`, `cancel_agent`, `read_agent_artifact`
 - `list_runs`, `get_run_result`, `read_run_logs`, `watch_run`
+- `watch_agent_events`, `get_agent_stats`
 
 Global flags:
 
