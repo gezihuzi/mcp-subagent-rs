@@ -9,7 +9,7 @@
 ### Batch V0.10-P0 - Spawn Accepted-only + Runtime Transparency（当前优先）
 
 目标：先消除“spawn 黑盒卡住”与“运行中不可观察”两类核心体验问题。首个切片先完成 `spawn` accepted-only 语义（同步路径不做 provider probe），随后补事件流/心跳/watch/stats，并补 `block_reason + logs --follow + waiting/watchdog events + stats phase splits + phase_progress view + phase filter/timeout + MCP phase watchdog + watch advice` 让阻塞可解释。
-依赖顺序：`T-086(Completed) -> T-087(Completed) -> T-088(Completed) -> T-089(Completed) -> T-090(Completed) -> T-091(Completed) -> T-092(Completed) -> T-093(Completed) -> T-094(Completed) -> T-095(Completed) -> T-096(Completed) -> T-097(Completed) -> T-098(Completed) -> T-099(Completed) -> T-100(Completed) -> T-101(Completed) -> T-102(Completed) -> T-103(Completed) -> T-104(Completed) -> T-105(Completed)`。
+依赖顺序：`T-086(Completed) -> T-087(Completed) -> T-088(Completed) -> T-089(Completed) -> T-090(Completed) -> T-091(Completed) -> T-092(Completed) -> T-093(Completed) -> T-094(Completed) -> T-095(Completed) -> T-096(Completed) -> T-097(Completed) -> T-098(Completed) -> T-099(Completed) -> T-100(Completed) -> T-101(Completed) -> T-102(Completed) -> T-103(Completed) -> T-104(Completed) -> T-105(Completed) -> T-106(Completed)`。
 回滚策略：`run_agent` 保持同步 probe 语义；`spawn_agent` 仅将 probe 后移到 worker，异常仍落盘同一 run 结构，必要时可回退到旧 `prepare_run + upfront probe` 路径。
 风险与控制：provider 不可用从“同步拒绝”变成“异步失败”可能影响调用侧预期；通过保留明确 `error_message`（含 unavailable 原因）和测试覆盖（slow probe 快返、unavailable 异步失败）降低误解。
 

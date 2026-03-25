@@ -2805,3 +2805,31 @@
   - `src/mcp/tools.rs` 新增 transition-derived events 与 provider delta events 单测。
 - 已同步 `README.md`：说明 `spawn/submit --json` 的 accepted envelope 字段。
 - 已通过 `cargo fmt && cargo test -q`（186 + 58 + 3 全通过）。
+
+## T-106 V0.10-P1-IncrementalFollowEventCursor (Completed 2026-03-25)
+
+任务：将 `events --follow` 从“每轮全量重读 events 文件”改为“基于文件 offset 的增量消费”，降低轮询开销并让事件流语义更接近实时 tail。  
+验收标准：
+
+1. `events <handle-id> --follow` 使用增量 cursor，只消费新增事件，不重复解析历史全量文件。
+2. `events --all --follow` 同样使用 per-handle 增量 cursor，不再每轮扫描全量历史事件。
+3. 保持现有行为兼容：首次进入 follow 仍可看到已有历史事件，过滤参数 `--event/--phase` 继续生效。
+4. phase timeout / global timeout / phase_progress 输出语义保持不变。
+5. 新增单测覆盖增量读取和 partial line 场景。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已在 `src/main.rs` 增加增量读取基础设施：
+  - `EventStreamCursor`、`FollowEventState`
+  - `resolve_events_file_path`
+  - `parse_timeline_event_line`
+  - `load_run_events_incremental`（offset + trailing partial line 处理）
+- 已改造 `read_events`（单 handle follow）：
+  - 用 cursor + in-memory accumulated events 替代每轮 `load_run_events` 全量读取。
+- 已改造 `read_events_all`（全局 follow）：
+  - 用 per-handle `FollowEventState` 增量消费事件；
+  - 保留 `--event/--phase` 过滤、phase timeout 和 `phase_progress` 输出逻辑。
+- 已新增测试：
+  - `load_run_events_incremental_only_returns_appended_events`
+  - `load_run_events_incremental_handles_partial_trailing_line`
+- 已通过 `cargo fmt && cargo test -q`（186 + 60 + 3 全通过）。

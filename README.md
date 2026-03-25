@@ -182,6 +182,7 @@ mcp-subagent watch <handle-id>
 `ps` now includes observability fields for running jobs: `phase`, `elapsed`, `last_event`, `stalled`, `block_reason`.
 `stats` now includes stage timing splits (`workspace_prepare_ms`, `provider_boot_ms`), first-output watchdog markers, and aggregated `wait_reasons`.
 `watch`, `events --follow`, and `logs --follow` now emit a rolling `phase_progress` line (phase durations + current phase marker) in text mode.
+`events --follow` now tails run events incrementally via cursor offsets instead of re-reading full `events.jsonl` every poll.
 For long-running phases, use `--phase-timeout-secs` to fail fast when a phase does not progress.
 
 Inspect one run end-to-end:

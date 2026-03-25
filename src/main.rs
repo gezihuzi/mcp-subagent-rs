@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
-    io::IsTerminal,
+    io::{IsTerminal, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     time::Instant,
@@ -1316,8 +1316,21 @@ struct RunTimelineAllOutput {
 #[derive(Debug, Clone)]
 struct RunEventsSnapshot {
     handle_id: String,
-    status: String,
     events: Vec<RunTimelineEvent>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct EventStreamCursor {
+    path: Option<PathBuf>,
+    offset: u64,
+    pending: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct FollowEventState {
+    cursor: EventStreamCursor,
+    events: Vec<RunTimelineEvent>,
+    status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1442,6 +1455,18 @@ fn run_events_legacy_path(state_dir: &Path, handle_id: &str) -> PathBuf {
     runs_root(state_dir).join(handle_id).join("events.ndjson")
 }
 
+fn resolve_events_file_path(state_dir: &Path, handle_id: &str) -> Option<PathBuf> {
+    let canonical_path = run_events_path(state_dir, handle_id);
+    if canonical_path.exists() {
+        return Some(canonical_path);
+    }
+    let legacy_path = run_events_legacy_path(state_dir, handle_id);
+    if legacy_path.exists() {
+        return Some(legacy_path);
+    }
+    None
+}
+
 fn run_artifacts_root(state_dir: &Path, handle_id: &str) -> PathBuf {
     runs_root(state_dir).join(handle_id).join("artifacts")
 }
@@ -1487,16 +1512,21 @@ fn list_run_records(
     Ok(runs)
 }
 
+fn parse_timeline_event_line(
+    path: &Path,
+    line_no: usize,
+    line: &str,
+) -> std::result::Result<RunTimelineEvent, String> {
+    serde_json::from_str::<RunTimelineEvent>(line)
+        .map_err(|err| format!("failed to parse {} line {}: {err}", path.display(), line_no))
+}
+
 fn load_run_events(
     state_dir: &Path,
     handle_id: &str,
 ) -> std::result::Result<Vec<RunTimelineEvent>, String> {
-    let canonical_path = run_events_path(state_dir, handle_id);
-    let path = if canonical_path.exists() {
-        canonical_path
-    } else {
-        run_events_legacy_path(state_dir, handle_id)
-    };
+    let path = resolve_events_file_path(state_dir, handle_id)
+        .ok_or_else(|| format!("events not found for handle `{handle_id}`"))?;
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
     let mut events = Vec::new();
@@ -1504,13 +1534,82 @@ fn load_run_events(
         if line.trim().is_empty() {
             continue;
         }
-        let event = serde_json::from_str::<RunTimelineEvent>(line).map_err(|err| {
-            format!(
-                "failed to parse {} line {}: {err}",
-                path.display(),
-                line_no + 1
-            )
-        })?;
+        let event = parse_timeline_event_line(&path, line_no + 1, line)?;
+        events.push(event);
+    }
+    Ok(events)
+}
+
+fn load_run_events_incremental(
+    state_dir: &Path,
+    handle_id: &str,
+    cursor: &mut EventStreamCursor,
+) -> std::result::Result<Vec<RunTimelineEvent>, String> {
+    let Some(path) = resolve_events_file_path(state_dir, handle_id) else {
+        cursor.path = None;
+        cursor.offset = 0;
+        cursor.pending.clear();
+        return Ok(Vec::new());
+    };
+
+    if cursor.path.as_ref() != Some(&path) {
+        cursor.path = Some(path.clone());
+        cursor.offset = 0;
+        cursor.pending.clear();
+    }
+
+    let mut file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(format!("failed to open {}: {err}", path.display())),
+    };
+
+    let metadata = file
+        .metadata()
+        .map_err(|err| format!("failed to stat {}: {err}", path.display()))?;
+    if metadata.len() < cursor.offset {
+        cursor.offset = 0;
+        cursor.pending.clear();
+    }
+
+    file.seek(SeekFrom::Start(cursor.offset))
+        .map_err(|err| format!("failed to seek {}: {err}", path.display()))?;
+    let mut chunk = String::new();
+    file.read_to_string(&mut chunk)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    cursor.offset = cursor.offset.saturating_add(chunk.as_bytes().len() as u64);
+
+    if chunk.is_empty() && cursor.pending.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut text = String::new();
+    if !cursor.pending.is_empty() {
+        text.push_str(&cursor.pending);
+        cursor.pending.clear();
+    }
+    text.push_str(&chunk);
+
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if !text.ends_with('\n') {
+        if let Some(last_newline) = text.rfind('\n') {
+            cursor.pending = text[last_newline + 1..].to_string();
+            text.truncate(last_newline + 1);
+        } else {
+            cursor.pending = text;
+            return Ok(Vec::new());
+        }
+    }
+
+    let mut events = Vec::new();
+    for (line_no, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event = parse_timeline_event_line(&path, line_no + 1, line)?;
         events.push(event);
     }
     Ok(events)
@@ -2575,7 +2674,7 @@ fn collect_run_event_snapshots(
 ) -> std::result::Result<Vec<RunEventsSnapshot>, String> {
     let entries = list_run_records(state_dir)?;
     let mut snapshots = Vec::new();
-    for (handle_id, record) in entries {
+    for (handle_id, _record) in entries {
         let events = if run_events_path(state_dir, &handle_id).exists()
             || run_events_legacy_path(state_dir, &handle_id).exists()
         {
@@ -2585,7 +2684,6 @@ fn collect_run_event_snapshots(
         };
         snapshots.push(RunEventsSnapshot {
             handle_id,
-            status: record.status,
             events: filter_timeline_events(events, event, phase),
         });
     }
@@ -2658,74 +2756,91 @@ async fn read_events_all(
 
     let started = Instant::now();
     let sleep_ms = interval_ms.max(50);
-    let mut seen_counts: HashMap<String, usize> = HashMap::new();
+    let mut follow_states: HashMap<String, FollowEventState> = HashMap::new();
     let mut phase_track: HashMap<String, (Option<String>, Instant)> = HashMap::new();
     let mut last_phase_progress: HashMap<String, String> = HashMap::new();
     loop {
-        let snapshots =
-            match collect_run_event_snapshots(&cfg.state_dir, event.as_deref(), phase.as_deref()) {
-                Ok(items) => items,
-                Err(err) => {
-                    eprintln!("events failed: {err}");
-                    return ExitCode::from(1);
-                }
-            };
-
-        for snapshot in &snapshots {
-            let seen = seen_counts
-                .entry(snapshot.handle_id.clone())
-                .or_insert(0usize);
-            if *seen > snapshot.events.len() {
-                *seen = snapshot.events.len();
+        let entries = match list_run_records(&cfg.state_dir) {
+            Ok(items) => items,
+            Err(err) => {
+                eprintln!("events failed: {err}");
+                return ExitCode::from(1);
             }
-            let mut had_new_events = false;
-            for evt in snapshot.events.iter().skip(*seen) {
-                had_new_events = true;
-                if json {
-                    if let Err(err) = print_json_line(&serde_json::json!({
-                        "kind": "event",
-                        "handle_id": snapshot.handle_id,
-                        "seq": evt.seq,
-                        "event": evt.event,
-                        "timestamp": evt.display_timestamp(),
-                        "state": evt.state,
-                        "phase": evt.phase,
-                        "source": evt.source,
-                        "message": evt.message,
-                        "detail": evt.detail,
-                    })) {
+        };
+        let mut active_handles: HashMap<String, String> = HashMap::new();
+        let now = OffsetDateTime::now_utc();
+
+        for (handle_id, record) in entries {
+            active_handles.insert(handle_id.clone(), record.status.clone());
+            let state = follow_states.entry(handle_id.clone()).or_default();
+            state.status = Some(record.status.clone());
+
+            let new_events =
+                match load_run_events_incremental(&cfg.state_dir, &handle_id, &mut state.cursor) {
+                    Ok(items) => items,
+                    Err(err) => {
                         eprintln!("events failed: {err}");
                         return ExitCode::from(1);
                     }
-                } else {
-                    let detail =
-                        serde_json::to_string(&evt.detail).unwrap_or_else(|_| "null".to_string());
-                    let message = evt.message.as_deref().unwrap_or("");
-                    if message.is_empty() {
-                        println!(
-                            "[{}] {} [{}] {}",
-                            snapshot.handle_id,
-                            evt.display_timestamp(),
-                            evt.event,
-                            detail
-                        );
+                };
+            let mut had_new_events = false;
+            for evt in new_events {
+                let matches_event = event
+                    .as_deref()
+                    .is_none_or(|needle| evt.event.as_str() == needle);
+                let matches_phase = phase
+                    .as_deref()
+                    .is_none_or(|needle| evt.phase.as_deref().is_some_and(|value| value == needle));
+                if matches_event && matches_phase {
+                    had_new_events = true;
+                    if json {
+                        if let Err(err) = print_json_line(&serde_json::json!({
+                            "kind": "event",
+                            "handle_id": handle_id,
+                            "seq": evt.seq,
+                            "event": evt.event,
+                            "timestamp": evt.display_timestamp(),
+                            "state": evt.state,
+                            "phase": evt.phase,
+                            "source": evt.source,
+                            "message": evt.message,
+                            "detail": evt.detail,
+                        })) {
+                            eprintln!("events failed: {err}");
+                            return ExitCode::from(1);
+                        }
                     } else {
-                        println!(
-                            "[{}] {} [{}] {} {}",
-                            snapshot.handle_id,
-                            evt.display_timestamp(),
-                            evt.event,
-                            message,
-                            detail
-                        );
+                        let detail = serde_json::to_string(&evt.detail)
+                            .unwrap_or_else(|_| "null".to_string());
+                        let message = evt.message.as_deref().unwrap_or("");
+                        if message.is_empty() {
+                            println!(
+                                "[{}] {} [{}] {}",
+                                handle_id,
+                                evt.display_timestamp(),
+                                evt.event,
+                                detail
+                            );
+                        } else {
+                            println!(
+                                "[{}] {} [{}] {} {}",
+                                handle_id,
+                                evt.display_timestamp(),
+                                evt.event,
+                                message,
+                                detail
+                            );
+                        }
                     }
                 }
+                state.events.push(evt);
             }
-            *seen = snapshot.events.len();
 
-            let current_phase = latest_event(&snapshot.events).and_then(|evt| evt.phase.clone());
+            let filtered_events =
+                filter_timeline_events(state.events.clone(), event.as_deref(), phase.as_deref());
+            let current_phase = latest_event(&filtered_events).and_then(|evt| evt.phase.clone());
             let entry = phase_track
-                .entry(snapshot.handle_id.clone())
+                .entry(handle_id.clone())
                 .or_insert((current_phase.clone(), Instant::now()));
             if entry.0 != current_phase {
                 *entry = (current_phase, Instant::now());
@@ -2733,35 +2848,37 @@ async fn read_events_all(
 
             if !json {
                 if let Some(line) = build_phase_progress_line(
-                    &snapshot.events,
-                    is_terminal_status(snapshot.status.as_str()),
-                    OffsetDateTime::now_utc(),
+                    &filtered_events,
+                    is_terminal_status(record.status.as_str()),
+                    now,
                     phase.as_deref(),
                 ) {
-                    let last = last_phase_progress
-                        .entry(snapshot.handle_id.clone())
-                        .or_default();
+                    let last = last_phase_progress.entry(handle_id.clone()).or_default();
                     if *last != line && (had_new_events || last.is_empty()) {
-                        println!("[{}] {line}", snapshot.handle_id);
+                        println!("[{}] {line}", handle_id);
                         *last = line;
                     }
                 }
             }
         }
 
+        follow_states.retain(|handle_id, _| active_handles.contains_key(handle_id));
+        phase_track.retain(|handle_id, _| active_handles.contains_key(handle_id));
+        last_phase_progress.retain(|handle_id, _| active_handles.contains_key(handle_id));
+
         if phase_timeout_secs.is_some() {
             let timeout = phase_timeout_secs.unwrap_or_default();
-            for snapshot in &snapshots {
-                if is_terminal_status(snapshot.status.as_str()) {
+            for (handle_id, status) in &active_handles {
+                if is_terminal_status(status.as_str()) {
                     continue;
                 }
-                if let Some((phase_name, phase_started)) = phase_track.get(&snapshot.handle_id) {
+                if let Some((phase_name, phase_started)) = phase_track.get(handle_id) {
                     if phase_started.elapsed().as_secs() >= timeout {
                         eprintln!(
                             "events --all follow phase timeout after {}s in phase `{}` for handle `{}`",
                             timeout,
                             phase_name.as_deref().unwrap_or("unknown"),
-                            snapshot.handle_id
+                            handle_id
                         );
                         return ExitCode::from(124);
                     }
@@ -2851,7 +2968,8 @@ async fn read_events(
     }
 
     let started = Instant::now();
-    let mut seen_count = 0usize;
+    let mut cursor = EventStreamCursor::default();
+    let mut all_events = Vec::new();
     let mut last_phase_progress = String::new();
     let mut observed_phase: Option<String> = None;
     let mut observed_phase_started_at = Instant::now();
@@ -2865,24 +2983,16 @@ async fn read_events(
             }
         };
 
-        let events = if run_events_path(&cfg.state_dir, &handle_id).exists()
-            || run_events_legacy_path(&cfg.state_dir, &handle_id).exists()
+        let new_events = match load_run_events_incremental(&cfg.state_dir, &handle_id, &mut cursor)
         {
-            match load_run_events(&cfg.state_dir, &handle_id) {
-                Ok(events) => events,
-                Err(err) => {
-                    eprintln!("events failed: {err}");
-                    return ExitCode::from(1);
-                }
+            Ok(events) => events,
+            Err(err) => {
+                eprintln!("events failed: {err}");
+                return ExitCode::from(1);
             }
-        } else {
-            Vec::new()
         };
 
-        if seen_count > events.len() {
-            seen_count = events.len();
-        }
-        for evt in events.iter().skip(seen_count) {
+        for evt in &new_events {
             if event
                 .as_deref()
                 .is_some_and(|needle| evt.event.as_str() != needle)
@@ -2920,15 +3030,15 @@ async fn read_events(
                 }
             }
         }
-        seen_count = events.len();
-        let current_phase = latest_event(&events).and_then(|evt| evt.phase.clone());
+        all_events.extend(new_events);
+        let current_phase = latest_event(&all_events).and_then(|evt| evt.phase.clone());
         if current_phase != observed_phase {
             observed_phase = current_phase;
             observed_phase_started_at = Instant::now();
         }
         if !json {
             if let Some(line) = build_phase_progress_line(
-                &events,
+                &all_events,
                 is_terminal_status(record.status.as_str()),
                 OffsetDateTime::now_utc(),
                 phase.as_deref(),
@@ -4892,6 +5002,75 @@ target/
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event, "canonical");
         assert_eq!(events[0].seq, Some(1));
+    }
+
+    #[test]
+    fn load_run_events_incremental_only_returns_appended_events() {
+        let dir = tempdir().expect("tempdir");
+        let run_dir = dir.path().join("runs").join("handle-1");
+        fs::create_dir_all(&run_dir).expect("mkdir run");
+        let events_path = run_dir.join("events.jsonl");
+        fs::write(
+            &events_path,
+            "{\"event\":\"run.accepted\",\"timestamp\":\"2026-03-25T00:00:00Z\",\"detail\":{},\"seq\":1}\n",
+        )
+        .expect("write initial events");
+
+        let mut cursor = super::EventStreamCursor::default();
+        let first = super::load_run_events_incremental(dir.path(), "handle-1", &mut cursor)
+            .expect("load first chunk");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].event, "run.accepted");
+
+        let second = super::load_run_events_incremental(dir.path(), "handle-1", &mut cursor)
+            .expect("load second chunk");
+        assert!(second.is_empty());
+
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&events_path)
+            .expect("open events append");
+        writeln!(
+            file,
+            "{{\"event\":\"provider.probe.started\",\"timestamp\":\"2026-03-25T00:00:01Z\",\"detail\":{{}},\"seq\":2}}"
+        )
+        .expect("append event");
+
+        let third = super::load_run_events_incremental(dir.path(), "handle-1", &mut cursor)
+            .expect("load appended chunk");
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].event, "provider.probe.started");
+    }
+
+    #[test]
+    fn load_run_events_incremental_handles_partial_trailing_line() {
+        let dir = tempdir().expect("tempdir");
+        let run_dir = dir.path().join("runs").join("handle-1");
+        fs::create_dir_all(&run_dir).expect("mkdir run");
+        let events_path = run_dir.join("events.jsonl");
+        fs::write(
+            &events_path,
+            "{\"event\":\"run.accepted\",\"timestamp\":\"2026-03-25T00:00:00Z\",\"detail\":{},\"seq\":1",
+        )
+        .expect("write partial event");
+
+        let mut cursor = super::EventStreamCursor::default();
+        let first = super::load_run_events_incremental(dir.path(), "handle-1", &mut cursor)
+            .expect("read partial");
+        assert!(first.is_empty());
+
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&events_path)
+            .expect("open events append");
+        writeln!(file, "}}").expect("complete event");
+
+        let second = super::load_run_events_incremental(dir.path(), "handle-1", &mut cursor)
+            .expect("read completed");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].seq, Some(1));
     }
 
     #[test]
