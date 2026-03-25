@@ -1514,3 +1514,29 @@
   - `cargo test -q`（`134 + 10 + 3` tests passed）
   - `cargo run -- --help` 已显示 `connect-snippet`
   - `cargo run -- connect-snippet --host claude` 输出绝对路径命令
+
+## T-060 V0.8-P0-SmokeV08AndCiSwitch (Completed 2026-03-25)
+
+任务：新增 `smoke_v08.sh` 并切换 CI 默认 smoke 到 v0.8，纳入 `connect-snippet` 三 host 校验和 codex fake runner 稳定回归。  
+验收标准：
+
+1. 新增 `scripts/smoke_v08.sh`，至少覆盖：`validate`、`doctor`、`list-agents`、mock run、codex fake runner run、`mcp` boot、`connect-snippet --host claude|codex|gemini`。
+2. smoke 校验 `connect-snippet` 输出使用绝对路径 `agents_dir/state_dir`，且不含占位符。
+3. CI workflow 从 `smoke_v07_release.sh` 切换到 `smoke_v08.sh`。
+4. 根 `README.md` 的本地 smoke 命令与当前脚本一致，消除文档漂移。
+5. 本地通过：`cargo fmt`、`cargo test -q`、`./scripts/smoke_v08.sh`。
+完成记录：
+
+- 已新增 `scripts/smoke_v08.sh`：
+  - 基于 v0.7 基线回归链路，新增 v0.8 必要检查；
+  - 引入 `MCP_SUBAGENT_CODEX_BIN` fake binary，固定 `codex_runner` 为可重复通过路径；
+  - 新增 `connect-snippet --host claude|codex|gemini` 三条校验，验证命令前缀、绝对 `agents_dir/state_dir`、无占位符。
+- 已切换 CI smoke：
+  - `.github/workflows/ci.yml` 从 `./scripts/smoke_v07_release.sh` 改为 `./scripts/smoke_v08.sh`；
+  - step 名称同步为 `v0.8 Release Smoke`。
+- 已同步文档：
+  - `README.md` 的 Local Smoke 命令更新为 `./scripts/smoke_v08.sh`。
+- 已通过验收回归：
+  - `cargo fmt`
+  - `cargo test -q`（`134 + 10 + 3` tests passed）
+  - `./scripts/smoke_v08.sh` 全链路通过（含 codex fake 与 connect snippets）。

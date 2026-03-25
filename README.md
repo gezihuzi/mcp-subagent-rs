@@ -76,7 +76,7 @@ ollama = "0.5"
 Run one command for minimal local acceptance:
 
 ```bash
-./scripts/smoke_v07_release.sh
+./scripts/smoke_v08.sh
 ```
 
 Initialize a local preset workspace:
