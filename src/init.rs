@@ -107,6 +107,16 @@ fn init_with_preset(root: &Path, preset: InitPreset, force: bool) -> Result<Init
     }
 
     let generated = load_agent_specs_from_dirs(std::slice::from_ref(&agents_dir))?;
+    let state_dir = root.join(".mcp-subagent/state");
+    let validate_note = format!(
+        "Run `mcp-subagent validate --agents-dir {}` to verify generated specs.",
+        agents_dir.display()
+    );
+    let doctor_note = format!(
+        "Run `mcp-subagent doctor --agents-dir {} --state-dir {}` to inspect provider readiness.",
+        agents_dir.display(),
+        state_dir.display()
+    );
 
     Ok(InitReport {
         preset: preset.as_str().to_string(),
@@ -118,10 +128,8 @@ fn init_with_preset(root: &Path, preset: InitPreset, force: bool) -> Result<Init
         generated_agent_count: generated.len(),
         notes: vec![
             format!("Preset catalog version: {PRESET_CATALOG_VERSION}"),
-            "Run `mcp-subagent validate --agents-dir ./agents` to verify generated specs."
-                .to_string(),
-            "Run `mcp-subagent doctor --agents-dir ./agents` to inspect provider readiness."
-                .to_string(),
+            validate_note,
+            doctor_note,
             "Use `mcp-subagent mcp` for stdio MCP transport.".to_string(),
         ],
     })

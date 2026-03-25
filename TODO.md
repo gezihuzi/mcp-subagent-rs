@@ -1633,3 +1633,33 @@
 - 修复了格式化降级警告。
 - 基于反馈，移除了原生命周期钩子中回避性的 `#[allow(clippy::too_many_arguments)]`，通过提炼专属上下文结构体 `ArtifactCollector` 从根本上优化了 `apply_archive_hook` 和 `upsert_artifact` 的 API 设计，清除了 Clippy 警告。
 - 已通过 `cargo clippy` 和 `cargo test` 全量检查。
+
+## T-065 V0.8-P0-InitDefaultBootstrapRoot (Completed 2026-03-25)
+
+任务：将 `init` 默认行为切换为写入独立 bootstrap 目录，避免覆盖当前仓库已有 `PLAN.md` 等文件；提供显式 `--in-place` 回退。  
+验收标准：
+
+1. `mcp-subagent init --preset ...` 在未指定 `--root-dir` 时默认写入 `./.mcp-subagent/bootstrap`。
+2. 新增 `--in-place` 开关，显式指定后使用当前目录作为 root（兼容旧行为）。
+3. `--in-place` 与 `--root-dir` 互斥，CLI 解析可校验。
+4. README 命令面和 onboarding 文案与新默认行为一致。
+5. 回归通过：`cargo fmt`、`cargo test -q`、`./scripts/smoke_v08.sh`。
+完成记录：
+
+- 已切换 `init` 默认 root 解析：
+  - `src/main.rs` 新增 `resolve_init_root`，默认路径改为 `./.mcp-subagent/bootstrap`；
+  - 保留显式 `--root-dir` 覆盖。
+- 已新增 `--in-place` 回退开关：
+  - `src/main.rs` 的 `init` 子命令新增 `--in-place`；
+  - `--in-place` 与 `--root-dir` 互斥（clap 约束）；
+  - 新增解析测试覆盖默认 bootstrap、in-place、互斥校验。
+- 已更新 init 结果提示：
+  - `src/init.rs` 的 `notes` 改为输出实际 `agents_dir/state_dir` 路径，避免默认 bootstrap 下误导 `./agents`。
+- 已同步 README：
+  - 命令面新增 `--in-place`；
+  - Quick Onboarding 按默认 bootstrap 路径给出可复制命令；
+  - 说明可用 `--in-place` 恢复旧行为。
+- 已通过验收回归：
+  - `cargo fmt`
+  - `cargo test -q`（`134 + 13 + 3` tests passed）
+  - `./scripts/smoke_v08.sh` 全链路通过。

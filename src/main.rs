@@ -63,6 +63,8 @@ enum Commands {
         preset: InitPresetArg,
         #[arg(long, value_name = "ROOT_DIR")]
         root_dir: Option<PathBuf>,
+        #[arg(long, conflicts_with = "root_dir")]
+        in_place: bool,
         #[arg(long)]
         force: bool,
         #[arg(long)]
@@ -248,11 +250,12 @@ async fn main() -> ExitCode {
         Commands::Init {
             preset,
             root_dir,
+            in_place,
             force,
             json,
         } => {
             info!("starting command: init");
-            init_command(preset, root_dir, force, json)
+            init_command(preset, root_dir, in_place, force, json)
         }
         Commands::ConnectSnippet { host } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -528,18 +531,23 @@ fn doctor(cfg: RuntimeConfig, json: bool) -> ExitCode {
 fn init_command(
     preset: InitPresetArg,
     root_dir: Option<PathBuf>,
+    in_place: bool,
     force: bool,
     json: bool,
 ) -> ExitCode {
-    let root = match root_dir {
-        Some(path) => path,
-        None => match std::env::current_dir() {
-            Ok(path) => path,
-            Err(err) => {
-                eprintln!("init failed: unable to resolve current directory: {err}");
-                return ExitCode::from(1);
-            }
-        },
+    let cwd = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("init failed: unable to resolve current directory: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let root = match resolve_init_root(&cwd, root_dir, in_place) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("init failed: {err}");
+            return ExitCode::from(1);
+        }
     };
     match init_workspace(&root, preset.into(), force) {
         Ok(report) => {
@@ -555,6 +563,20 @@ fn init_command(
             ExitCode::from(1)
         }
     }
+}
+
+fn resolve_init_root(
+    cwd: &Path,
+    root_dir: Option<PathBuf>,
+    in_place: bool,
+) -> std::result::Result<PathBuf, String> {
+    if let Some(root) = root_dir {
+        return Ok(root);
+    }
+    if in_place {
+        return Ok(cwd.to_path_buf());
+    }
+    Ok(cwd.join(".mcp-subagent").join("bootstrap"))
 }
 
 fn connect_snippet_command(cfg: RuntimeConfig, host: ConnectHostArg) -> ExitCode {
@@ -949,14 +971,17 @@ fn print_init_report(report: &InitReport) {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use clap::Parser;
     use tempfile::tempdir;
 
     use crate::{
-        build_selected_file_inputs, ArtifactKindArg, Cli, Commands, ConnectHostArg, InitPresetArg,
-        RunAgentSelectedFileInput,
+        build_selected_file_inputs, resolve_init_root, ArtifactKindArg, Cli, Commands,
+        ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput,
     };
 
     #[test]
@@ -1034,17 +1059,20 @@ mod tests {
             "init",
             "--preset",
             "claude-opus-supervisor",
+            "--in-place",
             "--force",
             "--json",
         ]);
         match cli.command {
             Commands::Init {
                 preset,
+                in_place,
                 force,
                 json,
                 ..
             } => {
                 assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisor));
+                assert!(in_place);
                 assert!(force);
                 assert!(json);
             }
@@ -1061,11 +1089,41 @@ mod tests {
             "minimal-single-provider",
         ]);
         match cli.command {
-            Commands::Init { preset, .. } => {
+            Commands::Init {
+                preset, in_place, ..
+            } => {
                 assert!(matches!(preset, InitPresetArg::MinimalSingleProvider));
+                assert!(!in_place);
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn init_rejects_in_place_with_root_dir() {
+        let result =
+            Cli::try_parse_from(["mcp-subagent", "init", "--in-place", "--root-dir", "tmp"]);
+        assert!(
+            result.is_err(),
+            "init should reject --in-place with --root-dir"
+        );
+    }
+
+    #[test]
+    fn init_defaults_to_bootstrap_root_when_not_in_place() {
+        let cwd = Path::new("/tmp/workspace");
+        let root = resolve_init_root(cwd, None, false).expect("resolve");
+        assert_eq!(
+            root,
+            PathBuf::from("/tmp/workspace/.mcp-subagent/bootstrap")
+        );
+    }
+
+    #[test]
+    fn init_in_place_uses_current_directory() {
+        let cwd = Path::new("/tmp/workspace");
+        let root = resolve_init_root(cwd, None, true).expect("resolve");
+        assert_eq!(root, PathBuf::from("/tmp/workspace"));
     }
 
     #[test]
