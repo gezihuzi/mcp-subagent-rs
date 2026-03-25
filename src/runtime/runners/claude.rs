@@ -9,7 +9,10 @@ use async_trait::async_trait;
 
 use crate::{
     error::{McpSubagentError, Result},
-    runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
+    runtime::runners::{
+        streaming::collect_streaming_output, AgentRunner, RunnerExecution, RunnerOutputObserver,
+        RunnerTerminalState,
+    },
     spec::{
         runtime_policy::{ApprovalPolicy, SandboxPolicy},
         AgentSpec,
@@ -35,11 +38,12 @@ impl ClaudeRunner {
         Self { executable }
     }
 
-    pub async fn execute(
+    async fn execute_internal(
         &self,
         spec: &AgentSpec,
         request: &RunRequest,
         compiled: &CompiledContext,
+        observer: Option<&mut dyn RunnerOutputObserver>,
     ) -> Result<RunnerExecution> {
         let prompt = compose_prompt(compiled);
         let schema_file = std::env::temp_dir().join(format!(
@@ -74,29 +78,63 @@ impl ClaudeRunner {
             command.arg("--model").arg(model);
         }
 
-        let output = match tokio::time::timeout(timeout, command.output()).await {
-            Ok(waited) => waited.map_err(McpSubagentError::Io)?,
-            Err(_) => {
-                let _ = fs::remove_file(&schema_file);
-                return Ok(RunnerExecution {
-                    terminal_state: RunnerTerminalState::TimedOut,
-                    stdout: String::new(),
-                    stderr: format!(
-                        "claude execution exceeded timeout of {}s",
-                        timeout.as_secs()
-                    ),
-                });
+        let (status, stdout, stderr, timed_out) = match observer {
+            Some(output_observer) => {
+                let mut child = command.spawn().map_err(McpSubagentError::Io)?;
+                let observed =
+                    collect_streaming_output(&mut child, timeout, output_observer).await?;
+                (
+                    observed.status,
+                    observed.stdout,
+                    observed.stderr,
+                    observed.timed_out,
+                )
             }
+            None => match tokio::time::timeout(timeout, command.output()).await {
+                Ok(waited) => {
+                    let output = waited.map_err(McpSubagentError::Io)?;
+                    (
+                        output.status,
+                        String::from_utf8_lossy(&output.stdout).to_string(),
+                        String::from_utf8_lossy(&output.stderr).to_string(),
+                        false,
+                    )
+                }
+                Err(_) => {
+                    let _ = fs::remove_file(&schema_file);
+                    return Ok(RunnerExecution {
+                        terminal_state: RunnerTerminalState::TimedOut,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "claude execution exceeded timeout of {}s",
+                            timeout.as_secs()
+                        ),
+                    });
+                }
+            },
         };
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let _ = fs::remove_file(&schema_file);
 
-        let terminal_state = if output.status.success() {
+        if timed_out {
+            return Ok(RunnerExecution {
+                terminal_state: RunnerTerminalState::TimedOut,
+                stdout,
+                stderr: if stderr.is_empty() {
+                    format!(
+                        "claude execution exceeded timeout of {}s",
+                        timeout.as_secs()
+                    )
+                } else {
+                    stderr
+                },
+            });
+        }
+
+        let terminal_state = if status.success() {
             RunnerTerminalState::Succeeded
         } else {
-            let exit_code = output.status.code().unwrap_or(-1);
+            let exit_code = status.code().unwrap_or(-1);
             let mut message = format!("claude exited with code {exit_code}");
             if !stderr.trim().is_empty() {
                 let first_line = stderr
@@ -117,6 +155,15 @@ impl ClaudeRunner {
             stderr,
         })
     }
+
+    pub async fn execute(
+        &self,
+        spec: &AgentSpec,
+        request: &RunRequest,
+        compiled: &CompiledContext,
+    ) -> Result<RunnerExecution> {
+        self.execute_internal(spec, request, compiled, None).await
+    }
 }
 
 #[async_trait]
@@ -128,6 +175,17 @@ impl AgentRunner for ClaudeRunner {
         compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
         ClaudeRunner::execute(self, spec, request, compiled).await
+    }
+
+    async fn execute_with_observer(
+        &self,
+        spec: &AgentSpec,
+        request: &RunRequest,
+        compiled: &CompiledContext,
+        observer: &mut dyn RunnerOutputObserver,
+    ) -> Result<RunnerExecution> {
+        self.execute_internal(spec, request, compiled, Some(observer))
+            .await
     }
 }
 
@@ -196,7 +254,10 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        runtime::{runners::claude::ClaudeRunner, runners::RunnerTerminalState},
+        runtime::runners::{
+            claude::ClaudeRunner, AgentRunner, RunnerOutputObserver, RunnerOutputStream,
+            RunnerTerminalState,
+        },
         spec::{
             core::{AgentSpecCore, Provider},
             provider_overrides::{ClaudeOverrides, ProviderOverrides},
@@ -242,6 +303,17 @@ mod tests {
             working_dir,
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+        }
+    }
+
+    #[derive(Default)]
+    struct CollectingObserver {
+        events: Vec<(RunnerOutputStream, String)>,
+    }
+
+    impl RunnerOutputObserver for CollectingObserver {
+        fn on_output(&mut self, stream: RunnerOutputStream, chunk: &str) {
+            self.events.push((stream, chunk.to_string()));
         }
     }
 
@@ -385,6 +457,72 @@ exit 6
             other => panic!("unexpected terminal state: {other:?}"),
         }
         assert!(execution.stderr.contains("auth required"));
+    }
+
+    #[tokio::test]
+    async fn claude_runner_execute_with_observer_streams_output_chunks() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("fake-claude-stream.sh");
+        let script = r#"#!/bin/sh
+set -eu
+echo "stdout-chunk-1"
+sleep 0.1
+echo "stdout-chunk-2"
+echo "stderr-chunk-1" >&2
+sleep 0.1
+echo "stderr-chunk-2" >&2
+cat <<'EOF'
+<<<MCP_SUBAGENT_SUMMARY_JSON_START>>>
+{
+  "summary": "ok",
+  "key_findings": [],
+  "artifacts": [],
+  "open_questions": [],
+  "next_steps": [],
+  "exit_code": 0,
+  "verification_status": "Passed",
+  "touched_files": []
+}
+<<<MCP_SUBAGENT_SUMMARY_JSON_END>>>
+EOF
+exit 0
+"#;
+        fs::write(&script_path, script).expect("write script");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod");
+
+        let runner = ClaudeRunner::new(script_path);
+        let mut observer = CollectingObserver::default();
+        let execution = <ClaudeRunner as AgentRunner>::execute_with_observer(
+            &runner,
+            &sample_spec(30),
+            &sample_request(dir.path().to_path_buf()),
+            &CompiledContext {
+                system_prefix: "sys".to_string(),
+                injected_prompt: "prompt".to_string(),
+                source_manifest: Vec::new(),
+            },
+            &mut observer,
+        )
+        .await
+        .expect("execute with observer");
+
+        assert_eq!(execution.terminal_state, RunnerTerminalState::Succeeded);
+        assert!(
+            observer.events.iter().any(|(stream, chunk)| matches!(
+                stream,
+                RunnerOutputStream::Stdout
+            ) && chunk.contains("stdout-chunk")),
+            "observer should receive stdout chunks"
+        );
+        assert!(
+            observer.events.iter().any(|(stream, chunk)| matches!(
+                stream,
+                RunnerOutputStream::Stderr
+            ) && chunk.contains("stderr-chunk")),
+            "observer should receive stderr chunks"
+        );
     }
 
     #[tokio::test]

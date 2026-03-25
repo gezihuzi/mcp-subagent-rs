@@ -3,6 +3,7 @@ pub mod codex;
 pub mod gemini;
 pub mod mock;
 pub mod ollama;
+pub mod streaming;
 
 use async_trait::async_trait;
 

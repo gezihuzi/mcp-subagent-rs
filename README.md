@@ -185,7 +185,7 @@ CLI `spawn/submit` exits immediately after acceptance; use `watch/events/stats/r
 `watch`, `events --follow`, and `logs --follow` now emit a rolling `phase_progress` line (phase durations + current phase marker) in text mode.
 `events --follow` now tails run events incrementally via cursor offsets instead of re-reading full `events.jsonl` every poll.
 `watch` now uses the same incremental cursor model as `events --follow` (no full event-file re-scan per loop).
-Provider stdout/stderr delta events are now emitted on the runtime path during execution (Codex runner streaming path), not only at run completion.
+Provider stdout/stderr delta events are now emitted on the runtime path during execution (Codex/Gemini/Claude streaming paths), not only at run completion.
 For long-running phases, use `--phase-timeout-secs` to fail fast when a phase does not progress.
 
 Inspect one run end-to-end:

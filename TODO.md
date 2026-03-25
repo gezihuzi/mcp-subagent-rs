@@ -2898,7 +2898,7 @@
 - 已移除 `src/mcp/tools.rs` 里依赖 `status_history` 的 synthetic 事件回填路径。
 - 已补齐/更新测试：
   - `src/mcp/server.rs` 验证事件顺序覆盖 `probe -> workspace -> context -> parse -> completed`。
-- 已通过 `cargo test -q`（185 + 64 + 3 全通过）。
+- 已通过 `cargo test -q`（187 + 64 + 3 全通过）。
 
 ## T-110 V0.10-P1-ProviderDeltaStreamingRuntimePath (Completed 2026-03-25)
 
@@ -2916,17 +2916,20 @@
 - 已升级 runner 输出观察器链路：
   - `src/runtime/runners/mod.rs` 新增 `RunnerOutputObserver/RunnerOutputStream`；
   - `AgentRunner` 新增 `execute_with_observer` 默认实现（兼容旧 runner）。
-- 已在 `src/runtime/runners/codex.rs` 落地真实增量输出路径：
+- 已在 `src/runtime/runners/codex.rs`、`src/runtime/runners/gemini.rs`、`src/runtime/runners/claude.rs`
+  落地真实增量输出路径：
   - `execute_with_observer` 使用流式读取 child stdout/stderr，按 chunk 回调 observer；
-  - 保留超时/失败语义与 `--output-last-message` 拼接行为。
+  - 保留超时/失败语义与既有 runner 特性（Codex `--output-last-message`、Gemini discovery fallback）。
 - 已在 `src/mcp/service.rs` 增加运行期事件观察器：
   - 首次 chunk 实时发 `provider.first_output`；
   - 持续发 `provider.stdout.delta/provider.stderr.delta`。
 - 已升级 `src/mcp/tools.rs`：
   - 保留完成态 fallback，但按事件去重，避免与实时流重复写入。
 - 已新增测试：
-  - `codex_runner_execute_with_observer_streams_output_chunks`（fake codex fixture，覆盖增量 stdout/stderr 观察）。
-- 已通过 `cargo test -q`（185 + 64 + 3 全通过）。
+  - `codex_runner_execute_with_observer_streams_output_chunks`
+  - `gemini_runner_execute_with_observer_streams_output_chunks`
+  - `claude_runner_execute_with_observer_streams_output_chunks`
+- 已通过 `cargo test -q`（187 + 64 + 3 全通过）。
 
 ## T-111 V0.10-P1-WatchIncrementalCursorParity (Completed 2026-03-25)
 
@@ -2948,4 +2951,4 @@
 - 已新增测试：
   - `collect_watch_events_incremental_only_returns_new_events`；
   - `watch_run_timeout_keeps_existing_timeout_semantics`。
-- 已通过 `cargo test -q`（185 + 64 + 3 全通过）。
+- 已通过 `cargo test -q`（187 + 64 + 3 全通过）。
