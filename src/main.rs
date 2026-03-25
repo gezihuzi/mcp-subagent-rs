@@ -1728,8 +1728,96 @@ fn format_elapsed_short(ms: Option<u64>) -> String {
     format!("{:.1}m", ms as f64 / 60_000.0)
 }
 
+fn format_elapsed_short_raw(ms: u64) -> String {
+    format_elapsed_short(Some(ms))
+}
+
 fn is_terminal_status(status: &str) -> bool {
     matches!(status, "succeeded" | "failed" | "timed_out" | "cancelled")
+}
+
+fn build_phase_progress_line(
+    events: &[RunTimelineEvent],
+    terminal: bool,
+    now: OffsetDateTime,
+) -> Option<String> {
+    if events.is_empty() {
+        return None;
+    }
+
+    let mut current_phase: Option<String> = None;
+    let mut current_start: Option<OffsetDateTime> = None;
+    let mut last_ts: Option<OffsetDateTime> = None;
+    let mut first_ts: Option<OffsetDateTime> = None;
+    let mut segments: Vec<(String, u64, bool)> = Vec::new();
+
+    for event in events {
+        let Some(ts) = event_time(event) else {
+            continue;
+        };
+        if first_ts.is_none() {
+            first_ts = Some(ts);
+        }
+        let phase = event
+            .phase
+            .clone()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "unknown".to_string());
+        match &current_phase {
+            None => {
+                current_phase = Some(phase);
+                current_start = Some(ts);
+            }
+            Some(existing) if *existing == phase => {}
+            Some(existing) => {
+                let duration = duration_between(current_start, Some(ts)).unwrap_or(0);
+                segments.push((existing.clone(), duration, false));
+                current_phase = Some(phase);
+                current_start = Some(ts);
+            }
+        }
+        last_ts = Some(ts);
+    }
+
+    if let Some(phase) = current_phase {
+        let end = if terminal {
+            last_ts.or(Some(now))
+        } else {
+            Some(now)
+        };
+        let duration = duration_between(current_start, end).unwrap_or(0);
+        segments.push((phase, duration, !terminal));
+    }
+
+    if segments.is_empty() {
+        return None;
+    }
+
+    let span_parts = segments
+        .iter()
+        .rev()
+        .take(6)
+        .rev()
+        .map(|(phase, ms, current)| {
+            if *current {
+                format!("{phase}*={}", format_elapsed_short_raw(*ms))
+            } else {
+                format!("{phase}={}", format_elapsed_short_raw(*ms))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let wall_end = if terminal {
+        last_ts.or(Some(now))
+    } else {
+        Some(now)
+    };
+    let wall_ms = duration_between(first_ts, wall_end);
+    Some(format!(
+        "phase_progress: {} wall={}",
+        span_parts.join(" -> "),
+        format_elapsed_short(wall_ms)
+    ))
 }
 
 fn sanitize_rel_path(path: &str) -> std::result::Result<PathBuf, String> {
@@ -2208,6 +2296,7 @@ async fn read_logs(
         let mut seen_event_count = 0usize;
         let mut seen_stdout_bytes = 0usize;
         let mut seen_stderr_bytes = 0usize;
+        let mut last_phase_progress = String::new();
         loop {
             let record = match load_run_record(&cfg.state_dir, &handle_id) {
                 Ok(record) => record,
@@ -2240,6 +2329,18 @@ async fn read_logs(
                 }
             }
             seen_event_count = events.len();
+            if !json {
+                if let Some(line) = build_phase_progress_line(
+                    &events,
+                    is_terminal_status(record.status.as_str()),
+                    OffsetDateTime::now_utc(),
+                ) {
+                    if line != last_phase_progress {
+                        println!("{line}");
+                        last_phase_progress = line;
+                    }
+                }
+            }
 
             if stdout_enabled {
                 if let Some(stdout) =
@@ -2396,6 +2497,7 @@ async fn read_events(
 
     let started = Instant::now();
     let mut seen_count = 0usize;
+    let mut last_phase_progress = String::new();
     let sleep_ms = interval_ms.max(50);
     loop {
         let record = match load_run_record(&cfg.state_dir, &handle_id) {
@@ -2456,6 +2558,18 @@ async fn read_events(
             }
         }
         seen_count = events.len();
+        if !json {
+            if let Some(line) = build_phase_progress_line(
+                &events,
+                is_terminal_status(record.status.as_str()),
+                OffsetDateTime::now_utc(),
+            ) {
+                if line != last_phase_progress {
+                    println!("{line}");
+                    last_phase_progress = line;
+                }
+            }
+        }
 
         if is_terminal_status(record.status.as_str()) {
             return ExitCode::SUCCESS;
@@ -2746,6 +2860,7 @@ async fn watch_run(
     let started = Instant::now();
     let mut last_status = String::new();
     let mut seen_event_count = 0usize;
+    let mut last_phase_progress = String::new();
     loop {
         let record = match load_run_record(&cfg.state_dir, &handle_id) {
             Ok(record) => record,
@@ -2774,6 +2889,16 @@ async fn watch_run(
                     }
                 }
                 seen_event_count = events.len();
+                if let Some(line) = build_phase_progress_line(
+                    &events,
+                    is_terminal_status(record.status.as_str()),
+                    OffsetDateTime::now_utc(),
+                ) {
+                    if line != last_phase_progress {
+                        println!("{line}");
+                        last_phase_progress = line;
+                    }
+                }
             }
             if record.status != last_status {
                 println!("{} {}", record.status, record.updated_at);
@@ -4377,6 +4502,74 @@ target/
         }];
         let reason = super::classify_block_reason("running", Some("running"), true, &events, None);
         assert_eq!(reason.as_deref(), Some("auth_required"));
+    }
+
+    #[test]
+    fn build_phase_progress_line_marks_current_phase() {
+        let events = vec![
+            super::RunTimelineEvent {
+                event: "run.accepted".to_string(),
+                timestamp: "2026-03-25T00:00:00Z".to_string(),
+                detail: serde_json::json!({}),
+                seq: Some(1),
+                ts: None,
+                level: None,
+                state: Some("accepted".to_string()),
+                phase: Some("accepted".to_string()),
+                source: Some("runtime".to_string()),
+                message: None,
+            },
+            super::RunTimelineEvent {
+                event: "provider.probe.started".to_string(),
+                timestamp: "2026-03-25T00:00:01Z".to_string(),
+                detail: serde_json::json!({}),
+                seq: Some(2),
+                ts: None,
+                level: None,
+                state: Some("preparing".to_string()),
+                phase: Some("provider_probe".to_string()),
+                source: Some("provider".to_string()),
+                message: None,
+            },
+            super::RunTimelineEvent {
+                event: "provider.first_output".to_string(),
+                timestamp: "2026-03-25T00:00:02Z".to_string(),
+                detail: serde_json::json!({}),
+                seq: Some(3),
+                ts: None,
+                level: None,
+                state: Some("running".to_string()),
+                phase: Some("running".to_string()),
+                source: Some("provider".to_string()),
+                message: None,
+            },
+        ];
+        let now = super::parse_rfc3339("2026-03-25T00:00:05Z").expect("parse now");
+        let line = super::build_phase_progress_line(&events, false, now).expect("progress line");
+        assert!(line.contains("accepted="), "{line}");
+        assert!(line.contains("provider_probe="), "{line}");
+        assert!(line.contains("running*="), "{line}");
+        assert!(line.contains("wall=5.0s"), "{line}");
+    }
+
+    #[test]
+    fn build_phase_progress_line_terminal_has_no_current_marker() {
+        let events = vec![super::RunTimelineEvent {
+            event: "run.completed".to_string(),
+            timestamp: "2026-03-25T00:00:02Z".to_string(),
+            detail: serde_json::json!({}),
+            seq: Some(1),
+            ts: None,
+            level: None,
+            state: Some("succeeded".to_string()),
+            phase: Some("completed".to_string()),
+            source: Some("runtime".to_string()),
+            message: None,
+        }];
+        let now = super::parse_rfc3339("2026-03-25T00:00:05Z").expect("parse now");
+        let line = super::build_phase_progress_line(&events, true, now).expect("progress line");
+        assert!(line.contains("completed="), "{line}");
+        assert!(!line.contains("*="), "{line}");
     }
 
     #[test]

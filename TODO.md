@@ -2476,3 +2476,31 @@
   - 保留并通过 wait reason/block reason 相关测试。
 - 已同步 README：
   - 新增 stats 能力说明（phase splits + first-output watchdog + wait reasons）。
+
+## T-094 V0.10-P1-PhaseProgressViewForFollowCommands (Completed 2026-03-25)
+
+任务：为 `watch/events/logs` 的 follow 视图补齐 phase 聚合进度行，降低“事件很多但看不出整体进展”的认知成本。  
+验收标准：
+
+1. 新增 phase 聚合函数，按事件序列计算各 phase 累计时长并标记当前 phase。
+2. `watch` 文本模式在 follow 循环中输出滚动 `phase_progress` 行（变化时输出）。
+3. `events --follow` 文本模式输出滚动 `phase_progress` 行（变化时输出）。
+4. `logs --follow` 文本模式输出滚动 `phase_progress` 行（变化时输出）。
+5. JSON 模式行为保持兼容（不插入额外文本污染 JSON 行）。
+6. README 说明补充 phase progress 行为。
+7. `cargo test -q` 全量通过。
+完成记录：
+
+- 已在 `src/main.rs` 新增 phase 聚合能力：
+  - `build_phase_progress_line(events, terminal, now)` 统一生成进度摘要；
+  - 输出格式：`phase_progress: <phase=duration ... current*=...> wall=<...>`。
+- 已接入 follow 命令：
+  - `watch`、`events --follow`、`logs --follow` 都在文本模式下输出 `phase_progress`；
+  - 仅在进度行变化时输出，避免刷屏。
+- JSON 兼容保持：
+  - `events --follow --json` 与 `logs --follow --json` 继续仅输出 JSON 行。
+- 已补测试：
+  - `build_phase_progress_line_marks_current_phase`；
+  - `build_phase_progress_line_terminal_has_no_current_marker`。
+- 已同步 README：
+  - 增加 `watch/events/logs --follow` phase_progress 说明。
