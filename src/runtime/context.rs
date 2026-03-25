@@ -270,11 +270,16 @@ fn inject_memory_sources(
 
 fn compile_constraints(spec: &AgentSpec, request: &RunRequest) -> String {
     let mut constraints = format!(
-        "Do not request or rely on parent raw transcript.\nFollow agent instructions:\n{}\nProvider: {}\nContextMode: {}",
+        "Do not request or rely on parent raw transcript.\nFollow agent instructions:\n{}\nProvider: {}\nContextMode: {}\nDelegationContext: {:?}",
         spec.core.instructions,
         spec.core.provider.as_str(),
-        spec.runtime.context_mode
+        spec.runtime.context_mode,
+        spec.runtime.delegation_context
     );
+    if let Some(selector) = spec.runtime.plan_section_selector.as_deref() {
+        constraints.push('\n');
+        constraints.push_str(&format!("PlanSectionSelector: {selector}"));
+    }
     if let Some(stage) = request.stage.as_deref() {
         constraints.push('\n');
         constraints.push_str(&format!("WorkflowStage: {stage}"));

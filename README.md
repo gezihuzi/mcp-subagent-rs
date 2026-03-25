@@ -61,6 +61,10 @@ Selected file flags for `run`/`spawn`/`submit`:
 - `--selected-file <path>`: pass path only
 - `--selected-file-inline <path>`: read local file content and inline into selected context
 
+Runtime policy note:
+
+- when `delegation_context = "plan_section"`, set `plan_section_selector = "<PLAN heading>"` (required)
+
 ## Config Precedence
 
 `CLI > ENV > config.toml > defaults`

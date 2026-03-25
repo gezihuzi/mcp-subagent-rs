@@ -1974,3 +1974,37 @@
   - `README.md` 增加 `result --json` / `get_run_result` 使用同一 `contract_version` 说明。
 - 已通过回归：
   - `cargo test -q`（`153 + 33 + 3` tests passed）。
+
+## T-077 V0.9-P1-PlanSectionSelectorRuntimeSupport (Completed 2026-03-25)
+
+任务：落地 `PlanSection` 的 section selector，从“策略枚举”升级为可执行行为：必须配置 selector，运行时仅注入目标 section。  
+验收标准：
+
+1. `RuntimePolicy` 新增 `plan_section_selector` 字段，并保持向后兼容默认值。
+2. `validate` 对 `delegation_context=plan_section` 强制要求 selector 非空。
+3. memory resolver 在 `delegation_context=plan_section` 时，从 `PLAN.md` 提取对应 section（按 heading 选择）并注入 memory，而非全量 plan。
+4. `init --preset claude-opus-supervisor*` 生成的 `correctness-reviewer` 默认携带 `plan_section_selector`。
+5. 新增单测覆盖：校验失败路径、selector 提取成功路径、selector 未命中失败路径。
+6. `cargo test -q` 通过。
+完成记录：
+
+- 已扩展 runtime policy：
+  - `src/spec/runtime_policy.rs` 新增 `plan_section_selector: Option<String>`；
+  - 默认值保持 `None`，兼容旧 spec。
+- 已落地校验规则：
+  - `src/spec/validate.rs` 在 `delegation_context=plan_section` 时强制要求 `plan_section_selector` 非空；
+  - 新增校验测试覆盖缺失 selector 失败、存在 selector 通过。
+- 已落地运行时行为：
+  - `src/runtime/memory.rs` 在 `delegation_context=plan_section` 时从 `PLAN.md` / `.mcp-subagent/PLAN.md` 提取目标 heading section；
+  - 支持 exact/contains（不区分大小写）匹配 heading；
+  - selector 未命中时返回明确错误而非注入全量 plan。
+- 已同步预设与可观测快照：
+  - `src/init.rs` 的 `correctness-reviewer` 模板新增 `plan_section_selector = "Acceptance Criteria"`；
+  - `src/mcp/state.rs` 的 `RunSpecSnapshot` 新增 `delegation_context/plan_section_selector`（含旧 run 兼容默认）。
+- 已补单测：
+  - `src/runtime/memory.rs` 新增 section 提取成功/未命中失败测试；
+  - `src/spec/validate.rs` 新增 plan_section selector 校验测试。
+- 已同步设计文档示例：
+  - `docs/mcp-subagent_tech_design_v0.9.md` 的 `correctness-reviewer` 示例补 `plan_section_selector`。
+- 已通过回归：
+  - `cargo test -q`（`157 + 33 + 3` tests passed）。

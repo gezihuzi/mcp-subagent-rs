@@ -158,6 +158,10 @@ pub(crate) struct RunSpecSnapshot {
     #[serde(default)]
     pub(crate) model: Option<String>,
     pub(crate) context_mode: String,
+    #[serde(default = "default_delegation_context_snapshot")]
+    pub(crate) delegation_context: String,
+    #[serde(default)]
+    pub(crate) plan_section_selector: Option<String>,
     pub(crate) working_dir_policy: String,
     pub(crate) file_conflict_policy: String,
     pub(crate) sandbox: String,
@@ -271,6 +275,8 @@ pub(crate) fn build_run_spec_snapshot(spec: &AgentSpec) -> RunSpecSnapshot {
         provider: spec.core.provider.as_str().to_string(),
         model: spec.core.model.clone(),
         context_mode: context_mode_to_str(&spec.runtime.context_mode),
+        delegation_context: delegation_context_policy_to_str(&spec.runtime.delegation_context),
+        plan_section_selector: spec.runtime.plan_section_selector.clone(),
         working_dir_policy: working_dir_policy_to_str(&spec.runtime.working_dir_policy),
         file_conflict_policy: file_conflict_policy_to_str(&spec.runtime.file_conflict_policy),
         sandbox: sandbox_policy_to_str(&spec.runtime.sandbox),
@@ -293,6 +299,10 @@ pub(crate) fn build_probe_result_snapshot(probe: &ProviderProbe) -> ProbeResultR
         status: probe.status.to_string(),
         notes: probe.notes.clone(),
     }
+}
+
+fn default_delegation_context_snapshot() -> String {
+    "minimal".to_string()
 }
 
 pub(crate) fn build_memory_resolution_snapshot(memory: &ResolvedMemory) -> MemoryResolutionRecord {
@@ -389,6 +399,27 @@ fn context_mode_to_str(mode: &ContextMode) -> String {
         ContextMode::SummaryOnly => "summary_only".to_string(),
         ContextMode::SelectedFiles(paths) => format!("selected_files({})", paths.join(",")),
         ContextMode::ExpandedBrief => "expanded_brief".to_string(),
+    }
+}
+
+fn delegation_context_policy_to_str(
+    policy: &crate::spec::runtime_policy::DelegationContextPolicy,
+) -> String {
+    match policy {
+        crate::spec::runtime_policy::DelegationContextPolicy::Minimal => "minimal".to_string(),
+        crate::spec::runtime_policy::DelegationContextPolicy::SummaryOnly => {
+            "summary_only".to_string()
+        }
+        crate::spec::runtime_policy::DelegationContextPolicy::SelectedFiles => {
+            "selected_files".to_string()
+        }
+        crate::spec::runtime_policy::DelegationContextPolicy::PlanSection => {
+            "plan_section".to_string()
+        }
+        crate::spec::runtime_policy::DelegationContextPolicy::FullPlan => "full_plan".to_string(),
+        crate::spec::runtime_policy::DelegationContextPolicy::ProviderNativeOnly => {
+            "provider_native_only".to_string()
+        }
     }
 }
 

@@ -3,7 +3,11 @@ use std::path::{Component, Path};
 
 use crate::{
     error::{McpSubagentError, Result},
-    spec::{runtime_policy::MemorySource, workflow::WorkflowStageKind, AgentSpec, Provider},
+    spec::{
+        runtime_policy::{DelegationContextPolicy, MemorySource},
+        workflow::WorkflowStageKind,
+        AgentSpec, Provider,
+    },
 };
 
 pub fn validate_agent_spec(spec: &AgentSpec) -> Result<()> {
@@ -74,6 +78,30 @@ fn validate_runtime_policy(spec: &AgentSpec) -> Result<()> {
         return Err(McpSubagentError::SpecValidation(
             "max_turns must be greater than 0 when provided".to_string(),
         ));
+    }
+
+    if matches!(
+        spec.runtime.delegation_context,
+        DelegationContextPolicy::PlanSection
+    ) && spec
+        .runtime
+        .plan_section_selector
+        .as_deref()
+        .map(str::trim)
+        .map(|value| value.is_empty())
+        .unwrap_or(true)
+    {
+        return Err(McpSubagentError::SpecValidation(
+            "delegation_context=plan_section requires runtime.plan_section_selector".to_string(),
+        ));
+    }
+
+    if let Some(selector) = spec.runtime.plan_section_selector.as_deref() {
+        if selector.trim().is_empty() {
+            return Err(McpSubagentError::SpecValidation(
+                "runtime.plan_section_selector must not be empty".to_string(),
+            ));
+        }
     }
 
     Ok(())
@@ -226,7 +254,9 @@ mod tests {
     use crate::spec::{
         core::{AgentSpecCore, Provider},
         provider_overrides::{CodexOverrides, ProviderOverrides},
-        runtime_policy::{MemorySource, RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
+        runtime_policy::{
+            DelegationContextPolicy, MemorySource, RuntimePolicy, SandboxPolicy, WorkingDirPolicy,
+        },
         workflow::{WorkflowSpec, WorkflowStageKind},
         AgentSpec,
     };
@@ -345,6 +375,28 @@ mod tests {
         ];
 
         validate_agent_spec(&spec).expect("safe memory source paths should pass");
+    }
+
+    #[test]
+    fn rejects_plan_section_delegation_without_selector() {
+        let mut spec = base_spec();
+        spec.runtime.delegation_context = DelegationContextPolicy::PlanSection;
+        spec.runtime.plan_section_selector = None;
+
+        let err = validate_agent_spec(&spec).expect_err("missing plan section selector must fail");
+        assert!(
+            err.to_string().contains("plan_section_selector"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_plan_section_delegation_with_selector() {
+        let mut spec = base_spec();
+        spec.runtime.delegation_context = DelegationContextPolicy::PlanSection;
+        spec.runtime.plan_section_selector = Some("Acceptance Criteria".to_string());
+
+        validate_agent_spec(&spec).expect("selector should satisfy plan_section delegation");
     }
 
     #[test]

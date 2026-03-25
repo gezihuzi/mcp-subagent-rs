@@ -422,6 +422,7 @@ tags = ["review", "correctness", "codex"]
 [runtime]
 context_mode = "summary_only"
 delegation_context = "plan_section"
+plan_section_selector = "Acceptance Criteria"
 memory_sources = ["auto_project_memory"]
 native_discovery = "minimal"
 working_dir_policy = "auto"

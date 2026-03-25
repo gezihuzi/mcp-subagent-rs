@@ -160,6 +160,8 @@ pub struct RuntimePolicy {
     pub context_mode: ContextMode,
     #[serde(default = "default_delegation_context")]
     pub delegation_context: DelegationContextPolicy,
+    #[serde(default)]
+    pub plan_section_selector: Option<String>,
     #[serde(default = "default_memory_sources")]
     pub memory_sources: Vec<MemorySource>,
     #[serde(default = "default_native_discovery")]
@@ -212,6 +214,7 @@ impl Default for RuntimePolicy {
         Self {
             context_mode: default_context_mode(),
             delegation_context: default_delegation_context(),
+            plan_section_selector: None,
             memory_sources: default_memory_sources(),
             native_discovery: default_native_discovery(),
             working_dir_policy: default_working_dir_policy(),
@@ -305,6 +308,7 @@ mod tests {
     fn runtime_policy_defaults_follow_v09_minimal_profile() {
         let runtime = RuntimePolicy::default();
         assert_eq!(runtime.delegation_context, DelegationContextPolicy::Minimal);
+        assert!(runtime.plan_section_selector.is_none());
         assert_eq!(runtime.native_discovery, NativeDiscoveryPolicy::Minimal);
         assert_eq!(runtime.output_mode, OutputMode::Both);
         assert_eq!(runtime.parse_policy, ParsePolicy::BestEffort);

@@ -8,7 +8,10 @@ use glob::glob;
 
 use crate::{
     error::{McpSubagentError, Result},
-    spec::{runtime_policy::MemorySource, AgentSpec, Provider},
+    spec::{
+        runtime_policy::{DelegationContextPolicy, MemorySource},
+        AgentSpec, Provider,
+    },
     types::{MemorySnippet, ResolvedMemory, RunRequest},
 };
 
@@ -41,6 +44,22 @@ pub fn resolve_memory(spec: &AgentSpec, request: &RunRequest) -> Result<Resolved
                 resolver.resolve_inline_source(content);
             }
         }
+    }
+    if matches!(
+        spec.runtime.delegation_context,
+        DelegationContextPolicy::PlanSection
+    ) {
+        let selector = spec
+            .runtime
+            .plan_section_selector
+            .as_deref()
+            .ok_or_else(|| {
+                McpSubagentError::SpecValidation(
+                    "delegation_context=plan_section requires runtime.plan_section_selector"
+                        .to_string(),
+                )
+            })?;
+        resolver.resolve_plan_section(selector)?;
     }
     Ok(resolver.finish())
 }
@@ -123,6 +142,49 @@ impl<'a> MemoryResolver<'a> {
             }
         }
 
+        Ok(())
+    }
+
+    fn resolve_plan_section(&mut self, selector: &str) -> Result<()> {
+        let selector = selector.trim();
+        if selector.is_empty() {
+            return Err(McpSubagentError::SpecValidation(
+                "runtime.plan_section_selector must not be empty".to_string(),
+            ));
+        }
+
+        let Some(plan_path) = ACTIVE_PLAN_CANDIDATES
+            .iter()
+            .map(|relative| self.workspace_root.join(relative))
+            .find(|path| path.is_file())
+        else {
+            return Err(McpSubagentError::SpecValidation(
+                "delegation_context=plan_section requires PLAN.md or .mcp-subagent/PLAN.md"
+                    .to_string(),
+            ));
+        };
+
+        let plan_content = read_memory_file(&plan_path)?;
+        let section = extract_markdown_section(&plan_content, selector).ok_or_else(|| {
+            McpSubagentError::SpecValidation(format!(
+                "plan section selector `{selector}` not found in {}",
+                plan_path.display()
+            ))
+        })?;
+        let label = format!("plan_section:{selector}");
+        if self
+            .resolved
+            .additional_memories
+            .iter()
+            .any(|snippet| snippet.label == label)
+        {
+            return Ok(());
+        }
+        self.resolved.additional_memories.push(MemorySnippet {
+            label,
+            content: section,
+            source_path: Some(plan_path),
+        });
         Ok(())
     }
 
@@ -253,6 +315,95 @@ fn normalize_dedup_key(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+#[derive(Debug, Clone)]
+struct MarkdownHeading {
+    line_idx: usize,
+    level: usize,
+    title: String,
+}
+
+fn extract_markdown_section(content: &str, selector: &str) -> Option<String> {
+    let lines = content.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    let headings = parse_markdown_headings(&lines);
+    if headings.is_empty() {
+        return None;
+    }
+
+    let selector_norm = selector.trim().to_ascii_lowercase();
+    let mut fallback_idx = None;
+    let mut matched_idx = None;
+    for (idx, heading) in headings.iter().enumerate() {
+        let title_norm = heading.title.to_ascii_lowercase();
+        if title_norm == selector_norm {
+            matched_idx = Some(idx);
+            break;
+        }
+        if fallback_idx.is_none() && title_norm.contains(&selector_norm) {
+            fallback_idx = Some(idx);
+        }
+    }
+    let start_heading = matched_idx
+        .or(fallback_idx)
+        .and_then(|idx| headings.get(idx))
+        .cloned()?;
+
+    let mut end_line = lines.len();
+    for heading in headings {
+        if heading.line_idx <= start_heading.line_idx {
+            continue;
+        }
+        if heading.level <= start_heading.level {
+            end_line = heading.line_idx;
+            break;
+        }
+    }
+
+    let section = lines[start_heading.line_idx..end_line].join("\n");
+    let trimmed = section.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn parse_markdown_headings(lines: &[&str]) -> Vec<MarkdownHeading> {
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(line_idx, line)| {
+            parse_markdown_heading(line).map(|(level, title)| MarkdownHeading {
+                line_idx,
+                level,
+                title,
+            })
+        })
+        .collect()
+}
+
+fn parse_markdown_heading(line: &str) -> Option<(usize, String)> {
+    let trimmed = line.trim_start();
+    let level = trimmed.chars().take_while(|ch| *ch == '#').count();
+    if level == 0 {
+        return None;
+    }
+    let rest = &trimmed[level..];
+    let Some(first) = rest.chars().next() else {
+        return None;
+    };
+    if !first.is_whitespace() {
+        return None;
+    }
+    let title = rest.trim().trim_end_matches('#').trim();
+    if title.is_empty() {
+        return None;
+    }
+    Some((level, title.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::PathBuf};
@@ -263,7 +414,7 @@ mod tests {
         runtime::memory::resolve_memory,
         spec::{
             core::{AgentSpecCore, Provider},
-            runtime_policy::{MemorySource, RuntimePolicy},
+            runtime_policy::{DelegationContextPolicy, MemorySource, RuntimePolicy},
             AgentSpec,
         },
         types::{RunMode, RunRequest},
@@ -429,5 +580,61 @@ mod tests {
         assert!(resolved.additional_memories[0]
             .label
             .contains("archived_plan"));
+    }
+
+    #[test]
+    fn delegation_plan_section_selector_extracts_target_section() {
+        let temp = tempdir().expect("tempdir");
+        fs::write(
+            temp.path().join("PLAN.md"),
+            r#"# PLAN
+
+## Goal
+Ship v0.9.
+
+## Acceptance Criteria
+- Add result schema contract.
+- Keep MCP and CLI aligned.
+
+## Next Steps
+- Prepare release notes.
+"#,
+        )
+        .expect("write plan");
+
+        let mut spec = sample_spec(Provider::Codex, vec![MemorySource::AutoProjectMemory]);
+        spec.runtime.delegation_context = DelegationContextPolicy::PlanSection;
+        spec.runtime.plan_section_selector = Some("Acceptance Criteria".to_string());
+        let request = sample_request(temp.path().to_path_buf());
+
+        let resolved = resolve_memory(&spec, &request).expect("resolve");
+        let section = resolved
+            .additional_memories
+            .iter()
+            .find(|snippet| snippet.label.starts_with("plan_section:"))
+            .expect("plan section snippet");
+        assert!(section.content.contains("## Acceptance Criteria"));
+        assert!(!section.content.contains("## Next Steps"));
+    }
+
+    #[test]
+    fn delegation_plan_section_selector_requires_matching_heading() {
+        let temp = tempdir().expect("tempdir");
+        fs::write(
+            temp.path().join("PLAN.md"),
+            "# PLAN\n\n## Scope\n- do work\n",
+        )
+        .expect("write");
+
+        let mut spec = sample_spec(Provider::Codex, vec![MemorySource::AutoProjectMemory]);
+        spec.runtime.delegation_context = DelegationContextPolicy::PlanSection;
+        spec.runtime.plan_section_selector = Some("Acceptance Criteria".to_string());
+        let request = sample_request(temp.path().to_path_buf());
+
+        let err = resolve_memory(&spec, &request).expect_err("selector should fail");
+        assert!(
+            err.to_string().contains("plan section selector"),
+            "unexpected error: {err}"
+        );
     }
 }
