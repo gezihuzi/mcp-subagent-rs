@@ -89,7 +89,7 @@ pub(crate) fn build_runtime_artifacts(
     if let Ok(summary_json) = serde_json::to_string_pretty(summary) {
         index.push(ArtifactOutput {
             path: "summary.json".to_string(),
-            kind: format!("{:?}", ArtifactKind::SummaryJson),
+            kind: format!("{}", ArtifactKind::SummaryJson),
             description: "Structured summary JSON".to_string(),
             media_type: Some("application/json".to_string()),
             producer: Some("runtime".to_string()),
@@ -102,7 +102,7 @@ pub(crate) fn build_runtime_artifacts(
         if !raw_text.trim().is_empty() {
             index.push(ArtifactOutput {
                 path: "summary.raw.txt".to_string(),
-                kind: format!("{:?}", ArtifactKind::StderrText),
+                kind: format!("{}", ArtifactKind::StderrText),
                 description: "Raw summary fallback text".to_string(),
                 media_type: Some("text/plain".to_string()),
                 producer: Some("runtime".to_string()),
@@ -115,7 +115,7 @@ pub(crate) fn build_runtime_artifacts(
     if !stdout.is_empty() {
         index.push(ArtifactOutput {
             path: "stdout.txt".to_string(),
-            kind: format!("{:?}", ArtifactKind::StdoutText),
+            kind: format!("{}", ArtifactKind::StdoutText),
             description: "Captured stdout".to_string(),
             media_type: Some("text/plain".to_string()),
             producer: Some("runtime".to_string()),
@@ -127,7 +127,7 @@ pub(crate) fn build_runtime_artifacts(
     if !stderr.is_empty() {
         index.push(ArtifactOutput {
             path: "stderr.txt".to_string(),
-            kind: format!("{:?}", ArtifactKind::StderrText),
+            kind: format!("{}", ArtifactKind::StderrText),
             description: "Captured stderr".to_string(),
             media_type: Some("text/plain".to_string()),
             producer: Some("runtime".to_string()),
@@ -142,7 +142,7 @@ pub(crate) fn build_runtime_artifacts(
 fn map_artifact_output(artifact: &ArtifactRef, created_at: &str) -> ArtifactOutput {
     ArtifactOutput {
         path: artifact.path.display().to_string(),
-        kind: format!("{:?}", artifact.kind),
+        kind: format!("{}", artifact.kind),
         description: artifact.description.clone(),
         media_type: artifact.media_type.clone(),
         producer: Some("agent".to_string()),

@@ -335,7 +335,7 @@ fn version_matches_pin(detected_version: &str, configured_pin: &str) -> bool {
 fn build_workspace_policy_hints(loaded_specs: &[LoadedAgentSpec]) -> Vec<WorkspacePolicyHint> {
     let mut usage = BTreeMap::new();
     for loaded in loaded_specs {
-        let key = format!("{:?}", loaded.spec.runtime.working_dir_policy);
+        let key = format!("{}", loaded.spec.runtime.working_dir_policy);
         *usage.entry(key).or_insert(0usize) += 1;
     }
 

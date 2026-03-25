@@ -44,6 +44,12 @@ pub enum RunStatus {
     TimedOut,
 }
 
+impl std::fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunMetadata {
@@ -220,7 +226,7 @@ fn assess_attempt_outcome(
                 AttemptAssessment {
                     status: RunStatus::Failed,
                     error_message: Some(format!(
-                        "structured summary parse status is {:?}",
+                        "structured summary parse status is {}",
                         summary_envelope.parse_status
                     )),
                     retryable: matches!(

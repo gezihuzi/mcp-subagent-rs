@@ -9,6 +9,12 @@ pub enum ContextMode {
     ExpandedBrief,
 }
 
+impl std::fmt::Display for ContextMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum MemorySource {
@@ -29,6 +35,12 @@ pub enum WorkingDirPolicy {
     GitWorktree,
 }
 
+impl std::fmt::Display for WorkingDirPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum FileConflictPolicy {
@@ -43,6 +55,12 @@ pub enum SandboxPolicy {
     ReadOnly,
     WorkspaceWrite,
     FullAccess,
+}
+
+impl std::fmt::Display for SandboxPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

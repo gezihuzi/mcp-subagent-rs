@@ -118,8 +118,8 @@ pub(crate) fn apply_archive_hook(
                 .clone()
                 .unwrap_or_else(|| "Archive".to_string()),
             task: request.task.clone(),
-            parse_status: format!("{:?}", summary.parse_status),
-            verification_status: format!("{:?}", summary.summary.verification_status),
+            parse_status: format!("{}", summary.parse_status),
+            verification_status: format!("{}", summary.summary.verification_status),
             touched_files: summary.summary.touched_files.clone(),
             plan_refs: summary.summary.plan_refs.clone(),
             final_summary_path: final_summary_path.clone(),
@@ -273,8 +273,8 @@ fn build_final_summary_markdown(
         provider = spec.core.provider.as_str(),
         stage = request.stage.as_deref().unwrap_or("Archive"),
         task = request.task,
-        verification = format!("{:?}", summary.summary.verification_status),
-        parse_status = format!("{:?}", summary.parse_status),
+        verification = summary.summary.verification_status,
+        parse_status = summary.parse_status,
         summary_text = summary.summary.summary,
         key_findings = key_findings,
         touched_files = touched_files,
@@ -412,7 +412,7 @@ fn upsert_artifact(
 ) {
     let output = ArtifactOutput {
         path: path.to_string(),
-        kind: format!("{:?}", kind),
+        kind: format!("{}", kind),
         description: description.to_string(),
         media_type: media_type.map(str::to_string),
         producer: Some("runtime".to_string()),

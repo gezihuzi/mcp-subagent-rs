@@ -1597,3 +1597,18 @@
   - `cargo fmt`
   - `cargo test -q`（`134 + 10 + 3` tests passed）
   - `./scripts/smoke_v08.sh` 全链路通过。
+
+## T-063 Refactoring-DisplayFormattingForEnums (Completed 2026-03-25)
+
+任务：对于某些需要格式化的数据类型，将 `{:?}` 换成 `{}` 并支持 `Display`。
+验收标准：
+
+1. 为 `ArtifactKind`, `VerificationStatus`, `SummaryParseStatus`, `ContextMode`, `WorkingDirPolicy`, `SandboxPolicy`, `RunStatus` 实现 `std::fmt::Display`。
+2. 将代码中的 `format!("{:?}", value)` 替换为 `format!("{}", value)` 或内联。
+3. 通过全量测试和 clippy 检查。
+完成记录：
+
+- 已为核心数据枚举在 `summary.rs`、`runtime_policy.rs`、`dispatcher.rs` 中实现了 `Display`（复用 Debug 的原样式字面值）。
+- 已批量替换 `src/mcp` 等各处的格式化宏。
+- 修复了格式化降级警告。
+- 已通过 `cargo clippy` 和 `cargo test` 全量检查。

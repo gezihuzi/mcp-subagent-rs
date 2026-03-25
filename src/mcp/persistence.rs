@@ -352,8 +352,8 @@ fn build_run_events(record: &RunRecord) -> Vec<RunEventRecord> {
             event: "parse".to_string(),
             timestamp: timestamp.clone(),
             detail: json!({
-                "parse_status": format!("{:?}", summary.parse_status),
-                "verification_status": format!("{:?}", summary.summary.verification_status),
+                "parse_status": format!("{}", summary.parse_status),
+                "verification_status": format!("{}", summary.summary.verification_status),
                 "exit_code": summary.summary.exit_code,
             }),
         });

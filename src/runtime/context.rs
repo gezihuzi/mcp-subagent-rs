@@ -270,7 +270,7 @@ fn inject_memory_sources(
 
 fn compile_constraints(spec: &AgentSpec, request: &RunRequest) -> String {
     let mut constraints = format!(
-        "Do not request or rely on parent raw transcript.\nFollow agent instructions:\n{}\nProvider: {}\nContextMode: {:?}",
+        "Do not request or rely on parent raw transcript.\nFollow agent instructions:\n{}\nProvider: {}\nContextMode: {}",
         spec.core.instructions,
         spec.core.provider.as_str(),
         spec.runtime.context_mode

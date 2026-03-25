@@ -74,8 +74,8 @@ pub(crate) fn apply_review_evidence_hook(
             "prefer_cross_provider_review": workflow.review_policy.prefer_cross_provider_review,
         },
         "summary": {
-            "parse_status": format!("{:?}", summary.parse_status),
-            "verification_status": format!("{:?}", summary.summary.verification_status),
+            "parse_status": format!("{}", summary.parse_status),
+            "verification_status": format!("{}", summary.summary.verification_status),
             "touched_files": summary.summary.touched_files,
             "plan_refs": summary.summary.plan_refs,
         }
@@ -233,7 +233,7 @@ fn upsert_artifact(
         .unwrap_or_else(|_| OffsetDateTime::now_utc().to_string());
     let output = ArtifactOutput {
         path: path.to_string(),
-        kind: format!("{:?}", kind),
+        kind: format!("{}", kind),
         description: description.to_string(),
         media_type: media_type.map(str::to_string),
         producer: Some("runtime".to_string()),

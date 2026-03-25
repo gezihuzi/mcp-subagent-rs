@@ -19,6 +19,12 @@ pub enum ArtifactKind {
     Other,
 }
 
+impl std::fmt::Display for ArtifactKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactRef {
@@ -36,6 +42,12 @@ pub enum VerificationStatus {
     Failed,
     Partial,
     ParseFailed,
+}
+
+impl std::fmt::Display for VerificationStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
@@ -58,6 +70,12 @@ pub enum SummaryParseStatus {
     Validated,
     Degraded,
     Invalid,
+}
+
+impl std::fmt::Display for SummaryParseStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]

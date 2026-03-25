@@ -62,9 +62,9 @@ impl McpSubagentServer {
                     provider: provider.as_str().to_string(),
                     available,
                     runtime_policy: RuntimePolicySummary {
-                        context_mode: format!("{:?}", runtime.context_mode),
-                        working_dir_policy: format!("{:?}", runtime.working_dir_policy),
-                        sandbox: format!("{:?}", runtime.sandbox),
+                        context_mode: format!("{}", runtime.context_mode),
+                        working_dir_policy: format!("{}", runtime.working_dir_policy),
+                        sandbox: format!("{}", runtime.sandbox),
                         timeout_secs: runtime.timeout_secs,
                     },
                     capability_notes,
@@ -137,7 +137,7 @@ impl McpSubagentServer {
         );
         let output = RunAgentOutput {
             handle_id: handle_id.clone(),
-            status: format!("{:?}", result.metadata.status),
+            status: format!("{}", result.metadata.status),
             structured_summary: map_summary_output(&result.summary),
             artifact_index: artifact_index.clone(),
         };
@@ -293,7 +293,7 @@ impl McpSubagentServer {
 
         Ok(Json(SpawnAgentOutput {
             handle_id,
-            status: format!("{:?}", RunStatus::Running),
+            status: format!("{}", RunStatus::Running),
         }))
     }
 
@@ -307,7 +307,7 @@ impl McpSubagentServer {
 
         Ok(Json(AgentStatusOutput {
             handle_id: input.handle_id,
-            status: format!("{:?}", record.status),
+            status: format!("{}", record.status),
             updated_at: format_time(record.updated_at),
             error_message: record.error_message,
             structured_summary,
@@ -340,7 +340,7 @@ impl McpSubagentServer {
         ) {
             return Ok(Json(CancelAgentOutput {
                 handle_id: input.handle_id,
-                status: format!("{:?}", existing_status),
+                status: format!("{}", existing_status),
             }));
         }
 
@@ -365,7 +365,7 @@ impl McpSubagentServer {
 
         Ok(Json(CancelAgentOutput {
             handle_id: input.handle_id,
-            status: format!("{:?}", RunStatus::Cancelled),
+            status: format!("{}", RunStatus::Cancelled),
         }))
     }
 
