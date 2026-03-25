@@ -27,10 +27,11 @@ use crate::{
 };
 
 pub use crate::mcp::dto::{
-    AgentListing, AgentStatusOutput, ArtifactOutput, CancelAgentOutput, HandleInput,
-    ListAgentsOutput, ReadAgentArtifactInput, ReadAgentArtifactOutput, RunAgentInput,
-    RunAgentOutput, RunAgentSelectedFileInput, RuntimePolicySummary, SpawnAgentOutput,
-    SummaryOutput,
+    AgentListing, AgentStatusOutput, ArtifactOutput, CancelAgentOutput, GetRunResultInput,
+    GetRunResultOutput, HandleInput, ListAgentsOutput, ListRunsInput, ListRunsOutput,
+    ReadAgentArtifactInput, ReadAgentArtifactOutput, ReadRunLogsInput, ReadRunLogsOutput,
+    RunAgentInput, RunAgentOutput, RunAgentSelectedFileInput, RunListingOutput, RunUsageOutput,
+    RuntimePolicySummary, SpawnAgentOutput, SummaryOutput, WatchRunInput, WatchRunOutput,
 };
 
 #[tool_handler(router = self.tool_router)]
@@ -860,11 +861,15 @@ sandbox = "read_only"
         let tools = client.list_all_tools().await.expect("list tools");
         for expected in [
             "list_agents",
+            "list_runs",
             "run_agent",
             "spawn_agent",
             "get_agent_status",
+            "get_run_result",
             "cancel_agent",
             "read_agent_artifact",
+            "read_run_logs",
+            "watch_run",
         ] {
             assert!(tools.iter().any(|tool| tool.name == expected));
         }
@@ -934,6 +939,84 @@ sandbox = "read_only"
             .structured_content
             .expect("artifact has structured content");
         assert!(structured_field(&artifact_json, "content").contains("Mock run completed"));
+
+        let list_runs_res = client
+            .call_tool(
+                CallToolRequestParams::new("list_runs")
+                    .with_arguments(json!({ "limit": 5 }).as_object().expect("object").clone()),
+            )
+            .await
+            .expect("list runs");
+        let list_runs_json = list_runs_res
+            .structured_content
+            .expect("list_runs has structured content");
+        let run_rows = list_runs_json
+            .get("runs")
+            .and_then(|value| value.as_array())
+            .expect("runs array");
+        assert!(run_rows
+            .iter()
+            .any(|row| row.get("handle_id").and_then(|value| value.as_str())
+                == Some(handle_id.as_str())));
+
+        let result_res = client
+            .call_tool(
+                CallToolRequestParams::new("get_run_result").with_arguments(
+                    json!({ "handle_id": handle_id.clone() })
+                        .as_object()
+                        .expect("object")
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("get run result");
+        let result_json = result_res
+            .structured_content
+            .expect("get_run_result has structured content");
+        assert_eq!(structured_field(&result_json, "status"), "succeeded");
+        assert_eq!(
+            result_json
+                .get("normalization_status")
+                .and_then(|value| value.as_str()),
+            Some("Validated")
+        );
+
+        let logs_res = client
+            .call_tool(
+                CallToolRequestParams::new("read_run_logs").with_arguments(
+                    json!({ "handle_id": handle_id.clone(), "stream": "stdout" })
+                        .as_object()
+                        .expect("object")
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("read run logs");
+        let logs_json = logs_res
+            .structured_content
+            .expect("read_run_logs has structured content");
+        assert!(logs_json.get("stdout").is_some());
+        assert!(logs_json.get("stderr").is_some());
+
+        let watch_res = client
+            .call_tool(
+                CallToolRequestParams::new("watch_run").with_arguments(
+                    json!({ "handle_id": handle_id.clone(), "timeout_secs": 1 })
+                        .as_object()
+                        .expect("object")
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("watch run");
+        let watch_json = watch_res
+            .structured_content
+            .expect("watch_run has structured content");
+        assert_eq!(structured_field(&watch_json, "status"), "succeeded");
+        assert_eq!(
+            watch_json.get("terminal").and_then(|value| value.as_bool()),
+            Some(true)
+        );
 
         let second_spawn_res = client
             .call_tool(

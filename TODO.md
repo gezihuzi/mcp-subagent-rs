@@ -1884,3 +1884,65 @@
 - 已通过回归：
   - `cargo test -q runtime::runners::gemini::tests`
   - `cargo test -q`（`153 + 27 + 3` tests passed）。
+
+## T-074 V0.9-P0-RunObservabilityCommandsAndUsageSurface (Completed 2026-03-25)
+
+任务：收口 v0.9 可观测性和命令体验，新增顺手的 run 查看命令面并在 `show` 输出 usage/duration/provider_exit_code。  
+验收标准：
+
+1. CLI 新增 `ps/show/result/logs/watch`。
+2. `show` 输出包含 `status/provider/model/normalization_status/duration_ms/provider_exit_code/retries`。
+3. `result` 支持 `--raw` / `--normalized` / `--summary`（默认 summary）。
+4. `logs` 支持 `--stdout` / `--stderr` 并可 `--json` 输出。
+5. `watch` 支持 `--interval-ms` 与 `--timeout-secs`，终态自动退出。
+6. README 命令面同步新命令。
+7. `cargo test -q` 通过。
+完成记录：
+
+- 已扩展 `src/main.rs` 命令面：
+  - 新增 `Commands::Ps/Show/Result/Logs/Watch`；
+  - 新增对应 dispatch 分支与执行函数。
+- 已新增 run 持久化读取与观测模型：
+  - 新增 `StoredRunRecord` 系列结构用于从 `state_dir/runs/<id>/run.json` 读取；
+  - 新增 `UsageStatsOutput`，输出 `duration_ms/provider_exit_code/retries/token_source/estimated_*`；
+  - 新增 `RunListEntry/RunShowOutput/RunResultOutput/RunLogsOutput`。
+- 已实现命令行为：
+  - `ps` 按 `updated_at` 倒序列运行记录；
+  - `show` 输出运行摘要与 usage；
+  - `result` 支持 raw/normalized/summary 三种视图；
+  - `logs` 支持 stdout/stderr 选择；
+  - `watch` 轮询 run.json 并在终态退出，支持超时。
+- 已同步文档：
+  - `README.md` 命令面新增 `ps/show/result/logs/watch`。
+- 已通过回归：
+  - `cargo test -q`（`153 + 32 + 3` tests passed）。
+
+## T-075 V0.9-P1-McpRunObservabilityToolsParity (Completed 2026-03-25)
+
+任务：在 MCP 工具面补齐 run 观测与结果读取能力，新增 `list_runs/get_run_result/read_run_logs/watch_run`，让 host 无需拼接 `status + artifact`。
+验收标准：
+
+1. MCP tool 列表包含 `list_runs/get_run_result/read_run_logs/watch_run`。
+2. `list_runs` 可按最近更新时间返回 run 列表，支持 `limit`。
+3. `get_run_result` 返回 `native_result + normalized_result + usage`，并包含 `normalization_status/provider_exit_code/retries`。
+4. `read_run_logs` 支持 `stream=stdout|stderr|both`，默认 `both`。
+5. `watch_run` 支持 `interval_ms/timeout_secs`，终态返回 `terminal=true`，超时返回 `timed_out=true`。
+6. 增加 MCP 端到端测试覆盖新增工具链路，并保持 `cargo test -q` 通过。
+完成记录：
+
+- 已扩展 MCP DTO：
+  - `src/mcp/dto.rs` 新增 `ListRuns* / GetRunResult* / ReadRunLogs* / WatchRun*` 输入输出结构；
+  - 新增 `RunUsageOutput`，统一 usage/duration/provider_exit_code/retries 结果面。
+- 已扩展 MCP tools 实现：
+  - `src/mcp/tools.rs` 新增 `list_runs/get_run_result/read_run_logs/watch_run`；
+  - `list_runs` 支持 `limit` 并按 `updated_at` 倒序；
+  - `get_run_result` 同时返回 `native_result + normalized_result + usage`；
+  - `read_run_logs` 支持 `stream=stdout|stderr|both`；
+  - `watch_run` 支持 `interval_ms/timeout_secs`，返回 `terminal/timed_out`。
+- 已同步导出与文档：
+  - `src/mcp/server.rs` 导出新增 MCP DTO 类型；
+  - `README.md` MCP tools 列表加入四个新工具。
+- 已补端到端覆盖：
+  - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 覆盖新增工具调用链路（list/result/logs/watch）。
+- 已通过回归：
+  - `cargo test -q`（`153 + 32 + 3` tests passed）。

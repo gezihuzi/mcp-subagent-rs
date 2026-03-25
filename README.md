@@ -24,6 +24,11 @@ mcp-subagent connect --host claude|codex|gemini [--run-host]
 mcp-subagent connect-snippet --host claude|codex|gemini
 mcp-subagent clean [--all] [--dry-run] [--json]
 mcp-subagent list-agents [--json]
+mcp-subagent ps [--limit ...] [--json]
+mcp-subagent show <handle-id> [--json]
+mcp-subagent result <handle-id> [--raw | --normalized | --summary] [--json]
+mcp-subagent logs <handle-id> [--stdout | --stderr] [--json]
+mcp-subagent watch <handle-id> [--interval-ms ...] [--timeout-secs ...] [--json]
 mcp-subagent run <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
 mcp-subagent spawn <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
 mcp-subagent submit <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
@@ -36,6 +41,11 @@ mcp-subagent artifact <handle-id> [--path ... | --kind summary|log|patch|json] [
 
 - Current implementation is `stdio` only (`mcp-subagent mcp`).
 - HTTP transport is not implemented in current build.
+
+MCP tools:
+
+- `list_agents`, `run_agent`, `spawn_agent`, `get_agent_status`, `cancel_agent`, `read_agent_artifact`
+- `list_runs`, `get_run_result`, `read_run_logs`, `watch_run`
 
 Global flags:
 
