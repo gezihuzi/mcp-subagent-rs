@@ -14,7 +14,7 @@ use crate::{
     spec::registry::load_agent_specs_from_dirs,
 };
 
-const PRESET_CATALOG_VERSION: &str = "v0.7.0";
+const PRESET_CATALOG_VERSION: &str = "v0.8.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitPreset {
@@ -547,7 +547,7 @@ mod tests {
             .expect("init succeeds");
 
         assert_eq!(report.generated_agent_count, 6);
-        assert_eq!(report.preset_catalog_version, "v0.7.0");
+        assert_eq!(report.preset_catalog_version, "v0.8.0");
         assert!(dir.path().join("agents").exists());
         assert!(dir.path().join("PLAN.md").exists());
         assert!(dir.path().join(".mcp-subagent/config.toml").exists());
@@ -570,7 +570,7 @@ mod tests {
                 "preset {} should generate at least one agent",
                 preset.as_str()
             );
-            assert_eq!(report.preset_catalog_version, "v0.7.0");
+            assert_eq!(report.preset_catalog_version, "v0.8.0");
             assert!(dir.path().join("README.mcp-subagent.md").exists());
         }
     }

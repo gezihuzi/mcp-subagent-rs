@@ -1540,3 +1540,28 @@
   - `cargo fmt`
   - `cargo test -q`（`134 + 10 + 3` tests passed）
   - `./scripts/smoke_v08.sh` 全链路通过（含 codex fake 与 connect snippets）。
+
+## T-061 V0.8-P0-ReleaseChainDocsAndVersionSync (Completed 2026-03-25)
+
+任务：完成 v0.8 发布链路文档与版本同步收口，确保版本号、catalog、changelog、release 文档与 smoke 入口一致。  
+验收标准：
+
+1. 新增 `docs/release_v0.8.0.md`，包含 v0.8 scope、cut checklist、tag/push 指引。
+2. 新增 `docs/mvp_smoke_v08.md`，命令与 `scripts/smoke_v08.sh` 对齐并覆盖新增校验项。
+3. `CHANGELOG.md` 新增 `0.8.0` 章节，记录 connect-snippet、onboarding、smoke_v08/CI 收口。
+4. `Cargo.toml` 版本更新为 `0.8.0`，`src/init.rs` 的 `PRESET_CATALOG_VERSION` 同步到 `v0.8.0`。
+5. 本地通过：`cargo fmt`、`cargo test -q`、`./scripts/smoke_v08.sh`。
+完成记录：
+
+- 已新增发布文档：
+  - `docs/release_v0.8.0.md`（scope、cut checklist、tag/push 指引）。
+  - `docs/mvp_smoke_v08.md`（与 `smoke_v08.sh` 对齐，包含 connect-snippet 三 host 校验与 codex fake runner 说明）。
+- 已更新版本与 catalog：
+  - `Cargo.toml` 版本由 `0.7.0` 升级到 `0.8.0`。
+  - `src/init.rs` `PRESET_CATALOG_VERSION` 升级到 `v0.8.0`，并同步测试断言。
+- 已更新发布记录：
+  - `CHANGELOG.md` 新增 `0.8.0 - 2026-03-25` 章节，收口 v0.8 P0 核心变更。
+- 已通过验收回归：
+  - `cargo fmt`
+  - `cargo test -q`（`134 + 10 + 3` tests passed）
+  - `./scripts/smoke_v08.sh` 全链路通过。

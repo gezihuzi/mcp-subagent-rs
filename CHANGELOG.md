@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.0 - 2026-03-25
+
+### Highlights
+
+- Completed v0.8 P0 first-success-path closure aligned to `docs/mcp-subagent_tech_design_v0.8.md`.
+- Added `connect-snippet --host claude|codex|gemini` with absolute-path output and shell-safe escaping.
+- Upgraded `init` onboarding template to emit executable host integration snippets (no placeholder paths).
+- Added `scripts/smoke_v08.sh` with codex fake runner stabilization and connect-snippet validation for all hosts.
+- Switched CI smoke baseline to v0.8 and synced release docs/checklists.
+
+### Provider Status (Current Build)
+
+- `Codex`: Primary
+- `Claude`: Beta
+- `Gemini`: Experimental
+- `Mock`: Stable local debug
+- `Ollama`: Local
+
 ## 0.7.0 - 2026-03-24
 
 ### Highlights

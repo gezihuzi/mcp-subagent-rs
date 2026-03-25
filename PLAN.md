@@ -8,8 +8,8 @@
 
 ### Batch V0.8-P0 - First Success Path（当前优先）
 
-目标：完成 `connect-snippet + init README + smoke_v08/CI` 收口，让用户首次接入和回归链路都可复制可验证。
-依赖顺序：`T-059 -> T-060`。
+目标：完成 `connect-snippet + init README + smoke_v08/CI + release docs/changelog/version` 收口，让用户首次接入和发布切点都可复制可验证。
+依赖顺序：`T-059 -> T-060 -> T-061`。
 回滚策略：新增命令面与模板升级均保持向后兼容，不影响既有 `mcp/doctor/validate/run/spawn` 主链。
 风险与控制：路径绝对化与 shell 转义实现不当会导致复制失败；smoke 误依赖本机真实 codex 会导致 CI 不稳定。通过单测覆盖 host 模板、绝对路径和含空格路径转义，并在 smoke 中使用 fake codex runner 固定回归路径。
 
