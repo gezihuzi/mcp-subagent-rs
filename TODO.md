@@ -2033,3 +2033,29 @@
   - `src/mcp/service.rs::run_dispatch_attaches_plan_section_acceptance_criteria_for_reviewer` 验证 compiled prompt 出现 plan 衍生标准。
 - 已通过回归：
   - `cargo test -q`（`158 + 33 + 3` tests passed）。
+
+## T-079 V0.9-P1-ShowCommandColorizedCompactOutput (Completed 2026-03-25)
+
+任务：实现 `show` 的彩色简洁文本输出，提高人工查看效率；`--json` 保持现有契约不变。  
+验收标准：
+
+1. `show` 默认文本输出改为紧凑单页，包含状态徽章、provider/model、normalization、duration、exit code、retries、summary/error。
+2. 终端支持且未设置 `NO_COLOR` 时输出 ANSI 颜色；`NO_COLOR` 或非终端时自动退化为纯文本。
+3. `show --json` 输出字段和语义保持不变。
+4. 新增测试覆盖彩色徽章和无彩色降级路径。
+5. `cargo test -q` 通过。
+完成记录：
+
+- 已实现 `show` 文本渲染器：
+  - `src/main.rs` 新增 `render_show_run_text`，输出紧凑单页信息（状态徽章、provider/model、normalization、duration、exit code、retries、summary/error）。
+  - `show` 默认文本路径改为统一调用该渲染器；`--json` 路径未改动。
+- 已实现颜色策略：
+  - 新增 `should_use_color_output`（`NO_COLOR`、`TERM=dumb`、非终端自动禁用）；
+  - 状态徽章按状态着色（succeeded/failed/running/timed_out/cancelled）。
+- 已补测试：
+  - `show_renderer_emits_color_badge_when_enabled`
+  - `show_renderer_is_plain_when_color_disabled`
+- 已同步文档：
+  - `README.md` 增加 `show` 的彩色输出与 `NO_COLOR/--json` 说明。
+- 已通过回归：
+  - `cargo test -q`（`158 + 35 + 3` tests passed）。

@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::IsTerminal,
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     time::Instant,
@@ -1048,6 +1049,76 @@ struct RunLogsOutput {
     stderr: Option<String>,
 }
 
+fn should_use_color_output() -> bool {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    if std::env::var("TERM")
+        .ok()
+        .is_some_and(|term| term.eq_ignore_ascii_case("dumb"))
+    {
+        return false;
+    }
+    std::io::stdout().is_terminal()
+}
+
+fn ansi(text: &str, code: &str, enabled: bool) -> String {
+    if enabled {
+        format!("\u{1b}[{code}m{text}\u{1b}[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+fn status_badge(status: &str, color: bool) -> String {
+    let label = status.to_ascii_uppercase();
+    let code = match status {
+        "succeeded" => "1;32",
+        "failed" => "1;31",
+        "running" => "1;33",
+        "timed_out" => "1;35",
+        "cancelled" => "1;36",
+        _ => "1;34",
+    };
+    ansi(&label, code, color)
+}
+
+fn render_show_run_text(view: &RunShowOutput, color: bool) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{}  {}",
+        status_badge(&view.status, color),
+        view.handle_id
+    ));
+    lines.push(format!(
+        "provider={} model={} normalization={}",
+        view.provider.as_deref().unwrap_or("unknown"),
+        view.model.as_deref().unwrap_or("unknown"),
+        view.normalization_status
+            .as_deref()
+            .unwrap_or("not_available")
+    ));
+    lines.push(format!(
+        "updated={} duration_ms={} exit_code={} retries={}",
+        view.updated_at,
+        view.usage
+            .duration_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        view.provider_exit_code
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        view.retries
+    ));
+    if let Some(summary) = view.summary.as_deref() {
+        lines.push(format!("summary: {summary}"));
+    }
+    if let Some(error) = view.error_message.as_deref() {
+        lines.push(format!("error: {}", ansi(error, "31", color)));
+    }
+    lines.join("\n")
+}
+
 fn runs_root(state_dir: &Path) -> PathBuf {
     state_dir.join("runs")
 }
@@ -1331,40 +1402,7 @@ fn show_run(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
     if json {
         print_json(&view);
     } else {
-        println!("handle_id: {}", view.handle_id);
-        println!("status: {}", view.status);
-        println!("updated_at: {}", view.updated_at);
-        println!(
-            "provider: {}",
-            view.provider.as_deref().unwrap_or("unknown")
-        );
-        println!("model: {}", view.model.as_deref().unwrap_or("unknown"));
-        println!(
-            "normalization_status: {}",
-            view.normalization_status
-                .as_deref()
-                .unwrap_or("not_available")
-        );
-        println!(
-            "provider_exit_code: {}",
-            view.provider_exit_code
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        );
-        println!(
-            "duration_ms: {}",
-            view.usage
-                .duration_ms
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        );
-        println!("retries: {}", view.retries);
-        if let Some(summary) = view.summary.as_deref() {
-            println!("summary: {summary}");
-        }
-        if let Some(error_message) = view.error_message.as_deref() {
-            println!("error: {error_message}");
-        }
+        println!("{}", render_show_run_text(&view, should_use_color_output()));
     }
     ExitCode::SUCCESS
 }
@@ -2281,7 +2319,7 @@ mod tests {
         bootstrap_bridge_config_template, build_selected_file_inputs, clean_state_dir,
         ensure_bootstrap_bridge_config, ensure_project_gitignore, resolve_init_root,
         ArtifactKindArg, Cli, Commands, ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput,
-        RunResultOutput, UsageStatsOutput, DEFAULT_BOOTSTRAP_ROOT_RELATIVE,
+        RunResultOutput, RunShowOutput, UsageStatsOutput, DEFAULT_BOOTSTRAP_ROOT_RELATIVE,
         RESULT_CONTRACT_VERSION,
     };
 
@@ -2596,6 +2634,84 @@ target/
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn show_renderer_emits_color_badge_when_enabled() {
+        let view = RunShowOutput {
+            handle_id: "run-1".to_string(),
+            status: "succeeded".to_string(),
+            updated_at: "2026-03-25T00:00:00Z".to_string(),
+            error_message: None,
+            provider: Some("Codex".to_string()),
+            model: Some("gpt-5.3-codex".to_string()),
+            normalization_status: Some("Validated".to_string()),
+            summary: Some("all good".to_string()),
+            provider_exit_code: Some(0),
+            retries: 0,
+            usage: UsageStatsOutput {
+                started_at: Some("2026-03-25T00:00:00Z".to_string()),
+                finished_at: Some("2026-03-25T00:00:01Z".to_string()),
+                duration_ms: Some(1000),
+                provider: "Codex".to_string(),
+                model: Some("gpt-5.3-codex".to_string()),
+                provider_exit_code: Some(0),
+                retries: 0,
+                token_source: "estimated".to_string(),
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                total_tokens: Some(30),
+                estimated_prompt_bytes: Some(40),
+                estimated_output_bytes: Some(80),
+            },
+            artifact_index: Vec::new(),
+        };
+
+        let rendered = super::render_show_run_text(&view, true);
+        assert!(
+            rendered.contains("\u{1b}[1;32mSUCCEEDED\u{1b}[0m"),
+            "expected green succeeded badge: {rendered}"
+        );
+    }
+
+    #[test]
+    fn show_renderer_is_plain_when_color_disabled() {
+        let view = RunShowOutput {
+            handle_id: "run-2".to_string(),
+            status: "failed".to_string(),
+            updated_at: "2026-03-25T00:00:00Z".to_string(),
+            error_message: Some("boom".to_string()),
+            provider: Some("Codex".to_string()),
+            model: None,
+            normalization_status: Some("Invalid".to_string()),
+            summary: None,
+            provider_exit_code: Some(1),
+            retries: 1,
+            usage: UsageStatsOutput {
+                started_at: Some("2026-03-25T00:00:00Z".to_string()),
+                finished_at: Some("2026-03-25T00:00:01Z".to_string()),
+                duration_ms: Some(1000),
+                provider: "Codex".to_string(),
+                model: None,
+                provider_exit_code: Some(1),
+                retries: 1,
+                token_source: "estimated".to_string(),
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                total_tokens: Some(30),
+                estimated_prompt_bytes: Some(40),
+                estimated_output_bytes: Some(80),
+            },
+            artifact_index: Vec::new(),
+        };
+
+        let rendered = super::render_show_run_text(&view, false);
+        assert!(rendered.starts_with("FAILED  run-2"), "{rendered}");
+        assert!(
+            !rendered.contains("\u{1b}["),
+            "plain output must not contain ansi escapes: {rendered}"
+        );
+        assert!(rendered.contains("error: boom"), "{rendered}");
     }
 
     #[test]
