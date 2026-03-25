@@ -195,8 +195,9 @@ pub(crate) struct MemoryResolutionRecord {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PersistedRunRecord {
     pub(crate) status: RunStatus,
-    #[serde(default)]
+    #[serde(default, with = "time::serde::rfc3339::option")]
     pub(crate) created_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339")]
     pub(crate) updated_at: OffsetDateTime,
     #[serde(default)]
     pub(crate) status_history: Vec<RunStatus>,
