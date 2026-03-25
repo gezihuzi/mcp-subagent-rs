@@ -27,7 +27,9 @@ use crate::{
         },
         persistence::{load_run_record_from_disk, persist_run_record},
         review::apply_review_evidence_hook,
-        server::{acquire_serialize_locks_from_state, McpSubagentServer},
+        server::{
+            acquire_serialize_locks_from_state, provider_unavailable_message, McpSubagentServer,
+        },
         service::run_dispatch,
         state::{
             append_status_if_terminal, apply_execution_policy_outcome, build_probe_result_snapshot,
@@ -450,8 +452,8 @@ impl McpSubagentServer {
         &self,
         Parameters(input): Parameters<RunAgentInput>,
     ) -> std::result::Result<Json<RunAgentOutput>, ErrorData> {
-        let (loaded, request, probe_result, execution_policy) =
-            self.prepare_run(input, RunMode::Sync)?;
+        let (loaded, request, execution_policy) = self.prepare_run(input, RunMode::Sync)?;
+        let probe_result = self.ensure_provider_ready(&loaded.spec.core.provider)?;
         let request_snapshot = build_run_request_snapshot(&request);
         let spec_snapshot = build_run_spec_snapshot(&loaded.spec);
         let probe_snapshot = build_probe_result_snapshot(&probe_result);
@@ -547,17 +549,17 @@ impl McpSubagentServer {
         &self,
         Parameters(input): Parameters<RunAgentInput>,
     ) -> std::result::Result<Json<SpawnAgentOutput>, ErrorData> {
-        let (loaded, request, probe_result, execution_policy) =
-            self.prepare_run(input, RunMode::Async)?;
+        let (loaded, request, execution_policy) = self.prepare_run(input, RunMode::Async)?;
         let handle_id = Uuid::now_v7().to_string();
         let running_record = RunRecord::running(
             request.task.clone(),
             Some(build_run_request_snapshot(&request)),
             Some(build_run_spec_snapshot(&loaded.spec)),
-            Some(build_probe_result_snapshot(&probe_result)),
+            None,
             Some(execution_policy),
         );
         let lock_keys = self.conflict_lock_keys(&loaded.spec, &request)?;
+        let provider_prober = self.provider_prober();
 
         self.upsert_and_persist_run(&handle_id, running_record)
             .await?;
@@ -567,6 +569,46 @@ impl McpSubagentServer {
         let task_handle_id = handle_id.clone();
         let task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(120)).await;
+            let probe_result = provider_prober.probe(&loaded.spec.core.provider);
+            let probe_snapshot = build_probe_result_snapshot(&probe_result);
+            if !probe_result.is_available() {
+                let mut probe_details = vec![format!("status={}", probe_result.status)];
+                if let Some(version) = &probe_result.version {
+                    probe_details.push(format!("version={version}"));
+                }
+                probe_details.extend(probe_result.notes.clone());
+                let error_message =
+                    provider_unavailable_message(&loaded.spec.core.provider, &probe_details);
+                let summary = failed_summary(error_message.clone());
+                let (artifact_index, artifacts) = build_runtime_artifacts(&summary, "", "", None);
+
+                let mut guard = state.lock().await;
+                guard.tasks.remove(&task_handle_id);
+                let Some(record) = guard.runs.get_mut(&task_handle_id) else {
+                    return;
+                };
+                if matches!(record.status, RunStatus::Cancelled) {
+                    return;
+                }
+                record.status = RunStatus::Failed;
+                record.updated_at = OffsetDateTime::now_utc();
+                append_status_if_terminal(&mut record.status_history, RunStatus::Failed);
+                record.error_message = Some(error_message);
+                record.summary = Some(summary);
+                record.artifact_index = artifact_index;
+                record.artifacts = artifacts;
+                record.probe_result = Some(probe_snapshot);
+                record.memory_resolution = None;
+                record.workspace = None;
+                record.compiled_context_markdown = None;
+                record.usage = None;
+                record.retry_classification = None;
+                if let Err(err) = persist_run_record(&state_dir, &task_handle_id, record) {
+                    record.error_message = Some(format!("failed to persist run state: {err}"));
+                }
+                return;
+            }
+
             let _serialize_guards =
                 acquire_serialize_locks_from_state(&state, lock_keys.clone()).await;
             let dispatch = run_dispatch(
@@ -636,6 +678,7 @@ impl McpSubagentServer {
                     record.summary = Some(dispatch_result.summary);
                     record.artifact_index = artifact_index;
                     record.artifacts = artifacts;
+                    record.probe_result = Some(probe_snapshot.clone());
                     record.memory_resolution = Some(memory_resolution);
                     record.workspace = Some(workspace);
                     record.compiled_context_markdown =
@@ -655,6 +698,7 @@ impl McpSubagentServer {
                     record.summary = Some(summary);
                     record.artifact_index = artifact_index;
                     record.artifacts = artifacts;
+                    record.probe_result = Some(probe_snapshot);
                     record.memory_resolution = None;
                     record.workspace = None;
                     record.compiled_context_markdown = None;

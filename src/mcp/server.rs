@@ -99,15 +99,7 @@ impl McpSubagentServer {
         &self,
         input: RunAgentInput,
         requested_run_mode: RunMode,
-    ) -> std::result::Result<
-        (
-            LoadedAgentSpec,
-            RunRequest,
-            ProviderProbe,
-            ExecutionPolicyRecord,
-        ),
-        ErrorData,
-    > {
+    ) -> std::result::Result<(LoadedAgentSpec, RunRequest, ExecutionPolicyRecord), ErrorData> {
         let specs = self.load_specs()?;
         let loaded = specs
             .into_iter()
@@ -147,8 +139,6 @@ impl McpSubagentServer {
             ));
         }
 
-        let probe_result = self.ensure_provider_ready(&loaded.spec.core.provider)?;
-
         let request = RunRequest {
             task: input.task,
             task_brief: input.task_brief,
@@ -175,7 +165,7 @@ impl McpSubagentServer {
             ],
         };
 
-        Ok((loaded, request, probe_result, execution_policy))
+        Ok((loaded, request, execution_policy))
     }
 
     pub(crate) fn probe_provider(&self, provider: &Provider) -> ProviderProbe {
@@ -199,11 +189,7 @@ impl McpSubagentServer {
         details.extend(probe.notes);
 
         Err(ErrorData::invalid_params(
-            format!(
-                "provider `{}` is unavailable ({})",
-                provider.as_str(),
-                details.join("; ")
-            ),
+            provider_unavailable_message(provider, &details),
             None,
         ))
     }
@@ -317,6 +303,18 @@ impl McpSubagentServer {
     pub(crate) fn runtime_state(&self) -> Arc<Mutex<RuntimeState>> {
         Arc::clone(&self.runtime_state)
     }
+
+    pub(crate) fn provider_prober(&self) -> Arc<dyn ProviderProber> {
+        Arc::clone(&self.provider_prober)
+    }
+}
+
+pub(crate) fn provider_unavailable_message(provider: &Provider, details: &[String]) -> String {
+    format!(
+        "provider `{}` is unavailable ({})",
+        provider.as_str(),
+        details.join("; ")
+    )
 }
 
 pub(crate) async fn acquire_serialize_locks_from_state(
@@ -418,12 +416,14 @@ sandbox = "read_only"
     #[derive(Debug, Clone)]
     struct TestProviderProber {
         probes: HashMap<Provider, ProviderProbe>,
+        delays: HashMap<Provider, Duration>,
     }
 
     impl TestProviderProber {
         fn ready() -> Self {
             Self {
                 probes: HashMap::new(),
+                delays: HashMap::new(),
             }
         }
 
@@ -442,10 +442,18 @@ sandbox = "read_only"
             );
             self
         }
+
+        fn with_delay(mut self, provider: Provider, delay: Duration) -> Self {
+            self.delays.insert(provider, delay);
+            self
+        }
     }
 
     impl ProviderProber for TestProviderProber {
         fn probe(&self, provider: &Provider) -> ProviderProbe {
+            if let Some(delay) = self.delays.get(provider) {
+                std::thread::sleep(*delay);
+            }
             self.probes
                 .get(provider)
                 .cloned()
@@ -671,6 +679,115 @@ sandbox = "read_only"
             .message
             .as_ref()
             .contains("provider `codex` is unavailable"));
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_returns_before_slow_probe_completes() {
+        let temp = tempdir().expect("temp");
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        write_agent_spec(&agents_dir);
+
+        let server = McpSubagentServer::new_with_state_dir_and_prober(
+            vec![agents_dir],
+            state_dir,
+            Arc::new(
+                TestProviderProber::ready().with_delay(Provider::Mock, Duration::from_millis(900)),
+            ),
+        );
+
+        let started = Instant::now();
+        let spawn = server
+            .spawn_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
+                agent_name: "reviewer".to_string(),
+                task: "slow probe".to_string(),
+                task_brief: None,
+                parent_summary: None,
+                selected_files: Vec::new(),
+                stage: None,
+                plan_ref: None,
+                working_dir: None,
+            }))
+            .await
+            .expect("spawn")
+            .0;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "spawn took {:?}, expected < 300ms",
+            elapsed
+        );
+        assert_eq!(spawn.status, "running");
+
+        let status = server
+            .get_agent_status(rmcp::handler::server::wrapper::Parameters(HandleInput {
+                handle_id: spawn.handle_id.clone(),
+            }))
+            .await
+            .expect("status")
+            .0;
+        assert_eq!(status.status, "running");
+
+        server.wait_for_run(&spawn.handle_id).await;
+        let finished = server
+            .get_agent_status(rmcp::handler::server::wrapper::Parameters(HandleInput {
+                handle_id: spawn.handle_id,
+            }))
+            .await
+            .expect("final status")
+            .0;
+        assert_eq!(finished.status, "succeeded");
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_accepts_then_fails_when_provider_unavailable() {
+        let temp = tempdir().expect("temp");
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        write_codex_agent_spec(&agents_dir);
+
+        let server = McpSubagentServer::new_with_state_dir_and_prober(
+            vec![agents_dir],
+            state_dir,
+            Arc::new(TestProviderProber::ready().with_status(
+                Provider::Codex,
+                ProbeStatus::MissingBinary,
+                "codex CLI not installed",
+            )),
+        );
+
+        let spawn = server
+            .spawn_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
+                agent_name: "reviewer".to_string(),
+                task: "should fail async".to_string(),
+                task_brief: None,
+                parent_summary: None,
+                selected_files: Vec::new(),
+                stage: None,
+                plan_ref: None,
+                working_dir: None,
+            }))
+            .await
+            .expect("spawn")
+            .0;
+        assert_eq!(spawn.status, "running");
+
+        server.wait_for_run(&spawn.handle_id).await;
+
+        let status = server
+            .get_agent_status(rmcp::handler::server::wrapper::Parameters(HandleInput {
+                handle_id: spawn.handle_id,
+            }))
+            .await
+            .expect("status")
+            .0;
+        assert_eq!(status.status, "failed");
+        assert!(status
+            .error_message
+            .as_deref()
+            .is_some_and(|msg| msg.contains("provider `codex` is unavailable")));
     }
 
     #[tokio::test]

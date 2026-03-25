@@ -2234,3 +2234,29 @@
   - 新增测试覆盖分类判定与结果字段输出，并更新 MCP e2e 断言。
 - 已通过回归：
   - `cargo fmt && cargo test -q`（`167 + 41 + 3` tests passed）。
+
+## T-086 V0.10-P0-SpawnAcceptedOnlyAsyncProbe (Completed 2026-03-25)
+
+任务：将 `spawn` 收口为 accepted-only：同步路径只做 spec/request 组装并落盘，provider probe 后移到后台 worker，避免前台卡住。  
+验收标准：
+
+1. `spawn_agent` 同步路径不再执行 provider probe，调用可在 slow probe 场景快速返回。
+2. `run_agent` 仍保留同步 provider 可用性校验，不改变原有拒绝语义。
+3. provider 不可用时，`spawn_agent` 先返回 handle，再在后台将 run 置为 `failed` 并写入明确 unavailable 错误。
+4. `run.json` 的 `probe_result` 在异步路径成功/失败都能持久化，不丢 probe 快照。
+5. 新增测试覆盖“slow probe 快速返回”与“spawn accept 后异步失败”，`cargo test -q` 全量通过。
+完成记录：
+
+- 已完成执行链重构：
+  - `src/mcp/server.rs::prepare_run` 去除同步 probe，仅返回 `loaded + request + execution_policy`；
+  - `src/mcp/tools.rs::run_agent` 显式保留 `ensure_provider_ready`；
+  - `src/mcp/tools.rs::spawn_agent` 改为 worker 内 probe，并在 unavailable 时写入失败摘要与错误信息。
+- 已补运行态与持久化一致性：
+  - async 成功/失败路径都会写入 `probe_result`；
+  - unavailable 失败路径保留标准错误文案 `provider \`...\` is unavailable (...)` 并落盘。
+- 已新增回归测试：
+  - `spawn_agent_returns_before_slow_probe_completes`
+  - `spawn_agent_accepts_then_fails_when_provider_unavailable`
+- 已通过回归：
+  - `cargo fmt`
+  - `cargo test -q`（`169 + 41 + 3` tests passed）。
