@@ -17,6 +17,11 @@ use crate::{
 
 const ARCHIVE_WARNING_ARTIFACT_PATH: &str = "archive/hook-warnings.txt";
 
+pub(crate) struct ArtifactCollector<'a> {
+    pub index: &'a mut Vec<ArtifactOutput>,
+    pub data: &'a mut HashMap<String, String>,
+}
+
 pub(crate) fn apply_archive_hook(
     spec: &AgentSpec,
     request: &RunRequest,
@@ -24,8 +29,7 @@ pub(crate) fn apply_archive_hook(
     handle_id: &str,
     workspace: &WorkspaceRecord,
     summary: &SummaryEnvelope,
-    artifact_index: &mut Vec<ArtifactOutput>,
-    artifacts: &mut HashMap<String, String>,
+    collector: &mut ArtifactCollector<'_>,
 ) {
     let mut warnings = Vec::new();
     if !should_run_archive_hook(spec, request, run_status) {
@@ -43,7 +47,7 @@ pub(crate) fn apply_archive_hook(
                 "invalid workflow.archive_policy.archive_dir: {}",
                 workflow.archive_policy.archive_dir
             ));
-            write_warning_artifact(artifact_index, artifacts, &warnings);
+            write_warning_artifact(collector, &warnings);
             return;
         }
     };
@@ -69,8 +73,7 @@ pub(crate) fn apply_archive_hook(
             warnings.push(err);
         } else {
             upsert_artifact(
-                artifact_index,
-                artifacts,
+                collector,
                 &final_summary_rel,
                 ArtifactKind::ReportMarkdown,
                 "Archived final summary",
@@ -93,8 +96,7 @@ pub(crate) fn apply_archive_hook(
             warnings.push(err);
         } else {
             upsert_artifact(
-                artifact_index,
-                artifacts,
+                collector,
                 &decision_rel,
                 ArtifactKind::ReportMarkdown,
                 "Archived decision note",
@@ -129,8 +131,7 @@ pub(crate) fn apply_archive_hook(
         match append_metadata_index(&workspace.source_path, &metadata_index_rel, &metadata_entry) {
             Ok(content) => {
                 upsert_artifact(
-                    artifact_index,
-                    artifacts,
+                    collector,
                     &metadata_index_rel,
                     ArtifactKind::ReportJson,
                     "Archive metadata index",
@@ -144,7 +145,7 @@ pub(crate) fn apply_archive_hook(
     }
 
     if !warnings.is_empty() {
-        write_warning_artifact(artifact_index, artifacts, &warnings);
+        write_warning_artifact(collector, &warnings);
     }
 }
 
@@ -381,16 +382,11 @@ fn write_repo_text_file(
         .map_err(|err| format!("failed to write archive file {}: {err}", target.display()))
 }
 
-fn write_warning_artifact(
-    artifact_index: &mut Vec<ArtifactOutput>,
-    artifacts: &mut HashMap<String, String>,
-    warnings: &[String],
-) {
+fn write_warning_artifact(collector: &mut ArtifactCollector<'_>, warnings: &[String]) {
     let created_at = format_time(OffsetDateTime::now_utc());
     let warning_text = warnings.join("\n");
     upsert_artifact(
-        artifact_index,
-        artifacts,
+        collector,
         ARCHIVE_WARNING_ARTIFACT_PATH,
         ArtifactKind::StderrText,
         "Archive hook warnings",
@@ -401,8 +397,7 @@ fn write_warning_artifact(
 }
 
 fn upsert_artifact(
-    artifact_index: &mut Vec<ArtifactOutput>,
-    artifacts: &mut HashMap<String, String>,
+    collector: &mut ArtifactCollector<'_>,
     path: &str,
     kind: ArtifactKind,
     description: &str,
@@ -419,13 +414,13 @@ fn upsert_artifact(
         created_at: Some(created_at.to_string()),
     };
 
-    if let Some(existing) = artifact_index.iter_mut().find(|item| item.path == path) {
+    if let Some(existing) = collector.index.iter_mut().find(|item| item.path == path) {
         *existing = output;
     } else {
-        artifact_index.push(output);
+        collector.index.push(output);
     }
 
-    artifacts.insert(path.to_string(), content);
+    collector.data.insert(path.to_string(), content);
 }
 
 fn join_relative(base: &str, leaf: &str) -> String {
@@ -496,7 +491,11 @@ mod tests {
     use uuid::Uuid;
 
     use crate::{
-        mcp::{archive::apply_archive_hook, dto::ArtifactOutput, state::WorkspaceRecord},
+        mcp::{
+            archive::{apply_archive_hook, ArtifactCollector},
+            dto::ArtifactOutput,
+            state::WorkspaceRecord,
+        },
         runtime::{
             dispatcher::RunStatus,
             summary::{StructuredSummary, SummaryEnvelope, SummaryParseStatus, VerificationStatus},
@@ -608,6 +607,10 @@ mod tests {
         let mut artifact_index: Vec<ArtifactOutput> = Vec::new();
         let mut artifacts = HashMap::new();
 
+        let mut collector = ArtifactCollector {
+            index: &mut artifact_index,
+            data: &mut artifacts,
+        };
         apply_archive_hook(
             &spec,
             &request,
@@ -615,8 +618,7 @@ mod tests {
             &handle_id,
             &workspace,
             &summary,
-            &mut artifact_index,
-            &mut artifacts,
+            &mut collector,
         );
 
         let final_summary_path = artifact_index
@@ -675,6 +677,10 @@ mod tests {
         let mut artifact_index: Vec<ArtifactOutput> = Vec::new();
         let mut artifacts = HashMap::new();
 
+        let mut collector = ArtifactCollector {
+            index: &mut artifact_index,
+            data: &mut artifacts,
+        };
         apply_archive_hook(
             &spec,
             &request,
@@ -682,8 +688,7 @@ mod tests {
             "run-1",
             &workspace,
             &summary,
-            &mut artifact_index,
-            &mut artifacts,
+            &mut collector,
         );
 
         assert!(artifact_index.is_empty());
@@ -709,6 +714,10 @@ mod tests {
         let mut artifact_index: Vec<ArtifactOutput> = Vec::new();
         let mut artifacts = HashMap::new();
 
+        let mut collector = ArtifactCollector {
+            index: &mut artifact_index,
+            data: &mut artifacts,
+        };
         apply_archive_hook(
             &spec,
             &request,
@@ -716,8 +725,7 @@ mod tests {
             "run-1",
             &workspace,
             &summary,
-            &mut artifact_index,
-            &mut artifacts,
+            &mut collector,
         );
 
         let warning = artifact_index

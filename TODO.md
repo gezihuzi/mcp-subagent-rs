@@ -1611,4 +1611,5 @@
 - 已为核心数据枚举在 `summary.rs`、`runtime_policy.rs`、`dispatcher.rs` 中实现了 `Display`（复用 Debug 的原样式字面值）。
 - 已批量替换 `src/mcp` 等各处的格式化宏。
 - 修复了格式化降级警告。
+- 基于反馈，移除了原生命周期钩子中回避性的 `#[allow(clippy::too_many_arguments)]`，通过提炼专属上下文结构体 `ArtifactCollector` 从根本上优化了 `apply_archive_hook` 和 `upsert_artifact` 的 API 设计，清除了 Clippy 警告。
 - 已通过 `cargo clippy` 和 `cargo test` 全量检查。

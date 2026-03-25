@@ -132,8 +132,10 @@ impl McpSubagentServer {
             &handle_id,
             &workspace,
             &result.summary,
-            &mut artifact_index,
-            &mut artifacts,
+            &mut crate::mcp::archive::ArtifactCollector {
+                index: &mut artifact_index,
+                data: &mut artifacts,
+            },
         );
         let output = RunAgentOutput {
             handle_id: handle_id.clone(),
@@ -247,8 +249,10 @@ impl McpSubagentServer {
                         &task_handle_id,
                         &workspace,
                         &dispatch_result.summary,
-                        &mut artifact_index,
-                        &mut artifacts,
+                        &mut crate::mcp::archive::ArtifactCollector {
+                            index: &mut artifact_index,
+                            data: &mut artifacts,
+                        },
                     );
                     record.status = dispatch_result.metadata.status;
                     record.updated_at = OffsetDateTime::now_utc();
