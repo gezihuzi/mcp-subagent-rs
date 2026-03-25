@@ -29,7 +29,10 @@ mcp-subagent show <handle-id> [--json]
 mcp-subagent result <handle-id> [--raw | --normalized | --summary] [--json]
 mcp-subagent logs <handle-id> [--stdout | --stderr] [--json]
 mcp-subagent timeline <handle-id> [--event ...] [--json]
+mcp-subagent events <handle-id> [--event ...] [--follow] [--interval-ms ...] [--timeout-secs ...] [--json]
 mcp-subagent watch <handle-id> [--interval-ms ...] [--timeout-secs ...] [--json]
+mcp-subagent wait <handle-id> [--interval-ms ...] [--timeout-secs ...] [--json]
+mcp-subagent stats <handle-id> [--json]
 mcp-subagent run <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
 mcp-subagent spawn <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
 mcp-subagent submit <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
@@ -167,11 +170,14 @@ Inspect one run end-to-end:
 
 ```bash
 mcp-subagent show <handle-id>
+mcp-subagent stats <handle-id>
 mcp-subagent result <handle-id> --json
 mcp-subagent logs <handle-id> --stderr
-mcp-subagent timeline <handle-id> --json
-mcp-subagent timeline <handle-id> --event retry_classification --json
+mcp-subagent events <handle-id> --json
+mcp-subagent events <handle-id> --event provider.heartbeat --follow
 ```
+
+`timeline` is kept as a compatibility alias; prefer `events`.
 
 `result --json` and MCP `get_run_result` now include retry observability fields:
 

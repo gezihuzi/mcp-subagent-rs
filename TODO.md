@@ -2287,4 +2287,42 @@
   - `watch` 改为实时打印新增事件（并保留状态行）。
 - 已通过回归：
   - `cargo fmt`
-  - `cargo test -q`（`169 + 41 + 3` tests passed）。
+  - `cargo test -q`（`170 + 42 + 3` tests passed）。
+
+## T-088 V0.10-P0-EventsStatsWaitCliSurface (Completed 2026-03-25)
+
+任务：把 v0.10 可观察命令面补齐到可直接使用：新增 `events/stats/wait`，并与现有 `watch/timeline` 兼容协同。  
+验收标准：
+
+1. CLI 新增 `events <handle> [--event ...] [--follow] [--interval-ms] [--timeout-secs] [--json]`。
+2. CLI 新增 `stats <handle> [--json]`，输出阶段耗时、last event、stall 信号与 token usage。
+3. CLI 新增 `wait <handle> [--interval-ms] [--timeout-secs] [--json]`，阻塞到终态并按状态返回退出码。
+4. `events/timeline/watch` 统一优先读取 `events.jsonl`，兼容回退 `events.ndjson`。
+5. 补测试覆盖：命令解析、`events.jsonl` 优先级、stats 时序计算。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已补齐命令面：
+  - `src/main.rs` 新增 `Commands::Events/Stats/Wait`；
+  - 主命令分发新增 `read_events/read_stats/wait_run` 执行链；
+  - `wait` 退出码映射：`succeeded=0`、`cancelled=2`、`timed_out=124`、其他失败=1。
+- 已增强事件消费能力：
+  - `events --follow` 支持增量输出（文本/JSON 行）；
+  - `watch` 保留状态输出并实时打印新增事件；
+  - `load_run_events` 统一优先读取 `events.jsonl`，缺失回退 legacy `events.ndjson`。
+- 已补 stats 结果模型：
+  - 新增 `RunStatsOutput` 与 `build_run_stats_output`；
+  - 汇总 `queue_ms/provider_probe_ms/execution_ms/wall_ms/last_event_age_ms/stalled`；
+  - 复用现有 usage 输出，保持 token 口径一致。
+- 已同步文档命令面：
+  - `README.md` 命令表新增 `events/stats/wait`；
+  - 示例链路切换为 `events`，并标注 `timeline` 为兼容别名。
+- 已新增测试：
+  - `parses_events_command_flags`
+  - `parses_wait_command_flags`
+  - `parses_stats_command_flags`
+  - `build_run_stats_output_derives_phase_and_durations_from_events`
+  - `load_run_events_prefers_jsonl_when_both_formats_exist`
+- 已通过回归：
+  - `cargo fmt`
+  - `cargo test -q`（`170 + 46 + 3` tests passed）。

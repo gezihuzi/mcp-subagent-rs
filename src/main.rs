@@ -149,12 +149,39 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    Events {
+        handle_id: String,
+        #[arg(long)]
+        event: Option<String>,
+        #[arg(long)]
+        follow: bool,
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
     Watch {
         handle_id: String,
         #[arg(long, default_value_t = 1000)]
         interval_ms: u64,
         #[arg(long)]
         timeout_secs: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
+    Wait {
+        handle_id: String,
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
+    Stats {
+        handle_id: String,
         #[arg(long)]
         json: bool,
     },
@@ -538,6 +565,39 @@ async fn main() -> ExitCode {
             info!("starting command: timeline");
             read_timeline(cfg, handle_id, event, json)
         }
+        Commands::Events {
+            handle_id,
+            event,
+            follow,
+            interval_ms,
+            timeout_secs,
+            json,
+        } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: events");
+            read_events(
+                cfg,
+                handle_id,
+                event,
+                follow,
+                interval_ms,
+                timeout_secs,
+                json,
+            )
+            .await
+        }
         Commands::Watch {
             handle_id,
             interval_ms,
@@ -559,6 +619,45 @@ async fn main() -> ExitCode {
             };
             info!("starting command: watch");
             watch_run(cfg, handle_id, interval_ms, timeout_secs, json).await
+        }
+        Commands::Wait {
+            handle_id,
+            interval_ms,
+            timeout_secs,
+            json,
+        } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: wait");
+            wait_run(cfg, handle_id, interval_ms, timeout_secs, json).await
+        }
+        Commands::Stats { handle_id, json } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: stats");
+            read_stats(cfg, handle_id, json)
         }
         Commands::Run {
             agent,
@@ -1146,6 +1245,31 @@ struct RunTimelineOutput {
     events: Vec<RunTimelineEvent>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct WaitRunOutput {
+    handle_id: String,
+    status: String,
+    updated_at: String,
+    error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunStatsOutput {
+    handle_id: String,
+    status: String,
+    state: Option<String>,
+    phase: Option<String>,
+    last_event_at: Option<String>,
+    last_event_age_ms: Option<u64>,
+    stalled: bool,
+    queue_ms: Option<u64>,
+    provider_probe_ms: Option<u64>,
+    execution_ms: Option<u64>,
+    first_output_ms: Option<u64>,
+    wall_ms: Option<u64>,
+    usage: UsageStatsOutput,
+}
+
 fn should_use_color_output() -> bool {
     if std::env::var_os("NO_COLOR").is_some() {
         return false;
@@ -1312,6 +1436,33 @@ fn load_run_events(
 
 fn parse_rfc3339(value: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
+}
+
+fn event_time(event: &RunTimelineEvent) -> Option<OffsetDateTime> {
+    if !event.timestamp.is_empty() {
+        return parse_rfc3339(&event.timestamp);
+    }
+    parse_rfc3339(event.ts.as_deref()?)
+}
+
+fn duration_between(start: Option<OffsetDateTime>, end: Option<OffsetDateTime>) -> Option<u64> {
+    let start = start?;
+    let end = end?;
+    if end < start {
+        return None;
+    }
+    Some((end - start).whole_milliseconds().max(0) as u64)
+}
+
+fn first_event_time(events: &[RunTimelineEvent], name: &str) -> Option<OffsetDateTime> {
+    events
+        .iter()
+        .find(|event| event.event == name)
+        .and_then(event_time)
+}
+
+fn latest_event(events: &[RunTimelineEvent]) -> Option<&RunTimelineEvent> {
+    events.last()
 }
 
 fn compute_duration_ms(started_at: Option<&str>, finished_at: &str) -> Option<u64> {
@@ -1764,6 +1915,293 @@ fn read_timeline(
         println!("{} [{}] {}", item.display_timestamp(), item.event, detail);
     }
     ExitCode::SUCCESS
+}
+
+async fn read_events(
+    cfg: RuntimeConfig,
+    handle_id: String,
+    event: Option<String>,
+    follow: bool,
+    interval_ms: u64,
+    timeout_secs: Option<u64>,
+    json: bool,
+) -> ExitCode {
+    if !follow {
+        return read_timeline(cfg, handle_id, event, json);
+    }
+
+    let started = Instant::now();
+    let mut seen_count = 0usize;
+    let sleep_ms = interval_ms.max(50);
+    loop {
+        let record = match load_run_record(&cfg.state_dir, &handle_id) {
+            Ok(record) => record,
+            Err(err) => {
+                eprintln!("events failed: {err}");
+                return ExitCode::from(1);
+            }
+        };
+
+        let events = if run_events_path(&cfg.state_dir, &handle_id).exists()
+            || run_events_legacy_path(&cfg.state_dir, &handle_id).exists()
+        {
+            match load_run_events(&cfg.state_dir, &handle_id) {
+                Ok(events) => events,
+                Err(err) => {
+                    eprintln!("events failed: {err}");
+                    return ExitCode::from(1);
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        if seen_count > events.len() {
+            seen_count = events.len();
+        }
+        for evt in events.iter().skip(seen_count) {
+            if event
+                .as_deref()
+                .is_some_and(|needle| evt.event.as_str() != needle)
+            {
+                continue;
+            }
+            if json {
+                match serde_json::to_string(evt) {
+                    Ok(line) => println!("{line}"),
+                    Err(err) => {
+                        eprintln!("events failed to serialize line: {err}");
+                        return ExitCode::from(1);
+                    }
+                }
+            } else {
+                let detail =
+                    serde_json::to_string(&evt.detail).unwrap_or_else(|_| "null".to_string());
+                let message = evt.message.as_deref().unwrap_or("");
+                if message.is_empty() {
+                    println!("{} [{}] {}", evt.display_timestamp(), evt.event, detail);
+                } else {
+                    println!(
+                        "{} [{}] {} {}",
+                        evt.display_timestamp(),
+                        evt.event,
+                        message,
+                        detail
+                    );
+                }
+            }
+        }
+        seen_count = events.len();
+
+        if is_terminal_status(record.status.as_str()) {
+            return ExitCode::SUCCESS;
+        }
+        if timeout_secs.is_some_and(|secs| started.elapsed().as_secs() >= secs) {
+            eprintln!(
+                "events follow timed out after {}s for handle `{}`",
+                timeout_secs.unwrap_or_default(),
+                handle_id
+            );
+            return ExitCode::from(1);
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
+    }
+}
+
+fn wait_exit_code(status: &str) -> ExitCode {
+    match status {
+        "succeeded" => ExitCode::SUCCESS,
+        "timed_out" => ExitCode::from(124),
+        "cancelled" => ExitCode::from(2),
+        _ => ExitCode::from(1),
+    }
+}
+
+async fn wait_run(
+    cfg: RuntimeConfig,
+    handle_id: String,
+    interval_ms: u64,
+    timeout_secs: Option<u64>,
+    json: bool,
+) -> ExitCode {
+    let started = Instant::now();
+    let sleep_ms = interval_ms.max(50);
+    loop {
+        let record = match load_run_record(&cfg.state_dir, &handle_id) {
+            Ok(record) => record,
+            Err(err) => {
+                eprintln!("wait failed: {err}");
+                return ExitCode::from(1);
+            }
+        };
+
+        if is_terminal_status(record.status.as_str()) {
+            if json {
+                print_json(&WaitRunOutput {
+                    handle_id,
+                    status: record.status.clone(),
+                    updated_at: record.updated_at,
+                    error_message: record.error_message,
+                });
+            } else if let Some(error) = record.error_message.as_deref() {
+                println!("{} {} ({})", record.status, record.updated_at, error);
+            } else {
+                println!("{} {}", record.status, record.updated_at);
+            }
+            return wait_exit_code(record.status.as_str());
+        }
+
+        if timeout_secs.is_some_and(|secs| started.elapsed().as_secs() >= secs) {
+            eprintln!(
+                "wait timed out after {}s for handle `{}`",
+                timeout_secs.unwrap_or_default(),
+                handle_id
+            );
+            return ExitCode::from(124);
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
+    }
+}
+
+fn read_stats(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
+    let record = match load_run_record(&cfg.state_dir, &handle_id) {
+        Ok(record) => record,
+        Err(err) => {
+            eprintln!("stats failed: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let output = build_run_stats_output(
+        &cfg.state_dir,
+        &handle_id,
+        &record,
+        OffsetDateTime::now_utc(),
+    );
+
+    if json {
+        print_json(&output);
+    } else {
+        println!("handle_id: {}", output.handle_id);
+        println!("status: {}", output.status);
+        println!(
+            "state: {}",
+            output.state.as_deref().unwrap_or(output.status.as_str())
+        );
+        println!("phase: {}", output.phase.as_deref().unwrap_or("unknown"));
+        println!(
+            "wall_ms: {}",
+            output
+                .wall_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        println!(
+            "queue_ms: {}",
+            output
+                .queue_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        println!(
+            "provider_probe_ms: {}",
+            output
+                .provider_probe_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        println!(
+            "execution_ms: {}",
+            output
+                .execution_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        println!(
+            "last_event_at: {}",
+            output.last_event_at.as_deref().unwrap_or("unknown")
+        );
+        println!(
+            "last_event_age_ms: {}",
+            output
+                .last_event_age_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        println!("stalled: {}", output.stalled);
+        println!(
+            "tokens: input={:?} output={:?} total={:?} source={}",
+            output.usage.input_tokens,
+            output.usage.output_tokens,
+            output.usage.total_tokens,
+            output.usage.token_source
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+fn build_run_stats_output(
+    state_dir: &Path,
+    handle_id: &str,
+    record: &StoredRunRecord,
+    now: OffsetDateTime,
+) -> RunStatsOutput {
+    let usage = build_usage_output(state_dir, handle_id, record);
+    let events = load_run_events(state_dir, handle_id).unwrap_or_default();
+
+    let created_at = record.created_at.as_deref().and_then(parse_rfc3339);
+    let accepted_at = first_event_time(&events, "run.accepted").or(created_at);
+    let probe_started = first_event_time(&events, "provider.probe.started");
+    let probe_completed = first_event_time(&events, "provider.probe.completed");
+    let workspace_started = first_event_time(&events, "workspace.prepare.started");
+    let first_output = first_event_time(&events, "provider.first_output");
+    let terminal_at = if is_terminal_status(record.status.as_str()) {
+        parse_rfc3339(&record.updated_at)
+    } else {
+        None
+    };
+    let end_at = terminal_at.or(Some(now));
+
+    let queue_ms = duration_between(accepted_at, probe_started.or(workspace_started));
+    let provider_probe_ms = duration_between(probe_started, probe_completed);
+    let execution_start = workspace_started
+        .or(probe_completed)
+        .or(probe_started)
+        .or(accepted_at);
+    let execution_ms = duration_between(execution_start, end_at);
+    let first_output_ms = duration_between(accepted_at, first_output);
+    let wall_ms = duration_between(accepted_at.or(created_at), end_at);
+
+    let latest = latest_event(&events);
+    let last_event_at = latest
+        .map(|event| event.display_timestamp().to_string())
+        .filter(|value| !value.is_empty());
+    let last_event_age_ms = latest.and_then(event_time).and_then(|ts| {
+        if now < ts {
+            None
+        } else {
+            Some((now - ts).whole_milliseconds().max(0) as u64)
+        }
+    });
+    let state = latest.and_then(|event| event.state.clone());
+    let phase = latest.and_then(|event| event.phase.clone());
+    let stalled = !is_terminal_status(record.status.as_str())
+        && last_event_age_ms.is_some_and(|value| value >= 8_000);
+
+    RunStatsOutput {
+        handle_id: handle_id.to_string(),
+        status: record.status.clone(),
+        state,
+        phase,
+        last_event_at,
+        last_event_age_ms,
+        stalled,
+        queue_ms,
+        provider_probe_ms,
+        execution_ms,
+        first_output_ms,
+        wall_ms,
+        usage,
+    }
 }
 
 async fn watch_run(
@@ -3176,6 +3614,41 @@ target/
     }
 
     #[test]
+    fn parses_events_command_flags() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "events",
+            "handle-1",
+            "--event",
+            "provider.heartbeat",
+            "--follow",
+            "--interval-ms",
+            "250",
+            "--timeout-secs",
+            "12",
+            "--json",
+        ]);
+        match cli.command {
+            Commands::Events {
+                handle_id,
+                event,
+                follow,
+                interval_ms,
+                timeout_secs,
+                json,
+            } => {
+                assert_eq!(handle_id, "handle-1");
+                assert_eq!(event.as_deref(), Some("provider.heartbeat"));
+                assert!(follow);
+                assert_eq!(interval_ms, 250);
+                assert_eq!(timeout_secs, Some(12));
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn load_run_events_and_filter_by_event_name() {
         let dir = tempdir().expect("tempdir");
         let run_dir = dir.path().join("runs").join("handle-1");
@@ -3220,6 +3693,40 @@ target/
     }
 
     #[test]
+    fn build_run_stats_output_derives_phase_and_durations_from_events() {
+        let dir = tempdir().expect("tempdir");
+        let run_dir = dir.path().join("runs").join("handle-1");
+        fs::create_dir_all(&run_dir).expect("mkdir run");
+        fs::write(
+            run_dir.join("events.jsonl"),
+            concat!(
+                "{\"event\":\"run.accepted\",\"timestamp\":\"2026-03-25T00:00:00Z\",\"detail\":{},\"state\":\"accepted\",\"phase\":\"accepted\",\"seq\":1}\n",
+                "{\"event\":\"provider.probe.started\",\"timestamp\":\"2026-03-25T00:00:01Z\",\"detail\":{},\"state\":\"preparing\",\"phase\":\"provider_probe\",\"seq\":2}\n",
+                "{\"event\":\"provider.probe.completed\",\"timestamp\":\"2026-03-25T00:00:02Z\",\"detail\":{},\"state\":\"preparing\",\"phase\":\"provider_probe\",\"seq\":3}\n",
+                "{\"event\":\"workspace.prepare.started\",\"timestamp\":\"2026-03-25T00:00:03Z\",\"detail\":{},\"state\":\"preparing\",\"phase\":\"workspace_prepare\",\"seq\":4}\n",
+                "{\"event\":\"run.completed\",\"timestamp\":\"2026-03-25T00:00:05Z\",\"detail\":{},\"state\":\"succeeded\",\"phase\":\"completed\",\"seq\":5}\n"
+            ),
+        )
+        .expect("write events");
+
+        let record = StoredRunRecord {
+            status: "succeeded".to_string(),
+            created_at: Some("2026-03-25T00:00:00Z".to_string()),
+            updated_at: "2026-03-25T00:00:05Z".to_string(),
+            ..StoredRunRecord::default()
+        };
+        let now = super::parse_rfc3339("2026-03-25T00:00:05Z").expect("parse now");
+        let stats = super::build_run_stats_output(dir.path(), "handle-1", &record, now);
+        assert_eq!(stats.queue_ms, Some(1_000));
+        assert_eq!(stats.provider_probe_ms, Some(1_000));
+        assert_eq!(stats.execution_ms, Some(2_000));
+        assert_eq!(stats.wall_ms, Some(5_000));
+        assert_eq!(stats.state.as_deref(), Some("succeeded"));
+        assert_eq!(stats.phase.as_deref(), Some("completed"));
+        assert!(!stats.stalled);
+    }
+
+    #[test]
     fn parses_watch_command_flags() {
         let cli = Cli::parse_from([
             "mcp-subagent",
@@ -3241,6 +3748,46 @@ target/
                 assert_eq!(interval_ms, 250);
                 assert_eq!(timeout_secs, Some(15));
                 assert!(!json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_wait_command_flags() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "wait",
+            "handle-1",
+            "--interval-ms",
+            "300",
+            "--timeout-secs",
+            "20",
+            "--json",
+        ]);
+        match cli.command {
+            Commands::Wait {
+                handle_id,
+                interval_ms,
+                timeout_secs,
+                json,
+            } => {
+                assert_eq!(handle_id, "handle-1");
+                assert_eq!(interval_ms, 300);
+                assert_eq!(timeout_secs, Some(20));
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_stats_command_flags() {
+        let cli = Cli::parse_from(["mcp-subagent", "stats", "handle-1", "--json"]);
+        match cli.command {
+            Commands::Stats { handle_id, json } => {
+                assert_eq!(handle_id, "handle-1");
+                assert!(json);
             }
             other => panic!("unexpected command: {other:?}"),
         }
