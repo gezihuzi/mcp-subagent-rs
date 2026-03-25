@@ -122,16 +122,19 @@ pub(crate) fn persist_run_record(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct RuntimeEventInput<'a> {
+    pub(crate) event: &'a str,
+    pub(crate) state: &'a str,
+    pub(crate) phase: &'a str,
+    pub(crate) source: &'a str,
+    pub(crate) message: &'a str,
+    pub(crate) detail: Value,
+}
+
 pub(crate) fn append_run_event(
     state_dir: &Path,
     handle_id: &str,
-    event: &str,
-    state: &str,
-    phase: &str,
-    source: &str,
-    message: &str,
-    detail: Value,
+    event: RuntimeEventInput<'_>,
 ) -> std::result::Result<(), ErrorData> {
     let run_directory = run_dir(state_dir, handle_id);
     fs::create_dir_all(&run_directory).map_err(|err| {
@@ -147,16 +150,18 @@ pub(crate) fn append_run_event(
     let canonical_path = events_path(state_dir, handle_id);
     let seq = next_event_seq(&canonical_path)?;
     let timestamp = format_time(OffsetDateTime::now_utc());
-    let line = RunEventRecord::runtime(
-        seq,
-        event.to_string(),
+    let line = RunEventRecord {
+        seq: Some(seq),
+        ts: Some(timestamp.clone()),
+        level: Some("info".to_string()),
+        state: Some(event.state.to_string()),
+        phase: Some(event.phase.to_string()),
+        source: Some(event.source.to_string()),
+        message: Some(event.message.to_string()),
+        event: event.event.to_string(),
         timestamp,
-        state.to_string(),
-        phase.to_string(),
-        source.to_string(),
-        message.to_string(),
-        detail,
-    );
+        detail: event.detail,
+    };
     append_event_line(&canonical_path, &line)?;
     Ok(())
 }
@@ -280,30 +285,6 @@ impl RunEventRecord {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn runtime(
-        seq: u64,
-        event: String,
-        timestamp: String,
-        state: String,
-        phase: String,
-        source: String,
-        message: String,
-        detail: Value,
-    ) -> Self {
-        Self {
-            seq: Some(seq),
-            ts: Some(timestamp.clone()),
-            level: Some("info".to_string()),
-            state: Some(state),
-            phase: Some(phase),
-            source: Some(source),
-            message: Some(message),
-            event,
-            timestamp,
-            detail,
-        }
-    }
 }
 
 fn build_run_events(record: &RunRecord) -> Vec<RunEventRecord> {
@@ -519,7 +500,7 @@ mod tests {
     use tempfile::tempdir;
     use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
-    use super::{append_run_event, load_run_record_from_disk};
+    use super::{append_run_event, load_run_record_from_disk, RuntimeEventInput};
 
     #[test]
     fn loads_persisted_run_json_with_required_fields() {
@@ -583,23 +564,27 @@ mod tests {
         append_run_event(
             &state_dir,
             handle_id,
-            "run.accepted",
-            "accepted",
-            "accepted",
-            "runtime",
-            "accepted",
-            json!({"k":"v"}),
+            RuntimeEventInput {
+                event: "run.accepted",
+                state: "accepted",
+                phase: "accepted",
+                source: "runtime",
+                message: "accepted",
+                detail: json!({"k":"v"}),
+            },
         )
         .expect("append accepted");
         append_run_event(
             &state_dir,
             handle_id,
-            "provider.heartbeat",
-            "running",
-            "running",
-            "runtime",
-            "still alive",
-            json!({"elapsed_ms":100}),
+            RuntimeEventInput {
+                event: "provider.heartbeat",
+                state: "running",
+                phase: "running",
+                source: "runtime",
+                message: "still alive",
+                detail: json!({"elapsed_ms":100}),
+            },
         )
         .expect("append heartbeat");
 

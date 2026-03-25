@@ -30,7 +30,9 @@ use crate::{
             WatchRunOutput,
         },
         helpers::{build_capability_notes, cancelled_summary, failed_summary, format_time},
-        persistence::{append_run_event, load_run_record_from_disk, persist_run_record},
+        persistence::{
+            append_run_event, load_run_record_from_disk, persist_run_record, RuntimeEventInput,
+        },
         review::apply_review_evidence_hook,
         server::{
             acquire_serialize_locks_from_state, provider_unavailable_message, McpSubagentServer,
@@ -1406,27 +1408,31 @@ impl McpSubagentServer {
         append_run_event(
             self.state_dir(),
             &handle_id,
-            "run.accepted",
-            "accepted",
-            "accepted",
-            "runtime",
-            "run accepted",
-            json!({
-                "agent": loaded.spec.core.name.clone(),
-                "provider": loaded.spec.core.provider.as_str(),
-            }),
+            RuntimeEventInput {
+                event: "run.accepted",
+                state: "accepted",
+                phase: "accepted",
+                source: "runtime",
+                message: "run accepted",
+                detail: json!({
+                    "agent": loaded.spec.core.name.clone(),
+                    "provider": loaded.spec.core.provider.as_str(),
+                }),
+            },
         )?;
         append_run_event(
             self.state_dir(),
             &handle_id,
-            "run.queued",
-            "queued",
-            "queueing",
-            "runtime",
-            "run queued for async execution",
-            json!({
-                "queued_at": queued_at.clone(),
-            }),
+            RuntimeEventInput {
+                event: "run.queued",
+                state: "queued",
+                phase: "queueing",
+                source: "runtime",
+                message: "run queued for async execution",
+                detail: json!({
+                    "queued_at": queued_at.clone(),
+                }),
+            },
         )?;
 
         let state = self.runtime_state();
@@ -1437,30 +1443,34 @@ impl McpSubagentServer {
             let _ = append_run_event(
                 &state_dir,
                 &task_handle_id,
-                "provider.probe.started",
-                "preparing",
-                "provider_probe",
-                "provider",
-                "provider probe started",
-                json!({
-                    "provider": loaded.spec.core.provider.as_str(),
-                }),
+                RuntimeEventInput {
+                    event: "provider.probe.started",
+                    state: "preparing",
+                    phase: "provider_probe",
+                    source: "provider",
+                    message: "provider probe started",
+                    detail: json!({
+                        "provider": loaded.spec.core.provider.as_str(),
+                    }),
+                },
             );
             let probe_result = provider_prober.probe(&loaded.spec.core.provider);
             let probe_snapshot = build_probe_result_snapshot(&probe_result);
             let _ = append_run_event(
                 &state_dir,
                 &task_handle_id,
-                "provider.probe.completed",
-                "preparing",
-                "provider_probe",
-                "provider",
-                "provider probe completed",
-                json!({
-                    "provider": probe_result.provider.as_str(),
-                    "status": format!("{}", probe_result.status),
-                    "version": probe_result.version.clone(),
-                }),
+                RuntimeEventInput {
+                    event: "provider.probe.completed",
+                    state: "preparing",
+                    phase: "provider_probe",
+                    source: "provider",
+                    message: "provider probe completed",
+                    detail: json!({
+                        "provider": probe_result.provider.as_str(),
+                        "status": format!("{}", probe_result.status),
+                        "version": probe_result.version.clone(),
+                    }),
+                },
             );
             if !probe_result.is_available() {
                 let mut probe_details = vec![format!("status={}", probe_result.status)];
@@ -1497,14 +1507,16 @@ impl McpSubagentServer {
                 let _ = append_run_event(
                     &state_dir,
                     &task_handle_id,
-                    "run.failed",
-                    "failed",
-                    "provider_probe",
-                    "runtime",
-                    "provider unavailable",
-                    json!({
-                        "error": record.error_message.clone(),
-                    }),
+                    RuntimeEventInput {
+                        event: "run.failed",
+                        state: "failed",
+                        phase: "provider_probe",
+                        source: "runtime",
+                        message: "provider unavailable",
+                        detail: json!({
+                            "error": record.error_message.clone(),
+                        }),
+                    },
                 );
                 if let Err(err) = persist_run_record(&state_dir, &task_handle_id, record) {
                     record.error_message = Some(format!("failed to persist run state: {err}"));
@@ -1515,12 +1527,14 @@ impl McpSubagentServer {
             let _ = append_run_event(
                 &state_dir,
                 &task_handle_id,
-                "workspace.prepare.started",
-                "preparing",
-                "workspace_prepare",
-                "workspace",
-                "workspace/context preparation started",
-                json!({}),
+                RuntimeEventInput {
+                    event: "workspace.prepare.started",
+                    state: "preparing",
+                    phase: "workspace_prepare",
+                    source: "workspace",
+                    message: "workspace/context preparation started",
+                    detail: json!({}),
+                },
             );
             let _serialize_guards =
                 acquire_serialize_locks_from_state(&state, lock_keys.clone()).await;
@@ -1552,14 +1566,16 @@ impl McpSubagentServer {
                         let _ = append_run_event(
                             &state_dir,
                             &task_handle_id,
-                            "provider.heartbeat",
-                            "running",
-                            heartbeat_phase,
-                            "runtime",
-                            "still alive",
-                            json!({
-                                "elapsed_ms": elapsed_ms,
-                            }),
+                            RuntimeEventInput {
+                                event: "provider.heartbeat",
+                                state: "running",
+                                phase: heartbeat_phase,
+                                source: "runtime",
+                                message: "still alive",
+                                detail: json!({
+                                    "elapsed_ms": elapsed_ms,
+                                }),
+                            },
                         );
                         if !first_output_warned
                             && !first_output_seen
@@ -1569,15 +1585,17 @@ impl McpSubagentServer {
                             let _ = append_run_event(
                                 &state_dir,
                                 &task_handle_id,
-                                "provider.first_output.warning",
-                                "running",
-                                "provider_boot",
-                                "runtime",
-                                "provider has not produced output yet",
-                                json!({
-                                    "elapsed_ms": elapsed_ms,
-                                    "warn_after_secs": FIRST_OUTPUT_WARN_AFTER_SECS,
-                                }),
+                                RuntimeEventInput {
+                                    event: "provider.first_output.warning",
+                                    state: "running",
+                                    phase: "provider_boot",
+                                    source: "runtime",
+                                    message: "provider has not produced output yet",
+                                    detail: json!({
+                                        "elapsed_ms": elapsed_ms,
+                                        "warn_after_secs": FIRST_OUTPUT_WARN_AFTER_SECS,
+                                    }),
+                                },
                             );
                         }
                     }
@@ -1618,45 +1636,51 @@ impl McpSubagentServer {
                             let _ = append_run_event(
                                 &state_dir,
                                 &task_handle_id,
-                                "provider.stdout.delta",
-                                "running",
-                                "running",
-                                "provider",
-                                "provider stdout received",
-                                json!({
-                                    "bytes": dispatch_result.stdout.len(),
-                                    "lines": dispatch_result.stdout.lines().count(),
-                                }),
+                                RuntimeEventInput {
+                                    event: "provider.stdout.delta",
+                                    state: "running",
+                                    phase: "running",
+                                    source: "provider",
+                                    message: "provider stdout received",
+                                    detail: json!({
+                                        "bytes": dispatch_result.stdout.len(),
+                                        "lines": dispatch_result.stdout.lines().count(),
+                                    }),
+                                },
                             );
                         }
                         if !dispatch_result.stderr.trim().is_empty() && !has_stderr_delta {
                             let _ = append_run_event(
                                 &state_dir,
                                 &task_handle_id,
-                                "provider.stderr.delta",
-                                "running",
-                                "running",
-                                "provider",
-                                "provider stderr received",
-                                json!({
-                                    "bytes": dispatch_result.stderr.len(),
-                                    "lines": dispatch_result.stderr.lines().count(),
-                                }),
+                                RuntimeEventInput {
+                                    event: "provider.stderr.delta",
+                                    state: "running",
+                                    phase: "running",
+                                    source: "provider",
+                                    message: "provider stderr received",
+                                    detail: json!({
+                                        "bytes": dispatch_result.stderr.len(),
+                                        "lines": dispatch_result.stderr.lines().count(),
+                                    }),
+                                },
                             );
                         }
                         if !has_first_output {
                             let _ = append_run_event(
                                 &state_dir,
                                 &task_handle_id,
-                                "provider.first_output",
-                                "running",
-                                "running",
-                                "provider",
-                                "provider produced output",
-                                json!({
-                                    "stdout_bytes": dispatch_result.stdout.len(),
-                                    "stderr_bytes": dispatch_result.stderr.len(),
-                                }),
+                                RuntimeEventInput {
+                                    event: "provider.first_output",
+                                    state: "running",
+                                    phase: "running",
+                                    source: "provider",
+                                    message: "provider produced output",
+                                    detail: json!({
+                                        "stdout_bytes": dispatch_result.stdout.len(),
+                                        "stderr_bytes": dispatch_result.stderr.len(),
+                                    }),
+                                },
                             );
                         }
                     }
@@ -1666,14 +1690,16 @@ impl McpSubagentServer {
                         let _ = append_run_event(
                             &state_dir,
                             &task_handle_id,
-                            signal.event,
-                            "running",
-                            signal.phase,
-                            "provider",
-                            signal.message,
-                            json!({
-                                "reason": signal.reason,
-                            }),
+                            RuntimeEventInput {
+                                event: signal.event,
+                                state: "running",
+                                phase: signal.phase,
+                                source: "provider",
+                                message: signal.message,
+                                detail: json!({
+                                    "reason": signal.reason,
+                                }),
+                            },
                         );
                     }
                     let (artifact_index, artifacts) = build_runtime_artifacts(
@@ -1734,15 +1760,17 @@ impl McpSubagentServer {
                     let _ = append_run_event(
                         &state_dir,
                         &task_handle_id,
-                        final_event,
-                        &final_status,
-                        "completed",
-                        "runtime",
-                        "run finished",
-                        json!({
-                            "status": final_status,
-                            "verification_status": format!("{}", record.summary.as_ref().map(|v| v.summary.verification_status.clone()).unwrap_or(crate::runtime::summary::VerificationStatus::NotRun)),
-                        }),
+                        RuntimeEventInput {
+                            event: final_event,
+                            state: final_status.as_str(),
+                            phase: "completed",
+                            source: "runtime",
+                            message: "run finished",
+                            detail: json!({
+                                "status": final_status.clone(),
+                                "verification_status": format!("{}", record.summary.as_ref().map(|v| v.summary.verification_status.clone()).unwrap_or(crate::runtime::summary::VerificationStatus::NotRun)),
+                            }),
+                        },
                     );
                     drop(workspace_cleanup);
                 }
@@ -1752,14 +1780,16 @@ impl McpSubagentServer {
                         let _ = append_run_event(
                             &state_dir,
                             &task_handle_id,
-                            signal.event,
-                            "running",
-                            signal.phase,
-                            "provider",
-                            signal.message,
-                            json!({
-                                "reason": signal.reason,
-                            }),
+                            RuntimeEventInput {
+                                event: signal.event,
+                                state: "running",
+                                phase: signal.phase,
+                                source: "provider",
+                                message: signal.message,
+                                detail: json!({
+                                    "reason": signal.reason,
+                                }),
+                            },
                         );
                     }
                     let summary = failed_summary(err.message.clone().into_owned());
@@ -1781,14 +1811,16 @@ impl McpSubagentServer {
                     let _ = append_run_event(
                         &state_dir,
                         &task_handle_id,
-                        "run.failed",
-                        "failed",
-                        "execution",
-                        "runtime",
-                        "run failed",
-                        json!({
-                            "error": record.error_message.clone(),
-                        }),
+                        RuntimeEventInput {
+                            event: "run.failed",
+                            state: "failed",
+                            phase: "execution",
+                            source: "runtime",
+                            message: "run failed",
+                            detail: json!({
+                                "error": record.error_message.clone(),
+                            }),
+                        },
                     );
                 }
             }
@@ -1885,12 +1917,14 @@ impl McpSubagentServer {
             append_run_event(
                 self.state_dir(),
                 &input.handle_id,
-                "run.cancelled",
-                "cancelled",
-                "completed",
-                "runtime",
-                "run cancelled by user request",
-                json!({}),
+                RuntimeEventInput {
+                    event: "run.cancelled",
+                    state: "cancelled",
+                    phase: "completed",
+                    source: "runtime",
+                    message: "run cancelled by user request",
+                    detail: json!({}),
+                },
             )?;
             persist_run_record(self.state_dir(), &input.handle_id, record)?;
         }

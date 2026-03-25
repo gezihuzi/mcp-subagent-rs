@@ -29,6 +29,14 @@ pub struct GeminiRunner {
     executable: PathBuf,
 }
 
+struct GeminiExecuteOptions<'a> {
+    prompt: &'a str,
+    approval_mode: &'a str,
+    timeout: Duration,
+    discovery_policy: &'a NativeDiscoveryPolicy,
+    observer: Option<&'a mut dyn RunnerOutputObserver>,
+}
+
 impl Default for GeminiRunner {
     fn default() -> Self {
         Self {
@@ -59,11 +67,13 @@ impl GeminiRunner {
                 .execute_once(
                     spec,
                     request,
-                    &prompt,
-                    approval_mode,
-                    timeout,
-                    &discovery_policy,
-                    Some(&mut *observer_ref),
+                    GeminiExecuteOptions {
+                        prompt: &prompt,
+                        approval_mode,
+                        timeout,
+                        discovery_policy: &discovery_policy,
+                        observer: Some(&mut *observer_ref),
+                    },
                 )
                 .await?;
             if matches!(discovery_policy, NativeDiscoveryPolicy::Isolated)
@@ -73,11 +83,13 @@ impl GeminiRunner {
                     .execute_once(
                         spec,
                         request,
-                        &prompt,
-                        approval_mode,
-                        timeout,
-                        &NativeDiscoveryPolicy::Minimal,
-                        Some(&mut *observer_ref),
+                        GeminiExecuteOptions {
+                            prompt: &prompt,
+                            approval_mode,
+                            timeout,
+                            discovery_policy: &NativeDiscoveryPolicy::Minimal,
+                            observer: Some(&mut *observer_ref),
+                        },
                     )
                     .await?;
                 retried.stderr = merge_fallback_stderr(&execution.stderr, &retried.stderr);
@@ -90,11 +102,13 @@ impl GeminiRunner {
             .execute_once(
                 spec,
                 request,
-                &prompt,
-                approval_mode,
-                timeout,
-                &discovery_policy,
-                None,
+                GeminiExecuteOptions {
+                    prompt: &prompt,
+                    approval_mode,
+                    timeout,
+                    discovery_policy: &discovery_policy,
+                    observer: None,
+                },
             )
             .await?;
 
@@ -105,11 +119,13 @@ impl GeminiRunner {
                 .execute_once(
                     spec,
                     request,
-                    &prompt,
-                    approval_mode,
-                    timeout,
-                    &NativeDiscoveryPolicy::Minimal,
-                    None,
+                    GeminiExecuteOptions {
+                        prompt: &prompt,
+                        approval_mode,
+                        timeout,
+                        discovery_policy: &NativeDiscoveryPolicy::Minimal,
+                        observer: None,
+                    },
                 )
                 .await?;
             retried.stderr = merge_fallback_stderr(&execution.stderr, &retried.stderr);
@@ -154,26 +170,21 @@ impl GeminiRunner {
             .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn execute_once(
         &self,
         spec: &AgentSpec,
         request: &RunRequest,
-        prompt: &str,
-        approval_mode: &str,
-        timeout: Duration,
-        discovery_policy: &NativeDiscoveryPolicy,
-        observer: Option<&mut dyn RunnerOutputObserver>,
+        options: GeminiExecuteOptions<'_>,
     ) -> Result<RunnerExecution> {
-        let launch = prepare_discovery_launch(discovery_policy, &request.working_dir)?;
+        let launch = prepare_discovery_launch(options.discovery_policy, &request.working_dir)?;
         let mut command = tokio::process::Command::new(&self.executable);
         command
             .arg("--prompt")
-            .arg(prompt)
+            .arg(options.prompt)
             .arg("--output-format")
             .arg("text")
             .arg("--approval-mode")
-            .arg(approval_mode)
+            .arg(options.approval_mode)
             .arg("--include-directories")
             .arg(&launch.include_dir)
             .current_dir(&launch.current_dir)
@@ -189,11 +200,11 @@ impl GeminiRunner {
             command.env(key, value);
         }
 
-        let (status, stdout, stderr, timed_out) = match observer {
+        let (status, stdout, stderr, timed_out) = match options.observer {
             Some(output_observer) => {
                 let mut child = command.spawn().map_err(McpSubagentError::Io)?;
                 let observed =
-                    collect_streaming_output(&mut child, timeout, output_observer).await?;
+                    collect_streaming_output(&mut child, options.timeout, output_observer).await?;
                 (
                     observed.status,
                     observed.stdout,
@@ -201,7 +212,7 @@ impl GeminiRunner {
                     observed.timed_out,
                 )
             }
-            None => match tokio::time::timeout(timeout, command.output()).await {
+            None => match tokio::time::timeout(options.timeout, command.output()).await {
                 Ok(waited) => {
                     let output = waited.map_err(McpSubagentError::Io)?;
                     (
@@ -218,7 +229,7 @@ impl GeminiRunner {
                         stdout: String::new(),
                         stderr: format!(
                             "gemini execution exceeded timeout of {}s",
-                            timeout.as_secs()
+                            options.timeout.as_secs()
                         ),
                     });
                 }
@@ -233,7 +244,7 @@ impl GeminiRunner {
                 stderr: if stderr.is_empty() {
                     format!(
                         "gemini execution exceeded timeout of {}s",
-                        timeout.as_secs()
+                        options.timeout.as_secs()
                     )
                 } else {
                     stderr

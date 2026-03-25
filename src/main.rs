@@ -572,14 +572,16 @@ async fn main() -> ExitCode {
             read_logs(
                 cfg,
                 handle_id,
-                stdout,
-                stderr,
-                phase,
-                follow,
-                interval_ms,
-                timeout_secs,
-                phase_timeout_secs,
-                json,
+                ReadLogsOptions {
+                    stdout_only: stdout,
+                    stderr_only: stderr,
+                    phase,
+                    follow,
+                    interval_ms,
+                    timeout_secs,
+                    phase_timeout_secs,
+                    json,
+                },
             )
             .await
         }
@@ -631,15 +633,17 @@ async fn main() -> ExitCode {
             info!("starting command: events");
             read_events(
                 cfg,
-                handle_id,
-                all,
-                event,
-                phase,
-                follow,
-                interval_ms,
-                timeout_secs,
-                phase_timeout_secs,
-                json,
+                ReadEventsOptions {
+                    handle_id,
+                    all,
+                    event,
+                    phase,
+                    follow,
+                    interval_ms,
+                    timeout_secs,
+                    phase_timeout_secs,
+                    json,
+                },
             )
             .await
         }
@@ -743,16 +747,18 @@ async fn main() -> ExitCode {
             info!("starting command: run");
             run_agent(
                 cfg,
-                agent,
-                task,
-                task_brief,
-                parent_summary,
-                stage,
-                plan_ref,
-                selected_files,
-                selected_files_inline,
-                working_dir,
-                json,
+                AgentRunCommand {
+                    agent,
+                    task,
+                    task_brief,
+                    parent_summary,
+                    stage,
+                    plan_ref,
+                    selected_files,
+                    selected_files_inline,
+                    working_dir,
+                    json,
+                },
             )
             .await
         }
@@ -784,16 +790,18 @@ async fn main() -> ExitCode {
             info!("starting command: spawn");
             spawn_agent(
                 cfg,
-                agent,
-                task,
-                task_brief,
-                parent_summary,
-                stage,
-                plan_ref,
-                selected_files,
-                selected_files_inline,
-                working_dir,
-                json,
+                AgentRunCommand {
+                    agent,
+                    task,
+                    task_brief,
+                    parent_summary,
+                    stage,
+                    plan_ref,
+                    selected_files,
+                    selected_files_inline,
+                    working_dir,
+                    json,
+                },
             )
             .await
         }
@@ -825,16 +833,18 @@ async fn main() -> ExitCode {
             info!("starting command: submit");
             spawn_agent(
                 cfg,
-                agent,
-                task,
-                task_brief,
-                parent_summary,
-                stage,
-                plan_ref,
-                selected_files,
-                selected_files_inline,
-                working_dir,
-                json,
+                AgentRunCommand {
+                    agent,
+                    task,
+                    task_brief,
+                    parent_summary,
+                    stage,
+                    plan_ref,
+                    selected_files,
+                    selected_files_inline,
+                    working_dir,
+                    json,
+                },
             )
             .await
         }
@@ -2479,10 +2489,7 @@ fn print_event_follow_line(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn read_logs(
-    cfg: RuntimeConfig,
-    handle_id: String,
+struct ReadLogsOptions {
     stdout_only: bool,
     stderr_only: bool,
     phase: Option<String>,
@@ -2491,7 +2498,23 @@ async fn read_logs(
     timeout_secs: Option<u64>,
     phase_timeout_secs: Option<u64>,
     json: bool,
+}
+
+async fn read_logs(
+    cfg: RuntimeConfig,
+    handle_id: String,
+    options: ReadLogsOptions,
 ) -> ExitCode {
+    let ReadLogsOptions {
+        stdout_only,
+        stderr_only,
+        phase,
+        follow,
+        interval_ms,
+        timeout_secs,
+        phase_timeout_secs,
+        json,
+    } = options;
     let stdout_enabled = !stderr_only;
     let stderr_enabled = !stdout_only;
     if follow {
@@ -2701,9 +2724,7 @@ fn collect_run_event_snapshots(
     Ok(snapshots)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn read_events_all(
-    cfg: RuntimeConfig,
+struct ReadEventsAllOptions {
     event: Option<String>,
     phase: Option<String>,
     follow: bool,
@@ -2711,7 +2732,21 @@ async fn read_events_all(
     timeout_secs: Option<u64>,
     phase_timeout_secs: Option<u64>,
     json: bool,
+}
+
+async fn read_events_all(
+    cfg: RuntimeConfig,
+    options: ReadEventsAllOptions,
 ) -> ExitCode {
+    let ReadEventsAllOptions {
+        event,
+        phase,
+        follow,
+        interval_ms,
+        timeout_secs,
+        phase_timeout_secs,
+        json,
+    } = options;
     if !follow {
         let snapshots =
             match collect_run_event_snapshots(&cfg.state_dir, event.as_deref(), phase.as_deref()) {
@@ -2941,9 +2976,7 @@ fn read_timeline(
     ExitCode::SUCCESS
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn read_events(
-    cfg: RuntimeConfig,
+struct ReadEventsOptions {
     handle_id: Option<String>,
     all: bool,
     event: Option<String>,
@@ -2953,7 +2986,23 @@ async fn read_events(
     timeout_secs: Option<u64>,
     phase_timeout_secs: Option<u64>,
     json: bool,
+}
+
+async fn read_events(
+    cfg: RuntimeConfig,
+    options: ReadEventsOptions,
 ) -> ExitCode {
+    let ReadEventsOptions {
+        handle_id,
+        all,
+        event,
+        phase,
+        follow,
+        interval_ms,
+        timeout_secs,
+        phase_timeout_secs,
+        json,
+    } = options;
     if handle_id.is_none() && !all {
         eprintln!("events failed: missing handle_id (or pass --all)");
         return ExitCode::from(2);
@@ -2965,13 +3014,15 @@ async fn read_events(
     let Some(handle_id) = handle_id else {
         return read_events_all(
             cfg,
-            event,
-            phase,
-            follow,
-            interval_ms,
-            timeout_secs,
-            phase_timeout_secs,
-            json,
+            ReadEventsAllOptions {
+                event,
+                phase,
+                follow,
+                interval_ms,
+                timeout_secs,
+                phase_timeout_secs,
+                json,
+            },
         )
         .await;
     };
@@ -3815,9 +3866,7 @@ async fn list_agents(cfg: RuntimeConfig, json: bool) -> ExitCode {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_agent(
-    cfg: RuntimeConfig,
+struct AgentRunCommand {
     agent: String,
     task: String,
     task_brief: Option<String>,
@@ -3828,7 +3877,24 @@ async fn run_agent(
     selected_files_inline: Vec<PathBuf>,
     working_dir: Option<PathBuf>,
     json: bool,
+}
+
+async fn run_agent(
+    cfg: RuntimeConfig,
+    options: AgentRunCommand,
 ) -> ExitCode {
+    let AgentRunCommand {
+        agent,
+        task,
+        task_brief,
+        parent_summary,
+        stage,
+        plan_ref,
+        selected_files,
+        selected_files_inline,
+        working_dir,
+        json,
+    } = options;
     let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
     let selected_files = match build_selected_file_inputs(
         selected_files,
@@ -3885,20 +3951,22 @@ async fn run_agent(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn spawn_agent(
     cfg: RuntimeConfig,
-    agent: String,
-    task: String,
-    task_brief: Option<String>,
-    parent_summary: Option<String>,
-    stage: Option<String>,
-    plan_ref: Option<String>,
-    selected_files: Vec<PathBuf>,
-    selected_files_inline: Vec<PathBuf>,
-    working_dir: Option<PathBuf>,
-    json: bool,
+    options: AgentRunCommand,
 ) -> ExitCode {
+    let AgentRunCommand {
+        agent,
+        task,
+        task_brief,
+        parent_summary,
+        stage,
+        plan_ref,
+        selected_files,
+        selected_files_inline,
+        working_dir,
+        json,
+    } = options;
     let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
     let selected_files = match build_selected_file_inputs(
         selected_files,

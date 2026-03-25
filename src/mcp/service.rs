@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     mcp::{
-        persistence::append_run_event,
+        persistence::{append_run_event, RuntimeEventInput},
         state::{build_memory_resolution_snapshot, MemoryResolutionRecord, WorkspaceRecord},
     },
     runtime::{
@@ -47,12 +47,14 @@ pub(crate) async fn run_dispatch(
     let _ = append_run_event(
         state_dir,
         handle_id,
-        "workspace.prepare.completed",
-        "preparing",
-        "workspace_prepare",
-        "workspace",
-        "workspace preparation completed",
-        json!({}),
+        RuntimeEventInput {
+            event: "workspace.prepare.completed",
+            state: "preparing",
+            phase: "workspace_prepare",
+            source: "workspace",
+            message: "workspace preparation completed",
+            detail: json!({}),
+        },
     );
     let effective_spec = apply_workspace_runtime_overrides(spec, &mut prepared_workspace);
     let workspace_cleanup = WorkspaceCleanupGuard::for_workspace(&prepared_workspace);
@@ -86,24 +88,28 @@ pub(crate) async fn run_dispatch(
                     let _ = append_run_event(
                         state_dir,
                         handle_id,
-                        "context.compile.started",
-                        "preparing",
-                        "context_compile",
-                        "context",
-                        "context compile started",
-                        json!({}),
+                        RuntimeEventInput {
+                            event: "context.compile.started",
+                            state: "preparing",
+                            phase: "context_compile",
+                            source: "context",
+                            message: "context compile started",
+                            detail: json!({}),
+                        },
                     );
                 }
                 if matches!(current, crate::runtime::dispatcher::RunStatus::Launching) {
                     let _ = append_run_event(
                         state_dir,
                         handle_id,
-                        "provider.boot.started",
-                        "running",
-                        "provider_boot",
-                        "provider",
-                        "provider boot started",
-                        json!({}),
+                        RuntimeEventInput {
+                            event: "provider.boot.started",
+                            state: "running",
+                            phase: "provider_boot",
+                            source: "provider",
+                            message: "provider boot started",
+                            detail: json!({}),
+                        },
                     );
                 }
                 if matches!(
@@ -113,12 +119,14 @@ pub(crate) async fn run_dispatch(
                     let _ = append_run_event(
                         state_dir,
                         handle_id,
-                        "parse.started",
-                        "running",
-                        "parse",
-                        "parser",
-                        "summary parse started",
-                        json!({}),
+                        RuntimeEventInput {
+                            event: "parse.started",
+                            state: "running",
+                            phase: "parse",
+                            source: "parser",
+                            message: "summary parse started",
+                            detail: json!({}),
+                        },
                     );
                 }
                 if prev.as_ref().is_some_and(|status| {
@@ -133,12 +141,14 @@ pub(crate) async fn run_dispatch(
                     let _ = append_run_event(
                         state_dir,
                         handle_id,
-                        "context.compile.completed",
-                        "preparing",
-                        "context_compile",
-                        "context",
-                        "context compile completed",
-                        json!({}),
+                        RuntimeEventInput {
+                            event: "context.compile.completed",
+                            state: "preparing",
+                            phase: "context_compile",
+                            source: "context",
+                            message: "context compile completed",
+                            detail: json!({}),
+                        },
                     );
                 }
                 if prev.as_ref().is_some_and(|status| {
@@ -153,12 +163,14 @@ pub(crate) async fn run_dispatch(
                     let _ = append_run_event(
                         state_dir,
                         handle_id,
-                        "parse.completed",
-                        "running",
-                        "parse",
-                        "parser",
-                        "summary parse completed",
-                        json!({}),
+                        RuntimeEventInput {
+                            event: "parse.completed",
+                            state: "running",
+                            phase: "parse",
+                            source: "parser",
+                            message: "summary parse completed",
+                            detail: json!({}),
+                        },
                     );
                 }
             },
@@ -203,15 +215,17 @@ impl RunnerOutputObserver for RunDeltaEventObserver<'_> {
             let _ = append_run_event(
                 self.state_dir,
                 self.handle_id,
-                "provider.first_output",
-                "running",
-                "running",
-                "provider",
-                "provider produced output",
-                json!({
-                    "stdout_bytes": if matches!(stream, RunnerOutputStream::Stdout) { chunk.len() } else { 0 },
-                    "stderr_bytes": if matches!(stream, RunnerOutputStream::Stderr) { chunk.len() } else { 0 },
-                }),
+                RuntimeEventInput {
+                    event: "provider.first_output",
+                    state: "running",
+                    phase: "running",
+                    source: "provider",
+                    message: "provider produced output",
+                    detail: json!({
+                        "stdout_bytes": if matches!(stream, RunnerOutputStream::Stdout) { chunk.len() } else { 0 },
+                        "stderr_bytes": if matches!(stream, RunnerOutputStream::Stderr) { chunk.len() } else { 0 },
+                    }),
+                },
             );
         }
         let (event, message) = match stream {
@@ -221,15 +235,17 @@ impl RunnerOutputObserver for RunDeltaEventObserver<'_> {
         let _ = append_run_event(
             self.state_dir,
             self.handle_id,
-            event,
-            "running",
-            "running",
-            "provider",
-            message,
-            json!({
-                "bytes": chunk.len(),
-                "lines": chunk.lines().count(),
-            }),
+            RuntimeEventInput {
+                event,
+                state: "running",
+                phase: "running",
+                source: "provider",
+                message,
+                detail: json!({
+                    "bytes": chunk.len(),
+                    "lines": chunk.lines().count(),
+                }),
+            },
         );
     }
 }
