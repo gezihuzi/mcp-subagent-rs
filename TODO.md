@@ -1791,3 +1791,29 @@
   - 新增 Cleanup 使用示例与三种模式说明。
 - 已通过回归：
   - `cargo test -q`（`144 + 25 + 3` tests passed）。
+
+## T-071 V0.8-P0-SummaryParseRobustnessForProviderOutput (Completed 2026-03-25)
+
+任务：修复 provider 输出包含提示词占位 sentinel 或仅返回裸 JSON 时的 summary 解析失败，避免任务实际成功却被状态机误判为 failed。  
+验收标准：
+
+1. 当 stdout/stderr 出现多个 sentinel 区块时，解析器可跳过占位块并命中后续有效 JSON。
+2. 当 provider 未返回 sentinel、但返回合法 `SummaryEnvelope` 或 `StructuredSummary` JSON 时，可正确解析为 `Validated`。
+3. 保持现有语义：完全无 JSON 仍为 `Degraded`，仅有非法 JSON 时为 `Invalid`。
+4. 新增单测覆盖占位 sentinel + 有效 JSON、双 sentinel 首块占位、无 sentinel 裸 JSON 三条路径。
+5. 回归通过：`cargo test -q`。
+完成记录：
+
+- 已增强 summary 解析路径：
+  - `src/runtime/summary.rs` 从“单一 sentinel 提取”升级为“多候选扫描 + 逐个尝试解析”；
+  - 新增多 sentinel 区块遍历；
+  - 新增原始输出 JSON 对象提取（支持无 sentinel 裸 JSON 输出）。
+- 已保持失败语义兼容：
+  - 找到候选但全部解析失败 -> `Invalid`；
+  - 完全找不到候选 JSON -> `Degraded`。
+- 已新增测试：
+  - `parses_valid_json_without_sentinels`
+  - `parses_late_valid_json_after_placeholder_sentinel_block`
+  - `parses_second_sentinel_block_when_first_is_placeholder`
+- 已通过回归：
+  - `cargo test -q`（`147 + 25 + 3` tests passed）。
