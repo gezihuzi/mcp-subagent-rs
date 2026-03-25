@@ -108,8 +108,8 @@ pub fn parse_summary_envelope(raw_stdout: &str, raw_stderr: &str) -> SummaryEnve
     )
 }
 
-fn parse_from_raw<'a>(
-    raw: &'a str,
+fn parse_from_raw(
+    raw: &str,
     source: &str,
     invalid_candidate: &mut Option<(String, String)>,
 ) -> Option<SummaryEnvelope> {
