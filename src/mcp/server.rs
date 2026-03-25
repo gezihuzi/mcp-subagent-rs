@@ -1063,7 +1063,7 @@ instructions = "write"
 
 [runtime]
 working_dir_policy = "temp_copy"
-file_conflict_policy = "Serialize"
+file_conflict_policy = "serialize"
 sandbox = "workspace_write"
 "#;
         fs::write(agents_dir.join("writer.agent.toml"), agent).expect("write agent");
