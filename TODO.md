@@ -2138,3 +2138,33 @@
   - `README.md` 命令面新增 `timeline`。
 - 已通过回归：
   - `cargo test -q`（`161 + 39 + 3` tests passed）。
+
+## T-083 V0.9-P2-ProviderUsagePrecisionParsing (Completed 2026-03-25)
+
+任务：增强 provider usage 解析精度，优先识别更多真实 usage 形态，减少 `estimated` 覆盖范围。  
+验收标准：
+
+1. 扩展 native usage 解析规则，覆盖 snake_case/camelCase 的常见 usage key（例如 `input_tokens`、`promptTokenCount`）。
+2. 扩展 token 关键词匹配，覆盖 `tokens_used` 及 `tokens used` 的跨行/同行形态。
+3. 保持 native-first 结果面不变，无法识别时继续回退估算。
+4. 新增单测覆盖至少两类新增格式（JSON key 与 camelCase key）及无效文本场景。
+5. `cargo test -q` 通过。
+完成记录：
+
+- 已扩展 usage key 解析白名单：
+  - `src/runtime/usage.rs` 新增 snake_case / 空格分隔 / camelCase 常见 key；
+  - 输入侧覆盖 `input_tokens/prompt_tokens/promptTokenCount` 等；
+  - 输出侧覆盖 `output_tokens/completion_tokens/candidatesTokenCount` 等；
+  - 总量侧覆盖 `total_tokens/totalTokenCount`，Codex 额外覆盖 `tokens used/tokens_used`。
+- 已增强值提取策略：
+  - 采用 key 边界判断 + key 后缀近邻解析，避免从无关上下文误吸数字；
+  - 显式忽略 `null` 值并保留 fallback 估算路径；
+  - 数字解析支持 `40,005` 与 `40_005` 形态。
+- 已补测试覆盖新增格式：
+  - `parses_usage_from_json_keys`
+  - `parses_usage_from_camel_case_token_counts`
+  - `does_not_treat_null_as_numeric_usage`
+  - 保留并通过原有 `tokens used` 与空文本场景测试。
+- 已通过回归：
+  - `cargo test -q runtime::usage::tests`
+  - `cargo fmt && cargo test -q`（`164 + 39 + 3` tests passed）。

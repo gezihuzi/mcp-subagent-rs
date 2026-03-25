@@ -20,12 +20,12 @@
 回滚策略：新增 MCP tools 仅扩展协议面，不破坏既有 `list_agents/run_agent/spawn_agent/get_agent_status/cancel_agent/read_agent_artifact`。
 风险与控制：watch 轮询可能带来频繁 IO；通过最小轮询间隔（50ms）与可配置 timeout 控制开销。
 
-### Batch V0.9-P2 - Run Timeline/Event Stream（已完成 T-082）
+### Batch V0.9-P2 - Run Timeline + Usage Precision（已完成 T-082/T-083）
 
-目标：补齐 run 事件流可见性，提供一条无需手动翻 state 目录即可查看 `events.ndjson` 的命令路径。
-依赖顺序：`T-082`（CLI timeline 命令 + 事件过滤 + JSON 输出，Completed 2026-03-25）。
-回滚策略：仅新增只读命令面，不改变已有 run 状态和持久化结构。
-风险与控制：事件文件可能缺失或存在损坏行；通过健壮解析与明确错误信息避免误判成功。
+目标：在已完成 `timeline` 可视化基础上，继续收口 provider usage 精度，降低 `estimated` 占比并保留 native-first 语义。
+依赖顺序：`T-082 -> T-083`（Completed 2026-03-25：timeline 命令与 provider usage 精细解析均已落地）。
+回滚策略：仅增强 usage 解析器，不改 CLI/MCP 对外字段；异常时自然回退估算路径。
+风险与控制：宽松文本匹配可能误提取数字；通过 key 白名单、字段边界和单测样例控制误报。
 
 ## Execution Strategy (v0.8 Current)
 
