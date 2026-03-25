@@ -7,6 +7,7 @@ use std::{
 use clap::{Parser, Subcommand, ValueEnum};
 use mcp_subagent::{
     config::{resolve_runtime_config, ConfigOverrides, RuntimeConfig},
+    connect::{build_connect_snippet, resolve_connect_snippet_paths, ConnectHost},
     doctor::{build_doctor_report, render_doctor_report},
     init::{init_workspace, InitPreset, InitReport},
     logging::{init_logging, LoggingGuard},
@@ -66,6 +67,10 @@ enum Commands {
         force: bool,
         #[arg(long)]
         json: bool,
+    },
+    ConnectSnippet {
+        #[arg(long, value_enum)]
+        host: ConnectHostArg,
     },
     ListAgents {
         #[arg(long)]
@@ -151,6 +156,13 @@ enum InitPresetArg {
     MinimalSingleProvider,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ConnectHostArg {
+    Claude,
+    Codex,
+    Gemini,
+}
+
 impl From<InitPresetArg> for InitPreset {
     fn from(value: InitPresetArg) -> Self {
         match value {
@@ -159,6 +171,16 @@ impl From<InitPresetArg> for InitPreset {
             InitPresetArg::GeminiFrontendTeam => InitPreset::GeminiFrontendTeam,
             InitPresetArg::LocalOllamaFallback => InitPreset::LocalOllamaFallback,
             InitPresetArg::MinimalSingleProvider => InitPreset::MinimalSingleProvider,
+        }
+    }
+}
+
+impl From<ConnectHostArg> for ConnectHost {
+    fn from(value: ConnectHostArg) -> Self {
+        match value {
+            ConnectHostArg::Claude => ConnectHost::Claude,
+            ConnectHostArg::Codex => ConnectHost::Codex,
+            ConnectHostArg::Gemini => ConnectHost::Gemini,
         }
     }
 }
@@ -231,6 +253,23 @@ async fn main() -> ExitCode {
         } => {
             info!("starting command: init");
             init_command(preset, root_dir, force, json)
+        }
+        Commands::ConnectSnippet { host } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: connect-snippet");
+            connect_snippet_command(cfg, host)
         }
         Commands::ListAgents { json } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -516,6 +555,33 @@ fn init_command(
             ExitCode::from(1)
         }
     }
+}
+
+fn connect_snippet_command(cfg: RuntimeConfig, host: ConnectHostArg) -> ExitCode {
+    let Some(first_agents_dir) = cfg.agents_dirs.first().cloned() else {
+        eprintln!("connect-snippet failed: no agents directory configured");
+        return ExitCode::from(1);
+    };
+
+    let cwd = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("connect-snippet failed: unable to resolve current directory: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let binary = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("connect-snippet failed: unable to resolve current executable: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let paths = resolve_connect_snippet_paths(&cwd, binary, first_agents_dir, cfg.state_dir);
+    let snippet = build_connect_snippet(host.into(), &paths);
+    println!("{snippet}");
+    ExitCode::SUCCESS
 }
 
 async fn list_agents(cfg: RuntimeConfig, json: bool) -> ExitCode {
@@ -889,7 +955,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        build_selected_file_inputs, ArtifactKindArg, Cli, Commands, InitPresetArg,
+        build_selected_file_inputs, ArtifactKindArg, Cli, Commands, ConnectHostArg, InitPresetArg,
         RunAgentSelectedFileInput,
     };
 
@@ -997,6 +1063,17 @@ mod tests {
         match cli.command {
             Commands::Init { preset, .. } => {
                 assert!(matches!(preset, InitPresetArg::MinimalSingleProvider));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_connect_snippet_host() {
+        let cli = Cli::parse_from(["mcp-subagent", "connect-snippet", "--host", "claude"]);
+        match cli.command {
+            Commands::ConnectSnippet { host } => {
+                assert!(matches!(host, ConnectHostArg::Claude));
             }
             other => panic!("unexpected command: {other:?}"),
         }

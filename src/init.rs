@@ -6,7 +6,13 @@ use std::{
 
 use serde::Serialize;
 
-use crate::{error::Result, spec::registry::load_agent_specs_from_dirs};
+use crate::{
+    connect::{
+        build_connect_snippet, resolve_connect_snippet_paths, ConnectHost, ConnectSnippetPaths,
+    },
+    error::Result,
+    spec::registry::load_agent_specs_from_dirs,
+};
 
 const PRESET_CATALOG_VERSION: &str = "v0.7.0";
 
@@ -87,7 +93,15 @@ fn init_with_preset(root: &Path, preset: InitPreset, force: bool) -> Result<Init
 
     write(&plan_path, &plan_template())?;
     write(&config_path, &config_template())?;
-    write(&readme_path, &readme_template(preset))?;
+    let cwd = std::env::current_dir()?;
+    let binary = std::env::current_exe()?;
+    let connect_paths = resolve_connect_snippet_paths(
+        &cwd,
+        binary,
+        agents_dir.clone(),
+        root.join(".mcp-subagent/state"),
+    );
+    write(&readme_path, &readme_template(preset, &connect_paths))?;
     for (name, content) in &agent_templates {
         write(&agents_dir.join(name), content)?;
     }
@@ -220,7 +234,11 @@ state_dir = ".mcp-subagent/state"
     .to_string()
 }
 
-fn readme_template(preset: InitPreset) -> String {
+fn readme_template(preset: InitPreset, connect_paths: &ConnectSnippetPaths) -> String {
+    let claude_snippet = build_connect_snippet(ConnectHost::Claude, connect_paths);
+    let codex_snippet = build_connect_snippet(ConnectHost::Codex, connect_paths);
+    let gemini_snippet = build_connect_snippet(ConnectHost::Gemini, connect_paths);
+
     format!(
         r#"# README.mcp-subagent
 
@@ -253,35 +271,34 @@ mcp-subagent list-agents --agents-dir ./agents
 Claude Code:
 
 ```bash
-claude mcp add --transport stdio mcp-subagent -- \
-  <ABSOLUTE_PATH_TO_MCP_SUBAGENT> \
-  --agents-dir <ABSOLUTE_PATH_TO_REPO>/agents \
-  --state-dir <ABSOLUTE_PATH_TO_REPO>/.mcp-subagent/state \
-  mcp
+{}
 ```
 
 Codex CLI:
 
 ```bash
-codex mcp add mcp-subagent -- \
-  <ABSOLUTE_PATH_TO_MCP_SUBAGENT> \
-  --agents-dir <ABSOLUTE_PATH_TO_REPO>/agents \
-  --state-dir <ABSOLUTE_PATH_TO_REPO>/.mcp-subagent/state \
-  mcp
+{}
 ```
 
 Gemini CLI:
 
 ```bash
-gemini mcp add mcp-subagent \
-  <ABSOLUTE_PATH_TO_MCP_SUBAGENT> \
-  --agents-dir <ABSOLUTE_PATH_TO_REPO>/agents \
-  --state-dir <ABSOLUTE_PATH_TO_REPO>/.mcp-subagent/state \
-  mcp
+{}
+```
+
+Regenerate connect snippets at any time:
+
+```bash
+mcp-subagent connect-snippet --host claude
+mcp-subagent connect-snippet --host codex
+mcp-subagent connect-snippet --host gemini
 ```
 "#,
         preset.as_str(),
-        PRESET_CATALOG_VERSION
+        PRESET_CATALOG_VERSION,
+        claude_snippet,
+        codex_snippet,
+        gemini_snippet,
     )
 }
 
@@ -519,6 +536,8 @@ mod tests {
 
     use tempfile::tempdir;
 
+    use crate::connect::{build_connect_snippet, resolve_connect_snippet_paths, ConnectHost};
+
     use super::{init_workspace, InitPreset};
 
     #[test]
@@ -592,5 +611,30 @@ mod tests {
             .overwritten_files
             .iter()
             .any(|path| path.ends_with("agents/backend-coder.agent.toml")));
+    }
+
+    #[test]
+    fn init_readme_contains_executable_connect_snippets() {
+        let dir = tempdir().expect("tempdir");
+        init_workspace(dir.path(), InitPreset::ClaudeOpusSupervisor, false).expect("init succeeds");
+
+        let readme = fs::read_to_string(dir.path().join("README.mcp-subagent.md"))
+            .expect("read generated readme");
+        assert!(!readme.contains("<ABSOLUTE_PATH_TO_"));
+        assert!(readme.contains("claude mcp add --transport stdio mcp-subagent --"));
+        assert!(readme.contains("codex mcp add mcp-subagent --"));
+        assert!(readme.contains("gemini mcp add mcp-subagent"));
+
+        let cwd = std::env::current_dir().expect("cwd");
+        let binary = std::env::current_exe().expect("current exe");
+        let paths = resolve_connect_snippet_paths(
+            &cwd,
+            binary,
+            dir.path().join("agents"),
+            dir.path().join(".mcp-subagent/state"),
+        );
+        assert!(readme.contains(&build_connect_snippet(ConnectHost::Claude, &paths)));
+        assert!(readme.contains(&build_connect_snippet(ConnectHost::Codex, &paths)));
+        assert!(readme.contains(&build_connect_snippet(ConnectHost::Gemini, &paths)));
     }
 }

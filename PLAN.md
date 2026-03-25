@@ -2,7 +2,16 @@
 
 ## North Star
 
-按 `docs/mcp-subagent_tech_design_v0.6.md` 交付“本地可跑”的实现收口版：命令面完整、workflow 可执行、summary 合同强约束、workspace 生命周期闭环、provider 分层清晰。
+按 `docs/mcp-subagent_tech_design_v0.8.md` 交付首个“直接可用 beta”：首次接入路径可复制可运行、命令面与文档零漂移、默认场景稳定可验证。
+
+## Execution Strategy (v0.8 Current)
+
+### Batch V0.8-P0 - First Success Path（当前优先）
+
+目标：完成 `connect-snippet + init README` 收口，让用户首次接入 Claude/Codex/Gemini 不需要手动拼路径。
+依赖顺序：`T-059`。
+回滚策略：新增命令面与模板升级均保持向后兼容，不影响既有 `mcp/doctor/validate/run/spawn` 主链。
+风险与控制：路径绝对化与 shell 转义实现不当会导致复制失败；通过单测覆盖 host 模板、绝对路径和含空格路径转义。
 
 ## Execution Strategy (Module Batches)
 

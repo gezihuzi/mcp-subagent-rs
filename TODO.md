@@ -1481,3 +1481,36 @@
   - `cargo test -q`
   - `cargo run -- --agents-dir examples/agents validate`
   - `./scripts/smoke_v07_release.sh`
+
+## T-059 V0.8-P0-ConnectSnippetAndOnboarding (Completed 2026-03-25)
+
+任务：新增 `connect-snippet` 命令并升级 `init` 生成 README 为可直接复制的接入指引，收口首次成功路径。  
+验收标准：
+
+1. `mcp-subagent connect-snippet --host claude|codex|gemini` 均可执行并返回对应接入命令。
+2. 输出中的 `binary`、`agents_dir`、`state_dir` 均为绝对路径，不包含示意占位符。
+3. `init` 新生成 `README.mcp-subagent.md` 不再包含 `<ABSOLUTE_PATH_TO_...>`，并内置三类 host 的可执行命令。
+4. 覆盖测试：CLI 解析、snippet 生成（模板/绝对路径/转义）、init README 内容；`cargo test` 全量通过。
+5. 根 `README.md` 命令面与 CLI 对齐，包含 `connect-snippet`。
+完成记录：
+
+- 已同步规划文档到 v0.8 当前批次：
+  - `PLAN.md` 新增 `Batch V0.8-P0 - First Success Path`，当前阶段锁定 `T-059`。
+- 已新增连接片段模块：
+  - `src/connect.rs` 新增 `ConnectHost`、`ConnectSnippetPaths`、`resolve_connect_snippet_paths`、`build_connect_snippet`；
+  - 路径统一绝对化并做 shell 安全转义（含空格与单引号）。
+- 已新增命令面：
+  - `src/main.rs` 新增 `connect-snippet --host claude|codex|gemini`；
+  - 复用统一配置优先级并基于 `current_exe + cwd` 解析绝对路径；
+  - 已补 CLI 解析测试 `parses_connect_snippet_host`。
+- 已升级 init README 模板：
+  - `src/init.rs` 生成真实 Claude/Codex/Gemini 接入命令，移除占位符；
+  - 增加“如何重新生成 connect snippet”指引；
+  - 已补测试 `init_readme_contains_executable_connect_snippets`。
+- 已同步根文档命令面：
+  - `README.md` 已加入 `connect-snippet` 命令与使用示例。
+- 已通过验收回归：
+  - `cargo fmt`
+  - `cargo test -q`（`134 + 10 + 3` tests passed）
+  - `cargo run -- --help` 已显示 `connect-snippet`
+  - `cargo run -- connect-snippet --host claude` 输出绝对路径命令

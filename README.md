@@ -20,6 +20,7 @@ mcp-subagent mcp [AGENTS_DIR]
 mcp-subagent doctor [AGENTS_DIR] [--json]
 mcp-subagent validate [AGENTS_DIR]
 mcp-subagent init [--preset claude-opus-supervisor|codex-primary-builder|gemini-frontend-team|local-ollama-fallback|minimal-single-provider] [--root-dir ...] [--force] [--json]
+mcp-subagent connect-snippet --host claude|codex|gemini
 mcp-subagent list-agents [--json]
 mcp-subagent run <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
 mcp-subagent spawn <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
@@ -82,6 +83,12 @@ Initialize a local preset workspace:
 
 ```bash
 mcp-subagent init --preset claude-opus-supervisor
+```
+
+Generate a host integration snippet with resolved absolute paths:
+
+```bash
+mcp-subagent connect-snippet --host claude
 ```
 
 Other preset examples:
