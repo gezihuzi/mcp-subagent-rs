@@ -864,6 +864,12 @@ fn build_agent_stats_output(
         events,
         record.error_message.as_deref(),
     );
+    let advice = build_watch_advice(
+        &record.status,
+        phase.as_deref(),
+        block_reason.as_deref(),
+        false,
+    );
     let (wait_reasons, current_wait_reason) = collect_wait_reasons(events);
 
     GetAgentStatsOutput {
@@ -875,6 +881,7 @@ fn build_agent_stats_output(
         last_event_age_ms,
         stalled,
         block_reason,
+        advice,
         queue_ms,
         provider_probe_ms,
         workspace_prepare_ms,
@@ -1797,6 +1804,12 @@ impl McpSubagentServer {
             OffsetDateTime::now_utc(),
             record.error_message.as_deref(),
         );
+        let advice = build_watch_advice(
+            &record.status,
+            runtime.phase.as_deref(),
+            runtime.block_reason.as_deref(),
+            false,
+        );
         let structured_summary = record.summary.as_ref().map(map_summary_output);
 
         Ok(Json(AgentStatusOutput {
@@ -1809,6 +1822,7 @@ impl McpSubagentServer {
             last_event_age_ms: runtime.last_event_age_ms,
             stalled: Some(runtime.stalled),
             block_reason: runtime.block_reason,
+            advice,
             error_message: record.error_message,
             structured_summary,
             artifact_index: record.artifact_index,

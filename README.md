@@ -62,6 +62,7 @@ MCP tools:
 
 `watch_agent_events` supports optional `phase` and `phase_timeout_secs`, and returns `current_phase`, `current_phase_age_ms`, `phase_timeout_hit`, `block_reason`, `advice`.
 `watch_run` also supports optional `phase` and `phase_timeout_secs`, and returns `current_phase`, `current_phase_age_ms`, `phase_timeout_hit`, `block_reason`, `advice`.
+`get_agent_status` and `get_agent_stats` also return `block_reason` + `advice` so polling-only hosts can surface actionable guidance without watch streams.
 
 Global flags:
 

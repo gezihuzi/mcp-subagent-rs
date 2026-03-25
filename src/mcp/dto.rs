@@ -111,6 +111,8 @@ pub struct AgentStatusOutput {
     pub stalled: Option<bool>,
     #[serde(default)]
     pub block_reason: Option<String>,
+    #[serde(default)]
+    pub advice: Vec<String>,
     pub error_message: Option<String>,
     pub structured_summary: Option<SummaryOutput>,
     pub artifact_index: Vec<ArtifactOutput>,
@@ -326,6 +328,8 @@ pub struct GetAgentStatsOutput {
     pub stalled: bool,
     #[serde(default)]
     pub block_reason: Option<String>,
+    #[serde(default)]
+    pub advice: Vec<String>,
     #[serde(default)]
     pub queue_ms: Option<u64>,
     #[serde(default)]
