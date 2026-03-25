@@ -1740,3 +1740,26 @@
 - 已通过回归：
   - `cargo test -q`（`141 + 21 + 3` tests passed）
   - `./scripts/smoke_v08.sh`（使用 provider stub 避免本机外部 CLI probe 阻塞）通过。
+
+## T-069 V0.8-P0-CodexOutputSchemaStrictCompat (Completed 2026-03-25)
+
+任务：修复 Codex CLI `--output-schema` 在 OpenAI 严格响应格式下的兼容性，避免 `invalid_json_schema` 导致子代理失败。  
+验收标准：
+
+1. Codex runner 输出 schema 满足当前 strict 要求：对象 `properties` 中所有键都在 `required` 中。
+2. 失败日志摘要优先展示真正错误行（如 `ERROR:`/`invalid_json_schema`），不再只显示 banner。
+3. 新增单测覆盖 schema 规范化与 stderr 错误行提取逻辑。
+4. `cargo test` 通过。
+完成记录：
+
+- 已修复 Codex `--output-schema` strict 兼容：
+  - `src/runtime/runners/codex.rs` 新增 schema 规范化流程；
+  - 对象 schema 会自动将 `properties` 中全部字段写入 `required`，满足 strict 响应格式要求（含 `media_type`）。
+- 已优化错误摘要提取：
+  - 失败时优先提取 `ERROR:` / `invalid_json_schema` 行，避免只显示 banner 导致误判。
+- 已补充测试覆盖：
+  - `strict_schema_marks_all_properties_as_required`
+  - `schema_json_includes_media_type_in_required_list`
+  - `summarize_stderr_prefers_error_lines`
+- 已通过回归：
+  - `cargo test -q`（`144 + 21 + 3` tests passed）

@@ -6,6 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
@@ -52,8 +53,7 @@ impl CodexRunner {
             "mcp-subagent-summary-schema-{}.json",
             uuid::Uuid::now_v7()
         ));
-        let schema = schemars::schema_for!(crate::runtime::summary::SummaryEnvelope);
-        let schema_json = serde_json::to_string_pretty(&schema).map_err(McpSubagentError::Json)?;
+        let schema_json = build_codex_output_schema_json()?;
         fs::write(&schema_file, schema_json).map_err(McpSubagentError::Io)?;
         let timeout = Duration::from_secs(spec.runtime.timeout_secs.max(1));
         validate_approval_policy(spec)?;
@@ -130,15 +130,9 @@ impl CodexRunner {
         } else {
             let exit_code = output.status.code().unwrap_or(-1);
             let mut message = format!("codex exited with code {exit_code}");
-            if !stderr.trim().is_empty() {
-                let first_line = stderr
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or_default();
-                if !first_line.is_empty() {
-                    message.push_str(": ");
-                    message.push_str(first_line.trim());
-                }
+            if let Some(summary_line) = summarize_codex_stderr(&stderr) {
+                message.push_str(": ");
+                message.push_str(&summary_line);
             }
             RunnerTerminalState::Failed { message }
         };
@@ -169,6 +163,62 @@ fn compose_prompt(compiled: &CompiledContext) -> String {
         compiled.system_prefix.trim(),
         compiled.injected_prompt.trim()
     )
+}
+
+fn build_codex_output_schema_json() -> Result<String> {
+    let schema = schemars::schema_for!(crate::runtime::summary::SummaryEnvelope);
+    let mut schema_value = serde_json::to_value(schema).map_err(McpSubagentError::Json)?;
+    normalize_openai_strict_schema(&mut schema_value);
+    serde_json::to_string_pretty(&schema_value).map_err(McpSubagentError::Json)
+}
+
+fn normalize_openai_strict_schema(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for child in map.values_mut() {
+                normalize_openai_strict_schema(child);
+            }
+            if let Some(Value::Object(properties)) = map.get("properties") {
+                let mut keys = properties.keys().cloned().collect::<Vec<_>>();
+                keys.sort();
+                map.insert(
+                    "required".to_string(),
+                    Value::Array(keys.into_iter().map(Value::String).collect()),
+                );
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                normalize_openai_strict_schema(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn summarize_codex_stderr(stderr: &str) -> Option<String> {
+    let lines = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    lines
+        .iter()
+        .find(|line| line.starts_with("ERROR:"))
+        .map(|line| (*line).to_string())
+        .or_else(|| {
+            lines
+                .iter()
+                .find(|line| line.contains("invalid_json_schema"))
+                .map(|line| (*line).to_string())
+        })
+        .or_else(|| {
+            lines
+                .iter()
+                .find(|line| line.to_ascii_lowercase().contains("error"))
+                .map(|line| (*line).to_string())
+        })
+        .or_else(|| lines.first().map(|line| (*line).to_string()))
 }
 
 fn resolve_sandbox(spec: &AgentSpec) -> &'static str {
@@ -227,10 +277,17 @@ pub fn from_env() -> CodexRunner {
 mod tests {
     use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
+    use serde_json::Value;
     use tempfile::tempdir;
 
     use crate::{
-        runtime::{runners::codex::CodexRunner, runners::RunnerTerminalState},
+        runtime::{
+            runners::codex::{
+                build_codex_output_schema_json, normalize_openai_strict_schema,
+                summarize_codex_stderr, CodexRunner,
+            },
+            runners::RunnerTerminalState,
+        },
         spec::{
             core::{AgentSpecCore, Provider},
             runtime_policy::{ApprovalPolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
@@ -463,5 +520,54 @@ exit 7
             err.to_string().contains("not yet validated"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn strict_schema_marks_all_properties_as_required() {
+        let mut value = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "media_type": {"type": ["string", "null"]}
+            },
+            "required": ["summary"]
+        });
+
+        normalize_openai_strict_schema(&mut value);
+
+        let required = value
+            .get("required")
+            .and_then(Value::as_array)
+            .expect("required array");
+        let rendered = required
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(rendered.contains(&"summary"));
+        assert!(rendered.contains(&"media_type"));
+    }
+
+    #[test]
+    fn schema_json_includes_media_type_in_required_list() {
+        let schema_json = build_codex_output_schema_json().expect("schema");
+        assert!(
+            schema_json.contains("\"media_type\""),
+            "schema should include media_type property"
+        );
+        assert!(
+            schema_json.contains("\"required\""),
+            "schema should include required arrays"
+        );
+    }
+
+    #[test]
+    fn summarize_stderr_prefers_error_lines() {
+        let stderr = "\
+OpenAI Codex v0.116.0 (research preview)
+ERROR: {\"error\":{\"code\":\"invalid_json_schema\"}}
+warning: trailing message
+";
+        let line = summarize_codex_stderr(stderr).expect("summary line");
+        assert!(line.starts_with("ERROR:"));
     }
 }
