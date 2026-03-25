@@ -128,6 +128,56 @@ If you only want to print and inspect the host command without executing it, use
 mcp-subagent connect-snippet --host claude
 ```
 
+## Recommended Command Flows
+
+Project bootstrap (recommended default):
+
+```bash
+mcp-subagent init --preset claude-opus-supervisor-minimal
+mcp-subagent validate
+mcp-subagent doctor --json
+mcp-subagent connect --host claude
+mcp-subagent list-agents
+```
+
+If you use a different host:
+
+```bash
+mcp-subagent connect --host codex
+mcp-subagent connect --host gemini
+```
+
+Synchronous one-shot task (blocks until completion):
+
+```bash
+mcp-subagent run fast-researcher \
+  --task "Search the official site of Octoclip and return JSON: {name,url,description}" \
+  --json
+```
+
+Asynchronous task (recommended for coding/review jobs):
+
+```bash
+mcp-subagent submit backend-coder --task "Implement feature X from PLAN.md" --json
+mcp-subagent ps --limit 20
+mcp-subagent watch <handle-id>
+```
+
+Inspect one run end-to-end:
+
+```bash
+mcp-subagent show <handle-id>
+mcp-subagent result <handle-id> --json
+mcp-subagent logs <handle-id> --stderr
+mcp-subagent timeline <handle-id> --json
+mcp-subagent timeline <handle-id> --event retry_classification --json
+```
+
+`result --json` and MCP `get_run_result` now include retry observability fields:
+
+- `retry_classification`: `retryable|non_retryable|unknown`
+- `classification_reason`: textual reason for the final classification
+
 Other preset examples:
 
 ```bash
