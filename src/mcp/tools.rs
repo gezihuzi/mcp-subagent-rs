@@ -1046,14 +1046,43 @@ impl McpSubagentServer {
         let started = std::time::Instant::now();
         loop {
             let record = self.get_or_load_run_record(&input.handle_id).await?;
+            let events = load_run_events(self.state_dir(), &input.handle_id)?;
+            let now = OffsetDateTime::now_utc();
+            let (current_phase, phase_age_ms) = current_phase_age_ms(&events, now);
+            let phase_timeout_hit = input.phase_timeout_secs.is_some_and(|timeout_secs| {
+                let matches_phase = input.phase.as_deref().map_or(true, |phase| {
+                    current_phase
+                        .as_deref()
+                        .is_some_and(|current| current == phase)
+                });
+                matches_phase
+                    && phase_age_ms
+                        .is_some_and(|age_ms| age_ms >= timeout_secs.saturating_mul(1000))
+            });
             if is_terminal_status(&record.status) {
                 return Ok(Json(WatchRunOutput {
                     handle_id: input.handle_id,
                     status: format!("{}", record.status),
                     updated_at: format_time(record.updated_at),
                     error_message: record.error_message,
+                    current_phase,
+                    current_phase_age_ms: phase_age_ms,
+                    phase_timeout_hit: false,
                     terminal: true,
                     timed_out: false,
+                }));
+            }
+            if phase_timeout_hit {
+                return Ok(Json(WatchRunOutput {
+                    handle_id: input.handle_id,
+                    status: format!("{}", record.status),
+                    updated_at: format_time(record.updated_at),
+                    error_message: record.error_message,
+                    current_phase,
+                    current_phase_age_ms: phase_age_ms,
+                    phase_timeout_hit: true,
+                    terminal: false,
+                    timed_out: true,
                 }));
             }
             if timeout_secs.is_some_and(|secs| started.elapsed().as_secs() >= secs) {
@@ -1062,6 +1091,9 @@ impl McpSubagentServer {
                     status: format!("{}", record.status),
                     updated_at: format_time(record.updated_at),
                     error_message: record.error_message,
+                    current_phase,
+                    current_phase_age_ms: phase_age_ms,
+                    phase_timeout_hit: false,
                     terminal: false,
                     timed_out: true,
                 }));

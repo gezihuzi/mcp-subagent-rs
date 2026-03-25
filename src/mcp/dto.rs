@@ -229,6 +229,10 @@ pub struct WatchRunInput {
     pub interval_ms: Option<u64>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub phase_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -237,6 +241,12 @@ pub struct WatchRunOutput {
     pub status: String,
     pub updated_at: String,
     pub error_message: Option<String>,
+    #[serde(default)]
+    pub current_phase: Option<String>,
+    #[serde(default)]
+    pub current_phase_age_ms: Option<u64>,
+    #[serde(default)]
+    pub phase_timeout_hit: bool,
     pub terminal: bool,
     pub timed_out: bool,
 }

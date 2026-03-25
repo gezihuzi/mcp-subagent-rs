@@ -1158,10 +1158,15 @@ sandbox = "read_only"
         let watch_res = client
             .call_tool(
                 CallToolRequestParams::new("watch_run").with_arguments(
-                    json!({ "handle_id": handle_id.clone(), "timeout_secs": 1 })
-                        .as_object()
-                        .expect("object")
-                        .clone(),
+                    json!({
+                        "handle_id": handle_id.clone(),
+                        "timeout_secs": 1,
+                        "phase": "completed",
+                        "phase_timeout_secs": 1
+                    })
+                    .as_object()
+                    .expect("object")
+                    .clone(),
                 ),
             )
             .await
@@ -1174,6 +1179,9 @@ sandbox = "read_only"
             watch_json.get("terminal").and_then(|value| value.as_bool()),
             Some(true)
         );
+        assert!(watch_json.get("current_phase").is_some());
+        assert!(watch_json.get("current_phase_age_ms").is_some());
+        assert!(watch_json.get("phase_timeout_hit").is_some());
 
         let stats_res = client
             .call_tool(

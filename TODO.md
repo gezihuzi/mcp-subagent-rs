@@ -2568,3 +2568,30 @@
   - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 使用 `phase + phase_timeout_secs` 调用并断言新增输出字段。
 - 已同步 README：
   - MCP tools 段新增 `watch_agent_events` phase/watchdog 能力说明。
+
+## T-097 V0.10-P1-McpWatchRunPhaseWatchdog (Completed 2026-03-25)
+
+任务：将 phase watchdog 能力从 `watch_agent_events` 扩展到 `watch_run`，减少 Host 端双工具拼装复杂度。  
+验收标准：
+
+1. `WatchRunInput` 新增 `phase`、`phase_timeout_secs`。
+2. `WatchRunOutput` 新增 `current_phase`、`current_phase_age_ms`、`phase_timeout_hit`。
+3. `watch_run` 在轮询过程中计算当前 phase 持续时长，并支持 phase timeout 命中返回。
+4. 终态返回仍保持兼容（`terminal=true`、`timed_out=false`），并带上 phase 观测字段。
+5. MCP roundtrip 覆盖 `watch_run` 新参数调用与新增字段断言。
+6. README MCP tools 说明同步更新。
+7. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 DTO：
+  - `src/mcp/dto.rs::WatchRunInput` 新增 `phase/phase_timeout_secs`；
+  - `src/mcp/dto.rs::WatchRunOutput` 新增 `current_phase/current_phase_age_ms/phase_timeout_hit`。
+- 已升级 `watch_run`：
+  - `src/mcp/tools.rs::watch_run` 每轮读取事件并计算当前 phase age；
+  - 支持 phase scoped timeout，命中后返回 `timed_out=true` 与 `phase_timeout_hit=true`；
+  - 普通 timeout/终态路径均返回 phase 观测字段。
+- 已补 MCP roundtrip：
+  - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 对 `watch_run` 传入 `phase + phase_timeout_secs`；
+  - 新增 `current_phase/current_phase_age_ms/phase_timeout_hit` 字段断言。
+- 已同步 README：
+  - MCP tools 段补充 `watch_run` phase/watchdog 能力说明。
