@@ -1817,3 +1817,39 @@
   - `parses_second_sentinel_block_when_first_is_placeholder`
 - 已通过回归：
   - `cargo test -q`（`147 + 25 + 3` tests passed）。
+
+## T-072 V0.9-P0-DelegationMinimalAndBestEffortResultSemantics (Completed 2026-03-25)
+
+任务：启动 v0.9 第一批重构，先把默认策略和成功判定语义切到“轻委派 + native-first”。  
+验收标准：
+
+1. `RuntimePolicy` 新增 `delegation_context/native_discovery/output_mode/parse_policy`，默认分别为 `minimal/minimal/both/best_effort`。
+2. `default_memory_sources()` 移除 `ActivePlan`，默认仅 `AutoProjectMemory`。
+3. provider 进程成功且 `parse_policy=best_effort` 时，即使 summary 归一化是 `Invalid/Degraded` 也不判 hard fail。
+4. CLI 新增 `submit` 命令，行为与 `spawn` 一致（兼容保留 `spawn`）。
+5. `init` 预设模板不再默认写入 `active_plan` memory source，并支持 `claude-opus-supervisor-minimal`。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 `src/spec/runtime_policy.rs`：
+  - 新增 `DelegationContextPolicy`、`NativeDiscoveryPolicy`、`OutputMode`、`ParsePolicy`；
+  - `RuntimePolicy` 增加对应字段；
+  - 默认值切到 `minimal/minimal/both/best_effort`；
+  - 默认 `memory_sources` 改为 `["auto_project_memory"]`；
+  - 新增默认值单测 `runtime_policy_defaults_follow_v09_minimal_profile`。
+- 已更新 `src/runtime/dispatcher.rs`：
+  - `assess_attempt_outcome` 引入 `parse_policy`；
+  - `best_effort` 模式下，provider 成功 + parse 非 Validated 会标记整体 `Succeeded`（保留 parse_status）；
+  - `strict` 模式保持原失败语义；
+  - 新增两条测试覆盖 best-effort/strict 分流。
+- 已更新 `src/runtime/summary.rs`：
+  - 对“provider 返回业务 JSON 但非 SummaryEnvelope”场景，支持包装为可消费的 Validated summary；
+  - 新增对应测试 `wraps_json_payload_inside_sentinel_as_validated`。
+- 已更新命令面与模板：
+  - `src/main.rs` 新增 `submit` 子命令（`spawn` 等价别名）；
+  - `src/main.rs` 的 `init` 默认 preset 切到 `claude-opus-supervisor-minimal`；
+  - `src/init.rs` 新增 `claude-opus-supervisor-minimal` preset 名称并纳入 preset 生成；
+  - `src/init.rs` 预设模板 `memory_sources` 默认移除 `active_plan`；
+  - `README.md` 命令面同步新增 `submit` 和新 preset 名称。
+- 已通过回归：
+  - `cargo test -q`（`151 + 27 + 3` tests passed）。

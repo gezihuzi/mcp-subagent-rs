@@ -19,13 +19,14 @@ Rust implementation of an MCP subagent runtime aligned to the technical design b
 mcp-subagent mcp [AGENTS_DIR]
 mcp-subagent doctor [AGENTS_DIR] [--json]
 mcp-subagent validate [AGENTS_DIR]
-mcp-subagent init [--preset claude-opus-supervisor|codex-primary-builder|gemini-frontend-team|local-ollama-fallback|minimal-single-provider] [--root-dir ... | --in-place] [--force] [--json]
+mcp-subagent init [--preset claude-opus-supervisor-minimal|claude-opus-supervisor|codex-primary-builder|gemini-frontend-team|local-ollama-fallback|minimal-single-provider] [--root-dir ... | --in-place] [--force] [--json]
 mcp-subagent connect --host claude|codex|gemini [--run-host]
 mcp-subagent connect-snippet --host claude|codex|gemini
 mcp-subagent clean [--all] [--dry-run] [--json]
 mcp-subagent list-agents [--json]
 mcp-subagent run <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
 mcp-subagent spawn <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
+mcp-subagent submit <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
 mcp-subagent status <handle-id> [--json]
 mcp-subagent cancel <handle-id> [--json]
 mcp-subagent artifact <handle-id> [--path ... | --kind summary|log|patch|json] [--json]
@@ -43,7 +44,7 @@ Global flags:
 - `--state-dir <path>`
 - `--log-level <level>`
 
-Selected file flags for `run`/`spawn`:
+Selected file flags for `run`/`spawn`/`submit`:
 
 - `--selected-file <path>`: pass path only
 - `--selected-file-inline <path>`: read local file content and inline into selected context

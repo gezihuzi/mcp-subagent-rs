@@ -74,7 +74,7 @@ enum Commands {
         agents_dir: Option<PathBuf>,
     },
     Init {
-        #[arg(long, value_enum, default_value_t = InitPresetArg::ClaudeOpusSupervisor)]
+        #[arg(long, value_enum, default_value_t = InitPresetArg::ClaudeOpusSupervisorMinimal)]
         preset: InitPresetArg,
         #[arg(long, value_name = "ROOT_DIR")]
         root_dir: Option<PathBuf>,
@@ -149,6 +149,27 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    Submit {
+        agent: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        task_brief: Option<String>,
+        #[arg(long)]
+        parent_summary: Option<String>,
+        #[arg(long)]
+        stage: Option<String>,
+        #[arg(long = "plan")]
+        plan_ref: Option<String>,
+        #[arg(long = "selected-file")]
+        selected_files: Vec<PathBuf>,
+        #[arg(long = "selected-file-inline")]
+        selected_files_inline: Vec<PathBuf>,
+        #[arg(long)]
+        working_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     Status {
         handle_id: String,
         #[arg(long)]
@@ -181,6 +202,7 @@ enum ArtifactKindArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum InitPresetArg {
     ClaudeOpusSupervisor,
+    ClaudeOpusSupervisorMinimal,
     CodexPrimaryBuilder,
     GeminiFrontendTeam,
     LocalOllamaFallback,
@@ -198,6 +220,7 @@ impl From<InitPresetArg> for InitPreset {
     fn from(value: InitPresetArg) -> Self {
         match value {
             InitPresetArg::ClaudeOpusSupervisor => InitPreset::ClaudeOpusSupervisor,
+            InitPresetArg::ClaudeOpusSupervisorMinimal => InitPreset::ClaudeOpusSupervisorMinimal,
             InitPresetArg::CodexPrimaryBuilder => InitPreset::CodexPrimaryBuilder,
             InitPresetArg::GeminiFrontendTeam => InitPreset::GeminiFrontendTeam,
             InitPresetArg::LocalOllamaFallback => InitPreset::LocalOllamaFallback,
@@ -431,6 +454,47 @@ async fn main() -> ExitCode {
                 }
             };
             info!("starting command: spawn");
+            spawn_agent(
+                cfg,
+                agent,
+                task,
+                task_brief,
+                parent_summary,
+                stage,
+                plan_ref,
+                selected_files,
+                selected_files_inline,
+                working_dir,
+                json,
+            )
+            .await
+        }
+        Commands::Submit {
+            agent,
+            task,
+            task_brief,
+            parent_summary,
+            stage,
+            plan_ref,
+            selected_files,
+            selected_files_inline,
+            working_dir,
+            json,
+        } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: submit");
             spawn_agent(
                 cfg,
                 agent,
@@ -1559,6 +1623,17 @@ mod tests {
     }
 
     #[test]
+    fn init_defaults_to_minimal_supervisor_preset() {
+        let cli = Cli::parse_from(["mcp-subagent", "init"]);
+        match cli.command {
+            Commands::Init { preset, .. } => {
+                assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisorMinimal));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_init_command_with_new_preset() {
         let cli = Cli::parse_from([
             "mcp-subagent",
@@ -1734,6 +1809,28 @@ target/
             Commands::Clean { all, dry_run, json } => {
                 assert!(all);
                 assert!(dry_run);
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_submit_command_flags() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "submit",
+            "fast-researcher",
+            "--task",
+            "find docs",
+            "--json",
+        ]);
+        match cli.command {
+            Commands::Submit {
+                agent, task, json, ..
+            } => {
+                assert_eq!(agent, "fast-researcher");
+                assert_eq!(task, "find docs");
                 assert!(json);
             }
             other => panic!("unexpected command: {other:?}"),

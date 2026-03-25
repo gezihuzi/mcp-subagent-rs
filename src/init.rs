@@ -14,11 +14,12 @@ use crate::{
     spec::registry::load_agent_specs_from_dirs,
 };
 
-const PRESET_CATALOG_VERSION: &str = "v0.8.1";
+const PRESET_CATALOG_VERSION: &str = "v0.9.0-dev";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitPreset {
     ClaudeOpusSupervisor,
+    ClaudeOpusSupervisorMinimal,
     CodexPrimaryBuilder,
     GeminiFrontendTeam,
     LocalOllamaFallback,
@@ -29,6 +30,7 @@ impl InitPreset {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ClaudeOpusSupervisor => "claude-opus-supervisor",
+            Self::ClaudeOpusSupervisorMinimal => "claude-opus-supervisor-minimal",
             Self::CodexPrimaryBuilder => "codex-primary-builder",
             Self::GeminiFrontendTeam => "gemini-frontend-team",
             Self::LocalOllamaFallback => "local-ollama-fallback",
@@ -137,7 +139,7 @@ fn init_with_preset(root: &Path, preset: InitPreset, force: bool) -> Result<Init
 
 fn preset_agent_templates(preset: InitPreset) -> Vec<(&'static str, &'static str)> {
     match preset {
-        InitPreset::ClaudeOpusSupervisor => vec![
+        InitPreset::ClaudeOpusSupervisor | InitPreset::ClaudeOpusSupervisorMinimal => vec![
             ("fast-researcher.agent.toml", FAST_RESEARCHER_AGENT),
             ("backend-coder.agent.toml", BACKEND_CODER_AGENT),
             ("frontend-builder.agent.toml", FRONTEND_BUILDER_AGENT),
@@ -328,7 +330,7 @@ tags = ["research", "read-only", "fast"]
 
 [runtime]
 context_mode = "expanded_brief"
-memory_sources = ["auto_project_memory", "active_plan"]
+memory_sources = ["auto_project_memory"]
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "read_only"
@@ -352,7 +354,7 @@ tags = ["build", "backend", "rust", "codex"]
 
 [runtime]
 context_mode = { selected_files = ["src/**", "Cargo.toml", "PLAN.md"] }
-memory_sources = ["auto_project_memory", "active_plan"]
+memory_sources = ["auto_project_memory"]
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "workspace_write"
@@ -379,7 +381,7 @@ tags = ["build", "frontend", "ui", "gemini"]
 
 [runtime]
 context_mode = { selected_files = ["web/**", "src/**", "package.json", "PLAN.md"] }
-memory_sources = ["auto_project_memory", "active_plan"]
+memory_sources = ["auto_project_memory"]
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "workspace_write"
@@ -406,7 +408,7 @@ tags = ["review", "correctness", "codex"]
 
 [runtime]
 context_mode = "summary_only"
-memory_sources = ["auto_project_memory", "active_plan"]
+memory_sources = ["auto_project_memory"]
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "read_only"
@@ -433,7 +435,7 @@ tags = ["review", "style", "claude"]
 
 [runtime]
 context_mode = "summary_only"
-memory_sources = ["auto_project_memory", "active_plan"]
+memory_sources = ["auto_project_memory"]
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "read_only"
@@ -457,7 +459,7 @@ tags = ["review", "style", "codex"]
 
 [runtime]
 context_mode = "summary_only"
-memory_sources = ["auto_project_memory", "active_plan"]
+memory_sources = ["auto_project_memory"]
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "read_only"
@@ -484,7 +486,7 @@ tags = ["review", "style", "gemini"]
 
 [runtime]
 context_mode = "summary_only"
-memory_sources = ["auto_project_memory", "active_plan"]
+memory_sources = ["auto_project_memory"]
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "read_only"
@@ -508,7 +510,7 @@ tags = ["build", "local", "ollama", "fallback"]
 
 [runtime]
 context_mode = { selected_files = ["src/**", "PLAN.md"] }
-memory_sources = ["auto_project_memory", "active_plan"]
+memory_sources = ["auto_project_memory"]
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "workspace_write"
@@ -532,7 +534,7 @@ tags = ["build", "codex", "minimal"]
 
 [runtime]
 context_mode = { selected_files = ["src/**", "PLAN.md"] }
-memory_sources = ["auto_project_memory", "active_plan"]
+memory_sources = ["auto_project_memory"]
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "workspace_write"
@@ -563,7 +565,7 @@ mod tests {
             .expect("init succeeds");
 
         assert_eq!(report.generated_agent_count, 6);
-        assert_eq!(report.preset_catalog_version, "v0.8.1");
+        assert_eq!(report.preset_catalog_version, "v0.9.0-dev");
         assert!(dir.path().join("agents").exists());
         assert!(dir.path().join("PLAN.md").exists());
         assert!(dir.path().join(".mcp-subagent/config.toml").exists());
@@ -574,6 +576,7 @@ mod tests {
     fn init_supports_all_presets_and_validates() {
         for preset in [
             InitPreset::ClaudeOpusSupervisor,
+            InitPreset::ClaudeOpusSupervisorMinimal,
             InitPreset::CodexPrimaryBuilder,
             InitPreset::GeminiFrontendTeam,
             InitPreset::LocalOllamaFallback,
@@ -586,7 +589,7 @@ mod tests {
                 "preset {} should generate at least one agent",
                 preset.as_str()
             );
-            assert_eq!(report.preset_catalog_version, "v0.8.1");
+            assert_eq!(report.preset_catalog_version, "v0.9.0-dev");
             assert!(dir.path().join("README.mcp-subagent.md").exists());
         }
     }

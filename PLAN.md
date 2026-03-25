@@ -2,7 +2,16 @@
 
 ## North Star
 
-按 `docs/mcp-subagent_tech_design_v0.8.md` 交付首个“直接可用 beta”：首次接入路径可复制可运行、命令面与文档零漂移、默认场景稳定可验证。
+按 `docs/mcp-subagent_tech_design_v0.9.md` 推进“默认轻委派 + native-first 结果模型”的直接可用 beta：默认最小上下文、归一化失败不再硬失败、命令面更顺手。
+
+## Execution Strategy (v0.9 Current)
+
+### Batch V0.9-P0 - Delegation Minimal + Native-first（当前优先）
+
+目标：先完成默认策略收口和失败语义修正：`memory_sources` 默认去掉 `ActivePlan`、新增 `delegation_context/native_discovery/output_mode/parse_policy`、`parse_policy=best_effort` 下 provider 成功不因归一化失败判 hard fail、补 `submit` 命令别名。
+依赖顺序：`T-072 -> T-073 -> T-074`。
+回滚策略：新策略字段全部有默认值，旧 agent spec 可无缝加载；`spawn/status` 兼容保留，`submit` 只是别名扩展。
+风险与控制：放宽解析可能掩盖格式问题；通过在 summary 中保留 `parse_status` 与 raw artifact，并在 strict 模式保留旧失败语义。
 
 ## Execution Strategy (v0.8 Current)
 

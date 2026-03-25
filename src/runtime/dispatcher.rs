@@ -16,7 +16,7 @@ use crate::{
         summary::{SummaryEnvelope, SummaryParseStatus},
     },
     spec::{
-        runtime_policy::{ApprovalPolicy, SandboxPolicy, WorkingDirPolicy},
+        runtime_policy::{ApprovalPolicy, ParsePolicy, SandboxPolicy, WorkingDirPolicy},
         validate::validate_agent_spec,
         workflow::WorkflowStageKind,
         Provider,
@@ -161,7 +161,8 @@ where
             let summary_envelope = self
                 .compiler
                 .parse_summary(&execution.stdout, &execution.stderr)?;
-            let attempt_assessment = assess_attempt_outcome(&execution, &summary_envelope);
+            let attempt_assessment =
+                assess_attempt_outcome(&execution, &summary_envelope, &spec.runtime.parse_policy);
 
             let retry_exhausted = attempt >= attempt_budget;
             let can_retry = attempt_assessment.retryable && !retry_exhausted;
@@ -230,6 +231,7 @@ struct AttemptAssessment {
 fn assess_attempt_outcome(
     execution: &crate::runtime::runners::RunnerExecution,
     summary_envelope: &SummaryEnvelope,
+    parse_policy: &ParsePolicy,
 ) -> AttemptAssessment {
     match &execution.terminal_state {
         RunnerTerminalState::Succeeded => {
@@ -241,15 +243,24 @@ fn assess_attempt_outcome(
                 }
             } else {
                 AttemptAssessment {
-                    status: RunStatus::Failed,
-                    error_message: Some(format!(
-                        "structured summary parse status is {}",
-                        summary_envelope.parse_status
-                    )),
-                    retryable: matches!(
-                        summary_envelope.parse_status,
-                        SummaryParseStatus::Invalid | SummaryParseStatus::Degraded
-                    ),
+                    status: if matches!(parse_policy, ParsePolicy::BestEffort) {
+                        RunStatus::Succeeded
+                    } else {
+                        RunStatus::Failed
+                    },
+                    error_message: if matches!(parse_policy, ParsePolicy::BestEffort) {
+                        None
+                    } else {
+                        Some(format!(
+                            "structured summary parse status is {}",
+                            summary_envelope.parse_status
+                        ))
+                    },
+                    retryable: !matches!(parse_policy, ParsePolicy::BestEffort)
+                        && matches!(
+                            summary_envelope.parse_status,
+                            SummaryParseStatus::Invalid | SummaryParseStatus::Degraded
+                        ),
                 }
             }
         }
@@ -843,7 +854,9 @@ mod tests {
         },
         spec::{
             core::{AgentSpecCore, Provider},
-            runtime_policy::{ApprovalPolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
+            runtime_policy::{
+                ApprovalPolicy, ParsePolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy,
+            },
             workflow::{WorkflowGatePolicy, WorkflowSpec, WorkflowStageKind},
             AgentSpec,
         },
@@ -1057,6 +1070,54 @@ mod tests {
             VerificationStatus::Passed
         );
         assert_eq!(result.summary.parse_status, SummaryParseStatus::Validated);
+    }
+
+    #[tokio::test]
+    async fn dispatch_best_effort_succeeds_when_summary_is_degraded() {
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            SequenceRunner::new(vec![RunnerExecution {
+                terminal_state: RunnerTerminalState::Succeeded,
+                stdout: "plain text without summary envelope".to_string(),
+                stderr: String::new(),
+            }]),
+        );
+
+        let result = dispatcher
+            .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .await
+            .expect("dispatch run");
+
+        assert_eq!(result.metadata.status, RunStatus::Succeeded);
+        assert_eq!(result.summary.parse_status, SummaryParseStatus::Degraded);
+        assert_eq!(result.metadata.error_message, None);
+    }
+
+    #[tokio::test]
+    async fn dispatch_strict_fails_when_summary_is_degraded() {
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            SequenceRunner::new(vec![RunnerExecution {
+                terminal_state: RunnerTerminalState::Succeeded,
+                stdout: "plain text without summary envelope".to_string(),
+                stderr: String::new(),
+            }]),
+        );
+        let mut spec = sample_spec();
+        spec.runtime.parse_policy = ParsePolicy::Strict;
+
+        let result = dispatcher
+            .run(&spec, &sample_request(), ResolvedMemory::default())
+            .await
+            .expect("dispatch run");
+
+        assert_eq!(result.metadata.status, RunStatus::Failed);
+        assert_eq!(result.summary.parse_status, SummaryParseStatus::Degraded);
+        assert!(result
+            .metadata
+            .error_message
+            .as_deref()
+            .is_some_and(|msg| msg.contains("structured summary parse status is Degraded")));
     }
 
     #[tokio::test]
