@@ -2952,3 +2952,89 @@
   - `collect_watch_events_incremental_only_returns_new_events`；
   - `watch_run_timeout_keeps_existing_timeout_semantics`。
 - 已通过 `cargo test -q`（187 + 64 + 3 全通过）。
+
+## T-112 Refactor-TaskData-Step4-DispatcherOutcomeBridge (Completed 2026-03-26)
+
+任务：按 `docs/refactor_task_data_structures.md` Step 4 继续推进 `dispatcher.rs` 迁移，先提供 `DispatchResult -> RunOutcome` 桥接并保证可编译可验证。  
+验收标准：
+
+1. `DispatchResult::to_run_outcome()` 可覆盖 `Succeeded/Failed/Cancelled/TimedOut` 终态映射。
+2. `RetryClassification` 在 `runtime/outcome.rs` 侧可复用（迁移期 re-export），避免重复定义。
+3. 桥接转换中的 usage 字段与现有结构兼容，不引用不存在字段。
+4. 至少有桥接转换回归测试（成功/失败各一条）。
+5. `cargo check` 通过。
+完成记录：
+
+- 已修复 `src/runtime/outcome.rs` 的 `RetryClassification` 重复导入，保留迁移期 `pub use`。
+- 已修复 `src/runtime/dispatcher.rs::build_usage_from_dispatch`，`provider_exit_code` 改为来自 `summary.summary.exit_code`，去除对不存在的 `NativeUsage.exit_code` 访问。
+- 已新增桥接测试：
+  - `dispatch_result_to_run_outcome_maps_success_fields`
+  - `dispatch_result_to_run_outcome_maps_failure_retry_fields`
+- 已验证：
+  - `cargo check` 通过（当前仍有与 Step 3 迁移中间态相关的 warning，不影响本步验收）。
+  - `cargo test dispatch_result_to_run_outcome -- --nocapture` 通过（2 passed）。
+
+## T-113 Refactor-TaskData-Step5-SummaryToSuccessOutcome (Completed 2026-03-26)
+
+任务：按 `docs/refactor_task_data_structures.md` Step 5 调整 `src/runtime/summary.rs`，让解析结果可直接生成 `SuccessOutcome` 字段，减少 dispatcher 侧手工字段搬运。  
+验收标准：
+
+1. `summary.rs` 提供 `SummaryEnvelope -> SuccessOutcome` 的直接转换入口。
+2. `StructuredSummary` 字段到 `SuccessOutcome` 字段映射集中在 summary 层，不再在 dispatcher 成功分支逐字段拷贝。
+3. 新增 summary 层测试覆盖直接转换行为（含 parse_status 与 usage 透传）。
+4. 与 Step 4 的 `DispatchResult::to_run_outcome()` 桥接保持兼容并通过回归测试。
+5. `cargo check` 通过。
+完成记录：
+
+- 已在 `src/runtime/summary.rs` 新增转换方法：
+  - `StructuredSummary::{into_success_outcome,to_success_outcome}`
+  - `SummaryEnvelope::{into_success_outcome,to_success_outcome}`
+- 已在 `src/runtime/dispatcher.rs` 将成功分支改为直接调用 `self.summary.to_success_outcome(usage)`，删除成功分支内手工字段映射。
+- 已新增测试：
+  - `runtime::summary::tests::converts_parsed_envelope_to_success_outcome`
+- 已回归验证：
+  - `cargo check` 通过。
+  - `cargo test converts_parsed_envelope_to_success_outcome -- --nocapture` 通过（1 passed）。
+  - `cargo test to_run_outcome_maps -- --nocapture` 通过（2 passed）。
+
+## T-114 Refactor-TaskData-Step6-SignatureChainTaskSpecHints (Completed 2026-03-26)
+
+任务：按 `docs/refactor_task_data_structures.md` Step 6 调整签名链 `context.rs -> memory.rs -> runners/mod.rs -> 5 runners`，让主执行链可直接消费 `TaskSpec + WorkflowHints`，同时保留 `RunRequest` 迁移桥接。  
+验收标准：
+
+1. `context` 层提供 `compile_task(spec, task_spec, hints, memory)` 主签名。
+2. `memory` 层提供基于 `TaskSpec` 的解析入口，调用链可不依赖 `RunRequest`。
+3. `runners/mod.rs` trait 提供 `execute_task/execute_task_with_observer` 主签名。
+4. `codex/gemini/claude/mock/ollama` 五个 runner 均接入 `TaskSpec + WorkflowHints` 路径，保留旧 `RunRequest` 兼容入口。
+5. dispatcher/service 主链切到新签名，`cargo check` 与关键回归测试通过。
+完成记录：
+
+- 已升级 `src/runtime/context.rs`：
+  - `ContextCompiler` 新增 `compile_task(...)`；
+  - 旧 `compile(...RunRequest...)` 改为默认桥接实现（通过 `to_task_spec/to_workflow_hints` 转换）；
+  - `DefaultContextCompiler` 主实现迁移到 `compile_task`。
+- 已升级 `src/runtime/memory.rs`：
+  - 新增 `resolve_memory_for_task(spec, task_spec)`；
+  - 旧 `resolve_memory(spec, request)` 改为桥接调用。
+- 已升级 `src/runtime/runners/mod.rs`：
+  - `AgentRunner` 新增 `execute_task/execute_task_with_observer` 默认桥接；
+  - `Box<dyn AgentRunner>` 同步透传新方法。
+- 已升级五个 runner：
+  - `src/runtime/runners/codex.rs`
+  - `src/runtime/runners/gemini.rs`
+  - `src/runtime/runners/claude.rs`
+  - `src/runtime/runners/mock.rs`
+  - `src/runtime/runners/ollama.rs`
+  - 均新增或接入 `TaskSpec + WorkflowHints` 执行入口，`RunRequest` 路径保留为兼容桥接。
+- 已升级调用链：
+  - `src/runtime/dispatcher.rs` 改用 `compile_task + execute_task*`。
+  - `src/mcp/service.rs` 改用 `resolve_memory_for_task`。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test compile_contains_required_sections -- --nocapture` 通过（1 passed）。
+  - `cargo test auto_project_memory_resolves_project_and_native_paths -- --nocapture` 通过（1 passed）。
+  - `cargo test mock_runner_success_wraps_summary_json -- --nocapture` 通过（1 passed）。
+  - `cargo test codex_runner_execute_with_observer_streams_output_chunks -- --nocapture` 通过（1 passed）。
+  - `cargo test gemini_runner_execute_with_observer_streams_output_chunks -- --nocapture` 通过（1 passed）。
+  - `cargo test claude_runner_execute_with_observer_streams_output_chunks -- --nocapture` 通过（1 passed）。
+  - `cargo test dispatch_reaches_succeeded -- --nocapture` 通过（1 passed）。

@@ -3,7 +3,7 @@ use crate::{
     runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
     runtime::summary::{StructuredSummary, SUMMARY_END_SENTINEL, SUMMARY_START_SENTINEL},
     spec::AgentSpec,
-    types::{CompiledContext, RunRequest},
+    types::{CompiledContext, RunRequest, TaskSpec, WorkflowHints},
 };
 
 #[derive(Debug, Clone)]
@@ -34,10 +34,11 @@ impl MockRunner {
 
 #[async_trait::async_trait]
 impl AgentRunner for MockRunner {
-    async fn execute(
+    async fn execute_task(
         &self,
         spec: &AgentSpec,
-        request: &RunRequest,
+        task_spec: &TaskSpec,
+        _hints: &WorkflowHints,
         _compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
         let execution = match &self.plan {
@@ -53,8 +54,9 @@ impl AgentRunner for MockRunner {
                 }
             }
             MockRunPlan::SucceededFromRequest => {
-                let summary_json =
-                    serde_json::to_string_pretty(&build_mock_summary_from_request(spec, request))?;
+                let summary_json = serde_json::to_string_pretty(
+                    &build_mock_summary_from_task_spec(spec, task_spec),
+                )?;
                 RunnerExecution {
                     terminal_state: RunnerTerminalState::Succeeded,
                     stdout: format!(
@@ -88,17 +90,28 @@ impl AgentRunner for MockRunner {
         };
         Ok(execution)
     }
+
+    async fn execute(
+        &self,
+        spec: &AgentSpec,
+        request: &RunRequest,
+        compiled: &CompiledContext,
+    ) -> Result<RunnerExecution> {
+        let task_spec = request.to_task_spec();
+        let hints = request.to_workflow_hints();
+        self.execute_task(spec, &task_spec, &hints, compiled).await
+    }
 }
 
-fn build_mock_summary_from_request(spec: &AgentSpec, request: &RunRequest) -> StructuredSummary {
-    let touched_files = request
+fn build_mock_summary_from_task_spec(spec: &AgentSpec, task_spec: &TaskSpec) -> StructuredSummary {
+    let touched_files = task_spec
         .selected_files
         .iter()
         .map(|file| file.path.display().to_string())
         .collect::<Vec<_>>();
 
     StructuredSummary {
-        summary: format!("Mock run completed for task: {}", request.task),
+        summary: format!("Mock run completed for task: {}", task_spec.task),
         key_findings: vec![format!(
             "Agent `{}` executed through dispatcher mock runner.",
             spec.core.name

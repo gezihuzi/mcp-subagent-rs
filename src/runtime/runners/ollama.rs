@@ -10,7 +10,7 @@ use crate::{
     error::{McpSubagentError, Result},
     runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
     spec::AgentSpec,
-    types::{CompiledContext, RunRequest},
+    types::{CompiledContext, RunRequest, TaskSpec, WorkflowHints},
 };
 
 #[derive(Debug, Clone)]
@@ -37,9 +37,22 @@ impl OllamaRunner {
         request: &RunRequest,
         compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
+        let task_spec = request.to_task_spec();
+        let hints = request.to_workflow_hints();
+        OllamaRunner::execute_task(self, spec, &task_spec, &hints, compiled).await
+    }
+
+    pub async fn execute_task(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
+        compiled: &CompiledContext,
+    ) -> Result<RunnerExecution> {
         let prompt = compose_prompt(compiled);
         let timeout = Duration::from_secs(spec.runtime.timeout_secs.max(1));
         let model = resolve_model(spec)?;
+        let request = RunRequest::from_parts(task_spec, hints);
 
         let mut command = tokio::process::Command::new(&self.executable);
         command
@@ -97,6 +110,16 @@ impl OllamaRunner {
 
 #[async_trait]
 impl AgentRunner for OllamaRunner {
+    async fn execute_task(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
+        compiled: &CompiledContext,
+    ) -> Result<RunnerExecution> {
+        OllamaRunner::execute_task(self, spec, task_spec, hints, compiled).await
+    }
+
     async fn execute(
         &self,
         spec: &AgentSpec,

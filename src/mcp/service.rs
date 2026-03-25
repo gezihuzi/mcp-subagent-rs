@@ -12,7 +12,7 @@ use crate::{
         cleanup::WorkspaceCleanupGuard,
         context::DefaultContextCompiler,
         dispatcher::{DispatchResult, Dispatcher},
-        memory::resolve_memory,
+        memory::resolve_memory_for_task,
         runners::{
             self,
             mock::{MockRunPlan, MockRunner},
@@ -60,7 +60,8 @@ pub(crate) async fn run_dispatch(
 
     let mut effective_request = request.clone();
     effective_request.working_dir = prepared_workspace.workspace_path;
-    let resolved_memory = resolve_memory(&effective_spec, &effective_request)
+    let task_spec = effective_request.to_task_spec();
+    let resolved_memory = resolve_memory_for_task(&effective_spec, &task_spec)
         .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
     attach_plan_section_acceptance_criteria(
         &effective_spec,

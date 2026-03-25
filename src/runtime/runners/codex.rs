@@ -20,7 +20,7 @@ use crate::{
         runtime_policy::{ApprovalPolicy, SandboxPolicy},
         AgentSpec,
     },
-    types::{CompiledContext, RunRequest},
+    types::{CompiledContext, RunRequest, TaskSpec, WorkflowHints},
 };
 
 #[derive(Debug, Clone)]
@@ -189,12 +189,48 @@ impl CodexRunner {
         request: &RunRequest,
         compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
-        self.execute_internal(spec, request, compiled, None).await
+        let task_spec = request.to_task_spec();
+        let hints = request.to_workflow_hints();
+        CodexRunner::execute_task(self, spec, &task_spec, &hints, compiled).await
+    }
+
+    pub async fn execute_task(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
+        compiled: &CompiledContext,
+    ) -> Result<RunnerExecution> {
+        let request = RunRequest::from_parts(task_spec, hints);
+        self.execute_internal(spec, &request, compiled, None).await
+    }
+
+    pub async fn execute_task_with_observer(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
+        compiled: &CompiledContext,
+        observer: &mut dyn RunnerOutputObserver,
+    ) -> Result<RunnerExecution> {
+        let request = RunRequest::from_parts(task_spec, hints);
+        self.execute_internal(spec, &request, compiled, Some(observer))
+            .await
     }
 }
 
 #[async_trait]
 impl AgentRunner for CodexRunner {
+    async fn execute_task(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
+        compiled: &CompiledContext,
+    ) -> Result<RunnerExecution> {
+        CodexRunner::execute_task(self, spec, task_spec, hints, compiled).await
+    }
+
     async fn execute(
         &self,
         spec: &AgentSpec,
@@ -211,7 +247,21 @@ impl AgentRunner for CodexRunner {
         compiled: &CompiledContext,
         observer: &mut dyn RunnerOutputObserver,
     ) -> Result<RunnerExecution> {
-        self.execute_internal(spec, request, compiled, Some(observer))
+        let task_spec = request.to_task_spec();
+        let hints = request.to_workflow_hints();
+        CodexRunner::execute_task_with_observer(self, spec, &task_spec, &hints, compiled, observer)
+            .await
+    }
+
+    async fn execute_task_with_observer(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
+        compiled: &CompiledContext,
+        observer: &mut dyn RunnerOutputObserver,
+    ) -> Result<RunnerExecution> {
+        CodexRunner::execute_task_with_observer(self, spec, task_spec, hints, compiled, observer)
             .await
     }
 }

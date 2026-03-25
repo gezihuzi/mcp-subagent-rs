@@ -12,7 +12,7 @@ use crate::{
     },
     types::{
         CompiledContext, ContextSourceRef, InjectionMode, MemorySnippet, ResolvedMemory, RunMode,
-        RunRequest,
+        RunRequest, TaskSpec, WorkflowHints,
     },
 };
 
@@ -28,12 +28,24 @@ const REQUIRED_TEMPLATE_SECTIONS: [&str; 8] = [
 ];
 
 pub trait ContextCompiler: Send + Sync {
+    fn compile_task(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
+        memory: ResolvedMemory,
+    ) -> Result<CompiledContext>;
+
     fn compile(
         &self,
         spec: &AgentSpec,
         request: &RunRequest,
         memory: ResolvedMemory,
-    ) -> Result<CompiledContext>;
+    ) -> Result<CompiledContext> {
+        let task_spec = request.to_task_spec();
+        let hints = request.to_workflow_hints();
+        self.compile_task(spec, &task_spec, &hints, memory)
+    }
 
     fn parse_summary(&self, raw_stdout: &str, raw_stderr: &str) -> Result<SummaryEnvelope>;
 }
@@ -42,10 +54,11 @@ pub trait ContextCompiler: Send + Sync {
 pub struct DefaultContextCompiler;
 
 impl ContextCompiler for DefaultContextCompiler {
-    fn compile(
+    fn compile_task(
         &self,
         spec: &AgentSpec,
-        request: &RunRequest,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
         memory: ResolvedMemory,
     ) -> Result<CompiledContext> {
         let mut source_manifest = Vec::new();
@@ -53,7 +66,7 @@ impl ContextCompiler for DefaultContextCompiler {
         let injection = ContextInjectionPolicy::for_mode(&spec.runtime.context_mode);
 
         if injection.include_parent_summary {
-            if let Some(parent_summary) = request.parent_summary.as_deref() {
+            if let Some(parent_summary) = hints.parent_summary.as_deref() {
                 if is_likely_raw_transcript(parent_summary) {
                     writeln!(
                         &mut selected_context,
@@ -71,7 +84,7 @@ impl ContextCompiler for DefaultContextCompiler {
             }
         }
 
-        for selected in &request.selected_files {
+        for selected in &task_spec.selected_files {
             if !injection.should_include_selected_file(selected.path.as_path()) {
                 continue;
             }
@@ -127,16 +140,16 @@ impl ContextCompiler for DefaultContextCompiler {
             selected_context.push_str("none");
         }
 
-        let task_line = request
+        let task_line = task_spec
             .task_brief
             .as_deref()
-            .unwrap_or(request.task.as_str())
+            .unwrap_or(task_spec.task.as_str())
             .trim();
-        let acceptance = if request.acceptance_criteria.is_empty() {
+        let acceptance = if task_spec.acceptance_criteria.is_empty() {
             "1) Return structured summary JSON in sentinels.\n2) Keep response concise and actionable."
                 .to_string()
         } else {
-            request
+            task_spec
                 .acceptance_criteria
                 .iter()
                 .enumerate()
@@ -155,8 +168,8 @@ impl ContextCompiler for DefaultContextCompiler {
             name = spec.core.name,
             provider = spec.core.provider.as_str(),
             task = task_line,
-            objective = request.task,
-            constraints = compile_constraints(spec, request),
+            objective = task_spec.task,
+            constraints = compile_constraints(spec, hints),
             acceptance = acceptance,
             context = selected_context.trim(),
             contract = response_contract,
@@ -236,7 +249,10 @@ pub fn validate_default_summary_contract_template() -> Result<()> {
         ],
     };
 
-    let compiled = compiler.compile(&sample_spec, &sample_request, ResolvedMemory::default())?;
+    let task_spec = sample_request.to_task_spec();
+    let hints = sample_request.to_workflow_hints();
+    let compiled =
+        compiler.compile_task(&sample_spec, &task_spec, &hints, ResolvedMemory::default())?;
     validate_compiled_prompt_template(&compiled.injected_prompt)
 }
 
@@ -268,7 +284,7 @@ fn inject_memory_sources(
     }
 }
 
-fn compile_constraints(spec: &AgentSpec, request: &RunRequest) -> String {
+fn compile_constraints(spec: &AgentSpec, hints: &WorkflowHints) -> String {
     let mut constraints = format!(
         "Do not request or rely on parent raw transcript.\nFollow agent instructions:\n{}\nProvider: {}\nContextMode: {}\nDelegationContext: {:?}",
         spec.core.instructions,
@@ -280,7 +296,7 @@ fn compile_constraints(spec: &AgentSpec, request: &RunRequest) -> String {
         constraints.push('\n');
         constraints.push_str(&format!("PlanSectionSelector: {selector}"));
     }
-    if let Some(stage) = request.stage.as_deref() {
+    if let Some(stage) = hints.stage.as_deref() {
         constraints.push('\n');
         constraints.push_str(&format!("WorkflowStage: {stage}"));
         constraints.push('\n');

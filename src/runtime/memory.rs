@@ -12,7 +12,7 @@ use crate::{
         runtime_policy::{DelegationContextPolicy, MemorySource},
         AgentSpec, Provider,
     },
-    types::{MemorySnippet, ResolvedMemory, RunRequest},
+    types::{MemorySnippet, ResolvedMemory, RunRequest, TaskSpec},
 };
 
 const MAX_MEMORY_SNIPPET_BYTES: usize = 32 * 1024;
@@ -22,7 +22,11 @@ const ARCHIVED_PLAN_GLOB_PATTERNS: [&str; 3] =
     ["docs/plans/*.md", "archive/*.md", "plans/archive/*.md"];
 
 pub fn resolve_memory(spec: &AgentSpec, request: &RunRequest) -> Result<ResolvedMemory> {
-    let mut resolver = MemoryResolver::new(&request.working_dir);
+    resolve_memory_for_task(spec, &request.to_task_spec())
+}
+
+pub fn resolve_memory_for_task(spec: &AgentSpec, task_spec: &TaskSpec) -> Result<ResolvedMemory> {
+    let mut resolver = MemoryResolver::new(&task_spec.working_dir);
     for source in &spec.runtime.memory_sources {
         match source {
             MemorySource::AutoProjectMemory => {

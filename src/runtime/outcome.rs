@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::{
-    dispatcher::RetryClassification,
-    summary::{ArtifactRef, SummaryParseStatus, VerificationStatus},
-};
+use crate::runtime::summary::{ArtifactRef, SummaryParseStatus, VerificationStatus};
+
+// RetryClassification — re-exported from dispatcher.rs during migration
+pub use crate::runtime::dispatcher::RetryClassification;
 
 // ---------------------------------------------------------------------------
 // RunOutcome — 终态不可变，一旦写入只读
@@ -14,12 +14,8 @@ use crate::runtime::{
 pub enum RunOutcome {
     Succeeded(SuccessOutcome),
     Failed(FailureOutcome),
-    Cancelled {
-        reason: String,
-    },
-    TimedOut {
-        elapsed_secs: u64,
-    },
+    Cancelled { reason: String },
+    TimedOut { elapsed_secs: u64 },
 }
 
 impl RunOutcome {
@@ -98,9 +94,6 @@ pub struct RetryInfo {
     pub reason: Option<String>,
     pub attempts_used: u32,
 }
-
-// RetryClassification — re-exported from dispatcher.rs during migration
-pub use crate::runtime::dispatcher::RetryClassification;
 
 // ---------------------------------------------------------------------------
 // UsageStats

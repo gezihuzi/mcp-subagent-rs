@@ -5,6 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::runtime::outcome::{SuccessOutcome, UsageStats};
+
 pub const SUMMARY_START_SENTINEL: &str = "<<<MCP_SUBAGENT_SUMMARY_JSON_START>>>";
 pub const SUMMARY_END_SENTINEL: &str = "<<<MCP_SUBAGENT_SUMMARY_JSON_END>>>";
 pub const SUMMARY_CONTRACT_VERSION: &str = "mcp-subagent.summary.v2";
@@ -88,6 +90,46 @@ pub struct SummaryEnvelope {
     pub summary: StructuredSummary,
     #[serde(default)]
     pub raw_fallback_text: Option<String>,
+}
+
+impl StructuredSummary {
+    pub fn into_success_outcome(
+        self,
+        parse_status: SummaryParseStatus,
+        usage: UsageStats,
+    ) -> SuccessOutcome {
+        SuccessOutcome {
+            summary: self.summary,
+            key_findings: self.key_findings,
+            touched_files: self.touched_files,
+            next_steps: self.next_steps,
+            open_questions: self.open_questions,
+            artifacts: self.artifacts,
+            verification: self.verification_status,
+            usage,
+            parse_status,
+            plan_refs: self.plan_refs,
+        }
+    }
+
+    pub fn to_success_outcome(
+        &self,
+        parse_status: SummaryParseStatus,
+        usage: UsageStats,
+    ) -> SuccessOutcome {
+        self.clone().into_success_outcome(parse_status, usage)
+    }
+}
+
+impl SummaryEnvelope {
+    pub fn into_success_outcome(self, usage: UsageStats) -> SuccessOutcome {
+        self.summary.into_success_outcome(self.parse_status, usage)
+    }
+
+    pub fn to_success_outcome(&self, usage: UsageStats) -> SuccessOutcome {
+        self.summary
+            .to_success_outcome(self.parse_status.clone(), usage)
+    }
 }
 
 pub fn parse_summary_envelope(raw_stdout: &str, raw_stderr: &str) -> SummaryEnvelope {
@@ -302,6 +344,7 @@ mod tests {
         parse_summary_envelope, SummaryEnvelope, SummaryParseStatus, VerificationStatus,
         SUMMARY_END_SENTINEL, SUMMARY_START_SENTINEL,
     };
+    use crate::runtime::outcome::UsageStats;
 
     fn legacy_summary_json() -> String {
         r#"{
@@ -448,6 +491,26 @@ mod tests {
         );
         assert_eq!(parsed.summary.key_findings.len(), 1);
         assert!(parsed.summary.key_findings[0].contains("\"name\":\"Octoclip\""));
+    }
+
+    #[test]
+    fn converts_parsed_envelope_to_success_outcome() {
+        let parsed = parse_summary_envelope(&legacy_summary_json(), "");
+        let usage = UsageStats {
+            duration_ms: 42,
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+            total_tokens: Some(30),
+            provider_exit_code: Some(0),
+        };
+
+        let success = parsed.to_success_outcome(usage);
+        assert_eq!(success.summary, "ok");
+        assert_eq!(success.parse_status, SummaryParseStatus::Validated);
+        assert_eq!(success.verification, VerificationStatus::Passed);
+        assert_eq!(success.touched_files, vec!["src/main.rs".to_string()]);
+        assert_eq!(success.usage.duration_ms, 42);
+        assert_eq!(success.usage.provider_exit_code, Some(0));
     }
 
     #[test]

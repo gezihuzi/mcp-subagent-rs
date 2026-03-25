@@ -141,21 +141,7 @@ impl DispatchResult {
         let usage = build_usage_from_dispatch(self, duration_ms);
 
         match &self.metadata.status {
-            RunStatus::Succeeded => {
-                let s = &self.summary.summary;
-                RunOutcome::Succeeded(SuccessOutcome {
-                    summary: s.summary.clone(),
-                    key_findings: s.key_findings.clone(),
-                    touched_files: s.touched_files.clone(),
-                    next_steps: s.next_steps.clone(),
-                    open_questions: s.open_questions.clone(),
-                    artifacts: s.artifacts.clone(),
-                    verification: s.verification_status.clone(),
-                    usage,
-                    parse_status: self.summary.parse_status.clone(),
-                    plan_refs: s.plan_refs.clone(),
-                })
-            }
+            RunStatus::Succeeded => RunOutcome::Succeeded(self.summary.to_success_outcome(usage)),
             RunStatus::Failed => RunOutcome::Failed(FailureOutcome {
                 error: self
                     .metadata
@@ -181,10 +167,7 @@ impl DispatchResult {
                     .unwrap_or_else(|| "cancelled".to_string()),
             },
             _ => RunOutcome::Failed(FailureOutcome {
-                error: format!(
-                    "unexpected terminal status: {}",
-                    self.metadata.status
-                ),
+                error: format!("unexpected terminal status: {}", self.metadata.status),
                 retry: RetryInfo {
                     classification: RetryClassification::Unknown,
                     reason: None,
@@ -207,7 +190,7 @@ fn build_usage_from_dispatch(
         input_tokens: native.and_then(|u| u.input_tokens),
         output_tokens: native.and_then(|u| u.output_tokens),
         total_tokens: native.and_then(|u| u.total_tokens),
-        provider_exit_code: native.and_then(|u| u.exit_code),
+        provider_exit_code: Some(result.summary.summary.exit_code),
     }
 }
 
@@ -261,6 +244,8 @@ where
     where
         F: FnMut(Option<RunStatus>, RunStatus),
     {
+        let task_spec = request.to_task_spec();
+        let workflow_hints = request.to_workflow_hints();
         let mut tracker = RunTracker::new(spec, request.working_dir.clone());
 
         let mut previous_status = tracker.metadata.status.clone();
@@ -284,7 +269,9 @@ where
         previous_status = tracker.metadata.status.clone();
         tracker.transition(RunStatus::CompilingContext);
         on_transition(Some(previous_status), RunStatus::CompilingContext);
-        let compiled = self.compiler.compile(spec, request, memory)?;
+        let compiled = self
+            .compiler
+            .compile_task(spec, &task_spec, &workflow_hints, memory)?;
         let compiled_context_markdown =
             format!("{}\n\n{}", compiled.system_prefix, compiled.injected_prompt);
 
@@ -313,10 +300,20 @@ where
             let execution = match output_observer.as_deref_mut() {
                 Some(observer) => {
                     self.runner
-                        .execute_with_observer(spec, request, &compiled, observer)
+                        .execute_task_with_observer(
+                            spec,
+                            &task_spec,
+                            &workflow_hints,
+                            &compiled,
+                            observer,
+                        )
                         .await?
                 }
-                None => self.runner.execute(spec, request, &compiled).await?,
+                None => {
+                    self.runner
+                        .execute_task(spec, &task_spec, &workflow_hints, &compiled)
+                        .await?
+                }
             };
 
             previous_status = tracker.metadata.status.clone();
@@ -1101,6 +1098,7 @@ mod tests {
         runtime::{
             context::DefaultContextCompiler,
             dispatcher::{Dispatcher, RunStatus},
+            outcome::RunOutcome,
             runners::{
                 mock::{MockRunPlan, MockRunner},
                 AgentRunner, RunnerExecution, RunnerTerminalState,
@@ -1328,6 +1326,69 @@ mod tests {
             VerificationStatus::Passed
         );
         assert_eq!(result.summary.parse_status, SummaryParseStatus::Validated);
+    }
+
+    #[tokio::test]
+    async fn dispatch_result_to_run_outcome_maps_success_fields() {
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Succeeded {
+                summary: success_summary(),
+            }),
+        );
+
+        let result = dispatcher
+            .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .await
+            .expect("dispatch run");
+
+        let outcome = result.to_run_outcome();
+        match outcome {
+            RunOutcome::Succeeded(success) => {
+                assert_eq!(success.summary, "ok");
+                assert_eq!(success.key_findings, vec!["one".to_string()]);
+                assert_eq!(success.touched_files, vec!["src/parser.rs".to_string()]);
+                assert_eq!(success.parse_status, SummaryParseStatus::Validated);
+                assert_eq!(success.verification, VerificationStatus::Passed);
+                assert_eq!(success.usage.provider_exit_code, Some(0));
+            }
+            other => panic!("expected succeeded outcome, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_result_to_run_outcome_maps_failure_retry_fields() {
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            MockRunner::new(MockRunPlan::Failed {
+                message: "network timeout from provider".to_string(),
+                stdout: "plain stdout".to_string(),
+                stderr: "plain stderr".to_string(),
+            }),
+        );
+
+        let result = dispatcher
+            .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .await
+            .expect("dispatch run");
+
+        let outcome = result.to_run_outcome();
+        match outcome {
+            RunOutcome::Failed(failure) => {
+                assert!(failure.error.contains("network timeout from provider"));
+                assert_eq!(
+                    failure.retry.classification,
+                    super::RetryClassification::Retryable
+                );
+                assert_eq!(failure.retry.attempts_used, 1);
+                assert!(failure
+                    .partial_summary
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty()));
+                assert_eq!(failure.usage.provider_exit_code, Some(1));
+            }
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
     }
 
     #[tokio::test]

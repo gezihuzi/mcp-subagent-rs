@@ -17,7 +17,7 @@ use crate::{
         runtime_policy::{ApprovalPolicy, NativeDiscoveryPolicy, SandboxPolicy},
         AgentSpec,
     },
-    types::{CompiledContext, RunRequest},
+    types::{CompiledContext, RunRequest, TaskSpec, WorkflowHints},
 };
 
 const GEMINI_DISCOVERY_TEMP_PREFIX: &str = "mcp-subagent-gemini-discovery";
@@ -125,7 +125,33 @@ impl GeminiRunner {
         request: &RunRequest,
         compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
-        self.execute_internal(spec, request, compiled, None).await
+        let task_spec = request.to_task_spec();
+        let hints = request.to_workflow_hints();
+        GeminiRunner::execute_task(self, spec, &task_spec, &hints, compiled).await
+    }
+
+    pub async fn execute_task(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
+        compiled: &CompiledContext,
+    ) -> Result<RunnerExecution> {
+        let request = RunRequest::from_parts(task_spec, hints);
+        self.execute_internal(spec, &request, compiled, None).await
+    }
+
+    pub async fn execute_task_with_observer(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
+        compiled: &CompiledContext,
+        observer: &mut dyn RunnerOutputObserver,
+    ) -> Result<RunnerExecution> {
+        let request = RunRequest::from_parts(task_spec, hints);
+        self.execute_internal(spec, &request, compiled, Some(observer))
+            .await
     }
 
     async fn execute_once(
@@ -362,6 +388,16 @@ fn merge_fallback_stderr(primary_stderr: &str, retried_stderr: &str) -> String {
 
 #[async_trait]
 impl AgentRunner for GeminiRunner {
+    async fn execute_task(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
+        compiled: &CompiledContext,
+    ) -> Result<RunnerExecution> {
+        GeminiRunner::execute_task(self, spec, task_spec, hints, compiled).await
+    }
+
     async fn execute(
         &self,
         spec: &AgentSpec,
@@ -378,7 +414,21 @@ impl AgentRunner for GeminiRunner {
         compiled: &CompiledContext,
         observer: &mut dyn RunnerOutputObserver,
     ) -> Result<RunnerExecution> {
-        self.execute_internal(spec, request, compiled, Some(observer))
+        let task_spec = request.to_task_spec();
+        let hints = request.to_workflow_hints();
+        GeminiRunner::execute_task_with_observer(self, spec, &task_spec, &hints, compiled, observer)
+            .await
+    }
+
+    async fn execute_task_with_observer(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
+        compiled: &CompiledContext,
+        observer: &mut dyn RunnerOutputObserver,
+    ) -> Result<RunnerExecution> {
+        GeminiRunner::execute_task_with_observer(self, spec, task_spec, hints, compiled, observer)
             .await
     }
 }
