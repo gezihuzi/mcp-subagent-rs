@@ -1346,15 +1346,15 @@ fn build_usage_output(
     let estimated_prompt_bytes = record
         .compiled_context_markdown
         .as_ref()
-        .map(|value| value.as_bytes().len() as u64);
+        .map(|value| value.len() as u64);
     let stdout_bytes = read_artifact_from_disk(state_dir, handle_id, "stdout.txt")
         .ok()
         .flatten()
-        .map(|text| text.as_bytes().len() as u64);
+        .map(|text| text.len() as u64);
     let stderr_bytes = read_artifact_from_disk(state_dir, handle_id, "stderr.txt")
         .ok()
         .flatten()
-        .map(|text| text.as_bytes().len() as u64);
+        .map(|text| text.len() as u64);
     let estimated_output_bytes = match (stdout_bytes, stderr_bytes) {
         (None, None) => None,
         (Some(a), None) => Some(a),
@@ -1601,7 +1601,7 @@ fn read_result(
     if normalized {
         match normalized_result {
             Some(value) => print_json(&value),
-            None => println!(""),
+            None => println!(),
         }
         return ExitCode::SUCCESS;
     }
@@ -1649,10 +1649,8 @@ fn read_logs(
         println!("{out}");
     }
     if let Some(err) = stderr {
-        if !stdout_only {
-            if !err.is_empty() {
-                println!("{err}");
-            }
+        if !stdout_only && !err.is_empty() {
+            println!("{err}");
         }
     }
     ExitCode::SUCCESS
