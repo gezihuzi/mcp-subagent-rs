@@ -1577,7 +1577,7 @@ fn load_run_events_incremental(
     let mut chunk = String::new();
     file.read_to_string(&mut chunk)
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    cursor.offset = cursor.offset.saturating_add(chunk.as_bytes().len() as u64);
+    cursor.offset = cursor.offset.saturating_add(chunk.len() as u64);
 
     if chunk.is_empty() && cursor.pending.is_empty() {
         return Ok(Vec::new());
@@ -3396,7 +3396,7 @@ async fn watch_run(
             ) {
                 for event in &new_events {
                     if phase.as_deref().is_some_and(|needle| {
-                        !event.phase.as_deref().is_some_and(|value| value == needle)
+                        event.phase.as_deref().is_none_or(|value| value != needle)
                     }) {
                         continue;
                     }

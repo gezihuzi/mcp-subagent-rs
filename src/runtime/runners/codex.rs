@@ -103,7 +103,7 @@ impl CodexRunner {
                 .map_err(McpSubagentError::Io)?;
         }
 
-        let (status, mut stdout, stderr, timed_out) = match observer.as_deref_mut() {
+        let (status, mut stdout, stderr, timed_out) = match observer {
             Some(output_observer) => {
                 let observed =
                     collect_streaming_output(&mut child, timeout, output_observer).await?;

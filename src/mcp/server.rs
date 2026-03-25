@@ -349,8 +349,12 @@ fn default_state_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::{
         collections::HashMap,
+        env,
+        ffi::OsString,
         fs,
         path::{Path, PathBuf},
         sync::Arc,
@@ -412,6 +416,66 @@ sandbox = "read_only"
 "#
         );
         fs::write(dir.join("reviewer.agent.toml"), agent).expect("write agent");
+    }
+
+    fn write_named_agent_spec_with_provider_and_runtime(
+        dir: &Path,
+        name: &str,
+        provider: &str,
+        runtime_extra: &str,
+    ) {
+        let agent = format!(
+            r#"
+[core]
+name = "{name}"
+description = "review code"
+provider = "{provider}"
+instructions = "review"
+
+[runtime]
+working_dir_policy = "in_place"
+sandbox = "read_only"
+{runtime_extra}
+"#
+        );
+        fs::write(dir.join(format!("{name}.agent.toml")), agent).expect("write named agent");
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, script: &str) {
+        fs::write(path, script).expect("write script");
+        let mut perms = fs::metadata(path).expect("script metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod script");
+    }
+
+    struct EnvVarGuard {
+        key: String,
+        old: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &str, value: &Path) -> Self {
+            let old = env::var_os(key);
+            // Safety: tests intentionally override process env for provider binary resolution.
+            unsafe { env::set_var(key, value) };
+            Self {
+                key: key.to_string(),
+                old,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(old) = self.old.as_ref() {
+                // Safety: restoring previous test-local env snapshot.
+                unsafe { env::set_var(&self.key, old) };
+            } else {
+                // Safety: restoring by removing test-local env override.
+                unsafe { env::remove_var(&self.key) };
+            }
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -795,6 +859,174 @@ sandbox = "read_only"
             .error_message
             .as_deref()
             .is_some_and(|msg| msg.contains("provider `codex` is unavailable")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn watch_agent_events_surfaces_runtime_delta_for_gemini_and_claude() {
+        let temp = tempdir().expect("temp");
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        let workspace_dir = temp.path().join("workspace");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        fs::create_dir_all(&workspace_dir).expect("create workspace");
+
+        write_named_agent_spec_with_provider_and_runtime(
+            &agents_dir,
+            "gemini-research",
+            "gemini",
+            r#"timeout_secs = 10"#,
+        );
+        write_named_agent_spec_with_provider_and_runtime(
+            &agents_dir,
+            "claude-review",
+            "claude",
+            r#"timeout_secs = 10"#,
+        );
+
+        let gemini_script_path = temp.path().join("fake-gemini-stream.sh");
+        let claude_script_path = temp.path().join("fake-claude-stream.sh");
+        let script = r#"#!/bin/sh
+set -eu
+echo "chunk-stdout-1"
+echo "chunk-stderr-1" >&2
+sleep 1
+cat <<'EOF'
+<<<MCP_SUBAGENT_SUMMARY_JSON_START>>>
+{
+  "summary": "ok",
+  "key_findings": ["a"],
+  "artifacts": [],
+  "open_questions": [],
+  "next_steps": [],
+  "exit_code": 0,
+  "verification_status": "Passed",
+  "touched_files": ["src/lib.rs"]
+}
+<<<MCP_SUBAGENT_SUMMARY_JSON_END>>>
+EOF
+exit 0
+"#;
+        write_executable_script(&gemini_script_path, script);
+        write_executable_script(&claude_script_path, script);
+
+        let _gemini_env = EnvVarGuard::set_path("MCP_SUBAGENT_GEMINI_BIN", &gemini_script_path);
+        let _claude_env = EnvVarGuard::set_path("MCP_SUBAGENT_CLAUDE_BIN", &claude_script_path);
+
+        let server = make_server(agents_dir, state_dir);
+
+        for agent_name in ["gemini-research", "claude-review"] {
+            let spawn = server
+                .spawn_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
+                    agent_name: agent_name.to_string(),
+                    task: "stream delta probe".to_string(),
+                    task_brief: None,
+                    parent_summary: None,
+                    selected_files: Vec::new(),
+                    stage: None,
+                    plan_ref: None,
+                    working_dir: Some(workspace_dir.display().to_string()),
+                }))
+                .await
+                .expect("spawn")
+                .0;
+            assert_eq!(spawn.status, "accepted");
+
+            let started = Instant::now();
+            let mut terminal_observed = false;
+
+            for _ in 0..150 {
+                let events = server
+                    .watch_agent_events(rmcp::handler::server::wrapper::Parameters(
+                        crate::mcp::dto::WatchAgentEventsInput {
+                            handle_id: spawn.handle_id.clone(),
+                            since_seq: Some(0),
+                            limit: Some(200),
+                            phase: None,
+                            phase_timeout_secs: None,
+                        },
+                    ))
+                    .await
+                    .expect("watch events")
+                    .0;
+                if events.terminal {
+                    terminal_observed = true;
+                }
+                if terminal_observed && started.elapsed() >= Duration::from_millis(120) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+
+            server.wait_for_run(&spawn.handle_id).await;
+            let final_status = server
+                .get_agent_status(rmcp::handler::server::wrapper::Parameters(HandleInput {
+                    handle_id: spawn.handle_id.clone(),
+                }))
+                .await
+                .expect("final status")
+                .0;
+            assert_eq!(final_status.status, "succeeded");
+
+            let final_events = server
+                .watch_agent_events(rmcp::handler::server::wrapper::Parameters(
+                    crate::mcp::dto::WatchAgentEventsInput {
+                        handle_id: spawn.handle_id.clone(),
+                        since_seq: Some(0),
+                        limit: Some(300),
+                        phase: None,
+                        phase_timeout_secs: None,
+                    },
+                ))
+                .await
+                .expect("final watch events")
+                .0;
+            let final_event_names = final_events
+                .events
+                .iter()
+                .map(|event| event.event.as_str())
+                .collect::<Vec<_>>();
+            assert!(
+                final_event_names.contains(&"provider.first_output"),
+                "expected provider.first_output for {agent_name}; events={final_event_names:?}"
+            );
+            let first_delta = final_events
+                .events
+                .iter()
+                .find(|event| {
+                    event.event == "provider.stdout.delta" || event.event == "provider.stderr.delta"
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected provider delta event for {agent_name}; events={final_event_names:?}"
+                    )
+                });
+            let delta_at = time::OffsetDateTime::parse(
+                &first_delta.timestamp,
+                &time::format_description::well_known::Rfc3339,
+            )
+            .expect("parse first delta timestamp");
+            let completed_event = final_events
+                .events
+                .iter()
+                .find(|event| event.event == "run.completed")
+                .expect("run.completed event");
+            let completed_at = time::OffsetDateTime::parse(
+                &completed_event.timestamp,
+                &time::format_description::well_known::Rfc3339,
+            )
+            .expect("parse run.completed timestamp");
+            let delta_lead = if completed_at >= delta_at {
+                Duration::from_millis((completed_at - delta_at).whole_milliseconds() as u64)
+            } else {
+                Duration::from_secs(0)
+            };
+            assert!(
+                delta_lead >= Duration::from_millis(600),
+                "expected runtime delta event to lead completion by >=600ms for {agent_name}, got {:?}",
+                delta_lead
+            );
+        }
     }
 
     #[tokio::test]
@@ -1386,9 +1618,7 @@ sandbox = "read_only"
             })
             .unwrap_or_default();
         assert!(
-            cancelled_event_names
-                .iter()
-                .any(|event| *event == "run.cancelled"),
+            cancelled_event_names.contains(&"run.cancelled"),
             "expected run.cancelled event, got {cancelled_event_names:?}"
         );
 

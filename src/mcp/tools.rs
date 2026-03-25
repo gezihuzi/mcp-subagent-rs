@@ -1169,7 +1169,7 @@ impl McpSubagentServer {
             let (current_phase, phase_age_ms) = current_phase_age_ms(&events, now);
             let block_reason = runtime.block_reason.clone();
             let phase_timeout_hit = input.phase_timeout_secs.is_some_and(|timeout_secs| {
-                let matches_phase = input.phase.as_deref().map_or(true, |phase| {
+                let matches_phase = input.phase.as_deref().is_none_or(|phase| {
                     current_phase
                         .as_deref()
                         .is_some_and(|current| current == phase)
@@ -1262,7 +1262,7 @@ impl McpSubagentServer {
         let (current_phase, current_phase_age_ms) = current_phase_age_ms(&all_events, now);
         let block_reason = runtime.block_reason.clone();
         let phase_timeout_hit = input.phase_timeout_secs.is_some_and(|timeout_secs| {
-            let matches_phase = input.phase.as_deref().map_or(true, |phase| {
+            let matches_phase = input.phase.as_deref().is_none_or(|phase| {
                 current_phase
                     .as_deref()
                     .is_some_and(|current| current == phase)
