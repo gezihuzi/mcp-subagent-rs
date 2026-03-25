@@ -984,6 +984,12 @@ sandbox = "read_only"
                 .and_then(|value| value.as_str()),
             Some("Validated")
         );
+        assert_eq!(
+            result_json
+                .get("retry_classification")
+                .and_then(|value| value.as_str()),
+            Some("non_retryable")
+        );
 
         let logs_res = client
             .call_tool(

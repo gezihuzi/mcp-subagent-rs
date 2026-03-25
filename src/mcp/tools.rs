@@ -31,10 +31,11 @@ use crate::{
         service::run_dispatch,
         state::{
             append_status_if_terminal, apply_execution_policy_outcome, build_probe_result_snapshot,
-            build_run_request_snapshot, build_run_spec_snapshot, RunRecord,
+            build_run_request_snapshot, build_run_spec_snapshot, RetryClassificationRecord,
+            RunRecord,
         },
     },
-    runtime::dispatcher::RunStatus,
+    runtime::dispatcher::{RetryClassification, RunMetadata, RunStatus},
     types::RunMode,
 };
 
@@ -180,6 +181,26 @@ fn build_usage_output(record: &RunRecord) -> RunUsageOutput {
     }
 }
 
+fn map_retry_classification(metadata: &RunMetadata) -> RetryClassificationRecord {
+    RetryClassificationRecord {
+        classification: format!("{}", metadata.retry_classification),
+        reason: metadata.retry_classification_reason.clone(),
+    }
+}
+
+fn resolve_retry_classification(record: &RunRecord) -> (String, Option<String>) {
+    match &record.retry_classification {
+        Some(value) => {
+            let normalized = match value.classification.as_str() {
+                "retryable" | "non_retryable" | "unknown" => value.classification.clone(),
+                _ => "unknown".to_string(),
+            };
+            (normalized, value.reason.clone())
+        }
+        None => (format!("{}", RetryClassification::Unknown), None),
+    }
+}
+
 #[tool_router]
 impl McpSubagentServer {
     #[tool(description = "List all available mcp-subagent agent specs.")]
@@ -309,6 +330,7 @@ impl McpSubagentServer {
                 .and_then(|summary| summary.raw_fallback_text.clone())
         });
         let usage = build_usage_output(&record);
+        let (retry_classification, classification_reason) = resolve_retry_classification(&record);
 
         Ok(Json(GetRunResultOutput {
             contract_version: RUN_RESULT_CONTRACT_VERSION.to_string(),
@@ -337,6 +359,8 @@ impl McpSubagentServer {
             normalized_result: record.summary.as_ref().map(map_summary_output),
             provider_exit_code: usage.provider_exit_code,
             retries: usage.retries,
+            retry_classification,
+            classification_reason,
             usage,
             artifact_index: record.artifact_index,
         }))
@@ -490,6 +514,7 @@ impl McpSubagentServer {
             artifact_index: artifact_index.clone(),
         };
         let native_usage = result.native_usage;
+        let retry_classification = map_retry_classification(&result.metadata);
 
         let record = RunRecord {
             status: result.metadata.status,
@@ -508,6 +533,7 @@ impl McpSubagentServer {
             workspace: Some(workspace),
             compiled_context_markdown: Some(result.compiled_context_markdown),
             usage: native_usage,
+            retry_classification: Some(retry_classification),
             execution_policy,
         };
         drop(workspace_cleanup);
@@ -602,6 +628,7 @@ impl McpSubagentServer {
                             data: &mut artifacts,
                         },
                     );
+                    let retry_classification = map_retry_classification(&dispatch_result.metadata);
                     record.status = dispatch_result.metadata.status;
                     record.updated_at = OffsetDateTime::now_utc();
                     record.status_history = dispatch_result.metadata.status_history;
@@ -614,6 +641,7 @@ impl McpSubagentServer {
                     record.compiled_context_markdown =
                         Some(dispatch_result.compiled_context_markdown);
                     record.usage = dispatch_result.native_usage;
+                    record.retry_classification = Some(retry_classification);
                     drop(workspace_cleanup);
                 }
                 Err(err) => {
@@ -631,6 +659,7 @@ impl McpSubagentServer {
                     record.workspace = None;
                     record.compiled_context_markdown = None;
                     record.usage = None;
+                    record.retry_classification = None;
                 }
             }
 

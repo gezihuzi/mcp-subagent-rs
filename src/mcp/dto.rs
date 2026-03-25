@@ -176,6 +176,8 @@ pub struct GetRunResultOutput {
     pub normalized_result: Option<SummaryOutput>,
     pub provider_exit_code: Option<i32>,
     pub retries: u32,
+    pub retry_classification: String,
+    pub classification_reason: Option<String>,
     pub usage: RunUsageOutput,
     pub artifact_index: Vec<ArtifactOutput>,
 }

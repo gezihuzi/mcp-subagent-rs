@@ -20,12 +20,12 @@
 回滚策略：新增 MCP tools 仅扩展协议面，不破坏既有 `list_agents/run_agent/spawn_agent/get_agent_status/cancel_agent/read_agent_artifact`。
 风险与控制：watch 轮询可能带来频繁 IO；通过最小轮询间隔（50ms）与可配置 timeout 控制开销。
 
-### Batch V0.9-P2 - Run Timeline + Usage Precision（已完成 T-082/T-083/T-084）
+### Batch V0.9-P2 - Run Timeline + Usage + Retry Observability（已完成 T-082/T-083/T-084/T-085）
 
-目标：在已完成 `timeline` 可视化基础上，继续收口 provider usage 精度，降低 `estimated` 占比并保留 native-first 语义。
-依赖顺序：`T-082 -> T-083 -> T-084`（Completed 2026-03-25：timeline、provider usage 精细解析、ambient isolation diagnostics 均已落地）。
-回滚策略：仅增强 usage 解析器，不改 CLI/MCP 对外字段；异常时自然回退估算路径。
-风险与控制：宽松文本匹配可能误提取数字；通过 key 白名单、字段边界和单测样例控制误报。
+目标：在已完成 `timeline`、usage 精度和 ambient 诊断基础上，补齐 retry 分类可观测性（仅输出，不变更重试策略）。
+依赖顺序：`T-082 -> T-083 -> T-084 -> T-085`（Completed 2026-03-25：输出层 retry classification 已落地，执行策略未改动）。
+回滚策略：仅新增输出字段与事件，不改变执行重试分支；移除字段即可无损回滚。
+风险与控制：错误文案规则可能误分类；通过保守 `unknown` 分类与 reason 明示降低误导。
 
 ## Execution Strategy (v0.8 Current)
 

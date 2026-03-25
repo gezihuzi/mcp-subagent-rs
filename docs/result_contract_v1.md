@@ -31,6 +31,8 @@ Both CLI and MCP responses include:
 - `normalized_result: object|null`
 - `provider_exit_code: number|null`
 - `retries: number`
+- `retry_classification: string` (`retryable|non_retryable|unknown`)
+- `classification_reason: string|null`
 - `usage: object`
 - `error_message: string|null`
 - `artifact_index: array`
@@ -97,6 +99,8 @@ CLI (`result --json`):
   "normalized_result": null,
   "provider_exit_code": 0,
   "retries": 0,
+  "retry_classification": "non_retryable",
+  "classification_reason": "runner succeeded with validated structured summary",
   "usage": {
     "token_source": "estimated"
   },
@@ -121,6 +125,8 @@ MCP (`get_run_result`):
   "normalized_result": null,
   "provider_exit_code": 0,
   "retries": 0,
+  "retry_classification": "non_retryable",
+  "classification_reason": "runner succeeded with validated structured summary",
   "usage": {
     "token_source": "estimated"
   },

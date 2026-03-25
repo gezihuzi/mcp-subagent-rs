@@ -250,6 +250,7 @@ pub(crate) fn load_run_record_from_disk(
         workspace: persisted.workspace,
         compiled_context_markdown: persisted.compiled_context_markdown,
         usage: persisted.usage,
+        retry_classification: persisted.retry_classification,
         execution_policy: persisted.execution_policy,
     }))
 }
@@ -344,6 +345,17 @@ fn build_run_events(record: &RunRecord) -> Vec<RunEventRecord> {
                 "retry_policy_source": policy.retry_policy_source,
                 "attempts_used": policy.attempts_used,
                 "retries_used": policy.retries_used,
+            }),
+        });
+    }
+
+    if let Some(retry) = &record.retry_classification {
+        events.push(RunEventRecord {
+            event: "retry_classification".to_string(),
+            timestamp: timestamp.clone(),
+            detail: json!({
+                "classification": retry.classification,
+                "reason": retry.reason,
             }),
         });
     }

@@ -2202,3 +2202,35 @@
   - 新增 `ambient_isolation_detects_workspace_visible_skill_conflict_for_gemini`。
 - 已通过回归：
   - `cargo test -q`（`165 + 39 + 3` tests passed）。
+
+## T-085 V0.9-P2-RetryClassificationOutputOnly (Completed 2026-03-25)
+
+任务：增加 retry 分类可观测性输出，仅暴露分类与原因，不改变现有重试执行行为。  
+验收标准：
+
+1. 运行时记录最终尝试的 retry 分类（`retryable|non_retryable|unknown`）和分类原因。
+2. `run.json` 与 `events.ndjson` 持久化该分类信息。
+3. CLI `show/result --json` 和 MCP `get_run_result` 输出该分类信息。
+4. 不修改既有重试决策逻辑（是否重试、退避、次数保持原样）。
+5. 新增测试覆盖分类输出与持久化读取路径。
+6. `cargo test -q` 通过。
+完成记录：
+
+- 已在运行时输出 retry 分类信息（不改执行）：
+  - `src/runtime/dispatcher.rs` 新增 `RetryClassification`（`retryable|non_retryable|unknown`）；
+  - `RunMetadata` 新增 `retry_classification/retry_classification_reason`；
+  - 分类逻辑在失败文案解析、strict parse、timeout/cancel 等路径均会写入原因文本。
+- 已完成持久化与事件输出：
+  - `src/mcp/state.rs` 的 `RunRecord/PersistedRunRecord` 新增 `retry_classification`；
+  - `src/mcp/persistence.rs` 将其写入 `run.json`；
+  - `events.ndjson` 新增 `retry_classification` 事件（含分类与原因）。
+- 已完成 CLI/MCP 结果面透传：
+  - `src/main.rs` 的 `show/result --json` 新增 `retry_classification/classification_reason`；
+  - `src/mcp/dto.rs` + `src/mcp/tools.rs` 的 `get_run_result` 新增同名字段；
+  - 缺失历史字段时自动回退为 `unknown`。
+- 已同步契约文档与回归：
+  - `docs/result_contract_v1.md` 增补 retry 分类字段；
+  - `README.md` 增加结果面 retry 可观测性说明；
+  - 新增测试覆盖分类判定与结果字段输出，并更新 MCP e2e 断言。
+- 已通过回归：
+  - `cargo fmt && cargo test -q`（`167 + 41 + 3` tests passed）。

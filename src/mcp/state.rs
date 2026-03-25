@@ -44,6 +44,7 @@ pub(crate) struct RunRecord {
     pub(crate) workspace: Option<WorkspaceRecord>,
     pub(crate) compiled_context_markdown: Option<String>,
     pub(crate) usage: Option<NativeUsage>,
+    pub(crate) retry_classification: Option<RetryClassificationRecord>,
     pub(crate) execution_policy: Option<ExecutionPolicyRecord>,
 }
 
@@ -78,9 +79,18 @@ impl RunRecord {
             workspace: None,
             compiled_context_markdown: None,
             usage: None,
+            retry_classification: None,
             execution_policy,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetryClassificationRecord {
+    pub(crate) classification: String,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -227,6 +237,8 @@ pub(crate) struct PersistedRunRecord {
     #[serde(default)]
     pub(crate) usage: Option<NativeUsage>,
     #[serde(default)]
+    pub(crate) retry_classification: Option<RetryClassificationRecord>,
+    #[serde(default)]
     pub(crate) execution_policy: Option<ExecutionPolicyRecord>,
 }
 
@@ -248,6 +260,7 @@ impl From<&RunRecord> for PersistedRunRecord {
             workspace: value.workspace.clone(),
             compiled_context_markdown: value.compiled_context_markdown.clone(),
             usage: value.usage.clone(),
+            retry_classification: value.retry_classification.clone(),
             execution_policy: value.execution_policy.clone(),
         }
     }

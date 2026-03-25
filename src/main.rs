@@ -1003,6 +1003,13 @@ struct StoredNativeUsage {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
+struct StoredRetryClassification {
+    classification: String,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
 struct StoredRunRecord {
     status: String,
     created_at: Option<String>,
@@ -1016,6 +1023,7 @@ struct StoredRunRecord {
     execution_policy: Option<StoredExecutionPolicy>,
     compiled_context_markdown: Option<String>,
     usage: Option<StoredNativeUsage>,
+    retry_classification: Option<StoredRetryClassification>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1058,6 +1066,8 @@ struct RunShowOutput {
     summary: Option<String>,
     provider_exit_code: Option<i32>,
     retries: u32,
+    retry_classification: String,
+    classification_reason: Option<String>,
     usage: UsageStatsOutput,
     artifact_index: Vec<ArtifactOutput>,
 }
@@ -1074,6 +1084,8 @@ struct RunResultOutput {
     normalized_result: Option<StoredSummaryEnvelope>,
     provider_exit_code: Option<i32>,
     retries: u32,
+    retry_classification: String,
+    classification_reason: Option<String>,
     usage: UsageStatsOutput,
     error_message: Option<String>,
     artifact_index: Vec<ArtifactOutput>,
@@ -1160,7 +1172,7 @@ fn render_show_run_text(view: &RunShowOutput, color: bool) -> String {
             .unwrap_or("not_available")
     ));
     lines.push(format!(
-        "updated={} duration_ms={} exit_code={} retries={}",
+        "updated={} duration_ms={} exit_code={} retries={} retry_classification={}",
         view.updated_at,
         view.usage
             .duration_ms
@@ -1169,8 +1181,12 @@ fn render_show_run_text(view: &RunShowOutput, color: bool) -> String {
         view.provider_exit_code
             .map(|value| value.to_string())
             .unwrap_or_else(|| "unknown".to_string()),
-        view.retries
+        view.retries,
+        view.retry_classification
     ));
+    if let Some(reason) = view.classification_reason.as_deref() {
+        lines.push(format!("retry_reason: {reason}"));
+    }
     if let Some(summary) = view.summary.as_deref() {
         lines.push(format!("summary: {summary}"));
     }
@@ -1434,6 +1450,19 @@ fn build_usage_output(
     }
 }
 
+fn resolve_retry_classification(record: &StoredRunRecord) -> (String, Option<String>) {
+    match &record.retry_classification {
+        Some(value) => {
+            let normalized = match value.classification.as_str() {
+                "retryable" | "non_retryable" | "unknown" => value.classification.clone(),
+                _ => "unknown".to_string(),
+            };
+            (normalized, value.reason.clone())
+        }
+        None => ("unknown".to_string(), None),
+    }
+}
+
 fn list_runs(cfg: RuntimeConfig, limit: usize, json: bool) -> ExitCode {
     let entries = match list_run_records(&cfg.state_dir) {
         Ok(items) => items,
@@ -1495,6 +1524,7 @@ fn show_run(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
         }
     };
     let usage = build_usage_output(&cfg.state_dir, &handle_id, &record);
+    let (retry_classification, classification_reason) = resolve_retry_classification(&record);
     let view = RunShowOutput {
         handle_id: handle_id.clone(),
         status: record.status.clone(),
@@ -1518,6 +1548,8 @@ fn show_run(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
             .map(|summary| summary.summary.summary.clone()),
         provider_exit_code: infer_provider_exit_code(&record),
         retries: usage.retries,
+        retry_classification,
+        classification_reason,
         usage,
         artifact_index: record.artifact_index.clone(),
     };
@@ -1557,6 +1589,7 @@ fn read_result(
         });
     let normalized_result = record.summary.clone();
     let usage = build_usage_output(&cfg.state_dir, &handle_id, &record);
+    let (retry_classification, classification_reason) = resolve_retry_classification(&record);
     let view = if raw {
         "raw"
     } else if normalized {
@@ -1584,6 +1617,8 @@ fn read_result(
         normalized_result: normalized_result.clone(),
         provider_exit_code: usage.provider_exit_code,
         retries: usage.retries,
+        retry_classification,
+        classification_reason,
         usage,
         error_message: record.error_message.clone(),
         artifact_index: record.artifact_index.clone(),
@@ -2812,6 +2847,8 @@ target/
             summary: Some("all good".to_string()),
             provider_exit_code: Some(0),
             retries: 0,
+            retry_classification: "non_retryable".to_string(),
+            classification_reason: Some("runner succeeded".to_string()),
             usage: UsageStatsOutput {
                 started_at: Some("2026-03-25T00:00:00Z".to_string()),
                 finished_at: Some("2026-03-25T00:00:01Z".to_string()),
@@ -2850,6 +2887,8 @@ target/
             summary: None,
             provider_exit_code: Some(1),
             retries: 1,
+            retry_classification: "retryable".to_string(),
+            classification_reason: Some("matched retryable keyword `timeout`".to_string()),
             usage: UsageStatsOutput {
                 started_at: Some("2026-03-25T00:00:00Z".to_string()),
                 finished_at: Some("2026-03-25T00:00:01Z".to_string()),
@@ -2910,6 +2949,8 @@ target/
             normalized_result: None,
             provider_exit_code: Some(0),
             retries: 0,
+            retry_classification: "non_retryable".to_string(),
+            classification_reason: Some("runner succeeded".to_string()),
             usage: UsageStatsOutput {
                 started_at: Some("2026-03-25T00:00:00Z".to_string()),
                 finished_at: Some("2026-03-25T00:00:01Z".to_string()),
@@ -2941,6 +2982,8 @@ target/
             "usage",
             "provider_exit_code",
             "retries",
+            "retry_classification",
+            "classification_reason",
             "error_message",
             "artifact_index",
         ] {
@@ -3007,6 +3050,31 @@ target/
         assert_eq!(usage.token_source, "mixed");
         assert_eq!(usage.input_tokens, Some(50));
         assert!(usage.output_tokens.is_some(), "expected estimated fallback");
+    }
+
+    #[test]
+    fn resolve_retry_classification_defaults_unknown_when_missing() {
+        let record = StoredRunRecord::default();
+        let (classification, reason) = super::resolve_retry_classification(&record);
+        assert_eq!(classification, "unknown");
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn resolve_retry_classification_reads_persisted_value() {
+        let record = StoredRunRecord {
+            retry_classification: Some(super::StoredRetryClassification {
+                classification: "retryable".to_string(),
+                reason: Some("matched retryable keyword `network`".to_string()),
+            }),
+            ..StoredRunRecord::default()
+        };
+        let (classification, reason) = super::resolve_retry_classification(&record);
+        assert_eq!(classification, "retryable");
+        assert_eq!(
+            reason.as_deref(),
+            Some("matched retryable keyword `network`")
+        );
     }
 
     #[test]
