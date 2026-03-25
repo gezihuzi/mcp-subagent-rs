@@ -43,6 +43,8 @@ Contract reference: [`docs/result_contract_v1.md`](./docs/result_contract_v1.md)
 
 `show` renders a compact colorized view in interactive terminals; set `NO_COLOR=1` or use `--json` for plain machine-readable output.
 
+`doctor --json` includes `ambient_isolation` diagnostics (per-provider `native_discovery` profile and workspace-visible skill conflict detection).
+
 ## MCP Transport
 
 - Current implementation is `stdio` only (`mcp-subagent mcp`).

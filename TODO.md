@@ -2168,3 +2168,37 @@
 - 已通过回归：
   - `cargo test -q runtime::usage::tests`
   - `cargo fmt && cargo test -q`（`164 + 39 + 3` tests passed）。
+
+## T-084 V0.9-P2-PerProviderAmbientIsolationDiagnostics (Completed 2026-03-25)
+
+任务：在 `doctor` 增加 per-provider ambient isolation 诊断，让 Gemini/Claude/Codex 的 discovery 噪声风险可见可排障。  
+验收标准：
+
+1. `doctor --json` 输出新增 ambient isolation 结构，包含 provider 级 `native_discovery` 分布与风险等级。
+2. 诊断输出包含 skill roots 探测与 workspace-visible skill conflict 列表。
+3. 当存在高风险 discovery 配置或冲突时，`issues/advice` 给出明确建议。
+4. 文本模式 `doctor` 同步渲染上述诊断信息。
+5. 新增测试覆盖冲突识别与渲染关键字段。
+6. `cargo test -q` 通过。
+完成记录：
+
+- 已扩展 `DoctorReport`：
+  - `src/doctor.rs` 新增 `ambient_isolation` 字段及配套 DTO（provider profile、skill roots、skill conflicts）。
+- 已实现 per-provider 风险分析：
+  - 基于已加载 agent spec 统计 `native_discovery` 模式分布；
+  - 对 `gemini/claude/codex` 输出 `ambient_risk` 与推荐动作；
+  - `inherit/allowlist` 在 Gemini 且存在冲突时升级为 `high`。
+- 已实现 skill roots 与冲突检测：
+  - 探测 workspace/user 的 `.agents/skills` 与 `.gemini/skills`；
+  - 仅将“涉及 workspace root 的重名 skill”标记为冲突，避免纯用户态噪声。
+- 已接入健康判定：
+  - 新增 `provider_*_ambient_discovery` 与 `ambient_skill_conflicts` warning；
+  - `advice` 自动收敛到隔离建议。
+- 已同步文本输出与文档：
+  - `render_doctor_report` 增加 `ambient_isolation` 段落；
+  - `README.md` 增加 `doctor --json` 新诊断字段说明。
+- 已补测试：
+  - `builds_report_and_renders_key_fields` 增加 `ambient_isolation` 断言；
+  - 新增 `ambient_isolation_detects_workspace_visible_skill_conflict_for_gemini`。
+- 已通过回归：
+  - `cargo test -q`（`165 + 39 + 3` tests passed）。
