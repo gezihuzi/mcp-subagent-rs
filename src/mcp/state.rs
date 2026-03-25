@@ -16,8 +16,128 @@ use crate::{
         },
         AgentSpec,
     },
-    types::{ResolvedMemory, RunMode, RunRequest},
+    types::{ResolvedMemory, RunMode, RunRequest, TaskSpec, WorkflowHints},
 };
+
+// ===========================================================================
+// NEW: RunPhase — 显式阶段 enum（替代 RunStatus 在 state 中的角色）
+// ===========================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RunPhase {
+    Queued,
+    Validating,
+    ProbingProvider,
+    PreparingWorkspace,
+    ResolvingMemory,
+    CompilingContext,
+    Launching,
+    Running,
+    Collecting,
+    ParsingSummary,
+    Finalizing,
+    // Terminal phases
+    Succeeded,
+    Failed,
+    TimedOut,
+    Cancelled,
+}
+
+impl RunPhase {
+    pub(crate) fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::TimedOut | Self::Cancelled
+        )
+    }
+}
+
+impl std::fmt::Display for RunPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Queued => "queued",
+            Self::Validating => "validating",
+            Self::ProbingProvider => "probing_provider",
+            Self::PreparingWorkspace => "preparing_workspace",
+            Self::ResolvingMemory => "resolving_memory",
+            Self::CompilingContext => "compiling_context",
+            Self::Launching => "launching",
+            Self::Running => "running",
+            Self::Collecting => "collecting",
+            Self::ParsingSummary => "parsing_summary",
+            Self::Finalizing => "finalizing",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl From<&RunStatus> for RunPhase {
+    fn from(status: &RunStatus) -> Self {
+        match status {
+            RunStatus::Received => Self::Queued,
+            RunStatus::Validating => Self::Validating,
+            RunStatus::ProbingProvider => Self::ProbingProvider,
+            RunStatus::PreparingWorkspace => Self::PreparingWorkspace,
+            RunStatus::ResolvingMemory => Self::ResolvingMemory,
+            RunStatus::CompilingContext => Self::CompilingContext,
+            RunStatus::Launching => Self::Launching,
+            RunStatus::Running => Self::Running,
+            RunStatus::Collecting => Self::Collecting,
+            RunStatus::ParsingSummary => Self::ParsingSummary,
+            RunStatus::Finalizing => Self::Finalizing,
+            RunStatus::Succeeded => Self::Succeeded,
+            RunStatus::Failed => Self::Failed,
+            RunStatus::TimedOut => Self::TimedOut,
+            RunStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PhaseEntry {
+    pub(crate) phase: RunPhase,
+    #[serde(with = "time::serde::rfc3339")]
+    pub(crate) entered_at: OffsetDateTime,
+}
+
+// ===========================================================================
+// NEW: TaskSpecSnapshot — 从 TaskSpec 直接构建（替代 RunRequestSnapshot）
+// ===========================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TaskSpecSnapshot {
+    pub(crate) task: String,
+    #[serde(default)]
+    pub(crate) task_brief: Option<String>,
+    pub(crate) acceptance_criteria: Vec<String>,
+    pub(crate) selected_files: Vec<SelectedFileSnapshot>,
+    pub(crate) working_dir: PathBuf,
+}
+
+pub(crate) fn build_task_spec_snapshot(spec: &TaskSpec) -> TaskSpecSnapshot {
+    TaskSpecSnapshot {
+        task: spec.task.clone(),
+        task_brief: spec.task_brief.clone(),
+        acceptance_criteria: spec.acceptance_criteria.clone(),
+        selected_files: spec
+            .selected_files
+            .iter()
+            .map(|selected| SelectedFileSnapshot {
+                path: selected.path.clone(),
+                rationale: selected.rationale.clone(),
+                has_inlined_content: selected.content.is_some(),
+            })
+            .collect(),
+        working_dir: spec.working_dir.clone(),
+    }
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeState {

@@ -127,6 +127,90 @@ pub struct DispatchResult {
     pub native_usage: Option<NativeUsage>,
 }
 
+impl DispatchResult {
+    /// Convert to the new `RunOutcome` type.
+    /// This is the migration bridge — consumers should eventually construct
+    /// RunOutcome directly instead of going through DispatchResult.
+    pub fn to_run_outcome(&self) -> crate::runtime::outcome::RunOutcome {
+        use crate::runtime::outcome::*;
+
+        let duration_ms = (self.metadata.updated_at - self.metadata.created_at)
+            .whole_milliseconds()
+            .max(0) as u64;
+
+        let usage = build_usage_from_dispatch(self, duration_ms);
+
+        match &self.metadata.status {
+            RunStatus::Succeeded => {
+                let s = &self.summary.summary;
+                RunOutcome::Succeeded(SuccessOutcome {
+                    summary: s.summary.clone(),
+                    key_findings: s.key_findings.clone(),
+                    touched_files: s.touched_files.clone(),
+                    next_steps: s.next_steps.clone(),
+                    open_questions: s.open_questions.clone(),
+                    artifacts: s.artifacts.clone(),
+                    verification: s.verification_status.clone(),
+                    usage,
+                    parse_status: self.summary.parse_status.clone(),
+                    plan_refs: s.plan_refs.clone(),
+                })
+            }
+            RunStatus::Failed => RunOutcome::Failed(FailureOutcome {
+                error: self
+                    .metadata
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "unknown failure".to_string()),
+                retry: RetryInfo {
+                    classification: self.metadata.retry_classification.clone(),
+                    reason: self.metadata.retry_classification_reason.clone(),
+                    attempts_used: self.metadata.attempts_used,
+                },
+                partial_summary: Some(self.summary.summary.summary.clone()),
+                usage,
+            }),
+            RunStatus::TimedOut => RunOutcome::TimedOut {
+                elapsed_secs: duration_ms / 1000,
+            },
+            RunStatus::Cancelled => RunOutcome::Cancelled {
+                reason: self
+                    .metadata
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "cancelled".to_string()),
+            },
+            _ => RunOutcome::Failed(FailureOutcome {
+                error: format!(
+                    "unexpected terminal status: {}",
+                    self.metadata.status
+                ),
+                retry: RetryInfo {
+                    classification: RetryClassification::Unknown,
+                    reason: None,
+                    attempts_used: self.metadata.attempts_used,
+                },
+                partial_summary: None,
+                usage,
+            }),
+        }
+    }
+}
+
+fn build_usage_from_dispatch(
+    result: &DispatchResult,
+    duration_ms: u64,
+) -> crate::runtime::outcome::UsageStats {
+    let native = result.native_usage.as_ref();
+    crate::runtime::outcome::UsageStats {
+        duration_ms,
+        input_tokens: native.and_then(|u| u.input_tokens),
+        output_tokens: native.and_then(|u| u.output_tokens),
+        total_tokens: native.and_then(|u| u.total_tokens),
+        provider_exit_code: native.and_then(|u| u.exit_code),
+    }
+}
+
 #[derive(Debug)]
 pub struct Dispatcher<C, R> {
     compiler: C,
