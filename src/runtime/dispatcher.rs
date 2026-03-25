@@ -12,7 +12,7 @@ use crate::{
     error::{McpSubagentError, Result},
     runtime::{
         context::ContextCompiler,
-        runners::{AgentRunner, RunnerTerminalState},
+        runners::{AgentRunner, RunnerOutputObserver, RunnerTerminalState},
         summary::{SummaryEnvelope, SummaryParseStatus},
         usage::NativeUsage,
     },
@@ -148,7 +148,7 @@ where
         request: &RunRequest,
         memory: ResolvedMemory,
     ) -> Result<DispatchResult> {
-        self.run_with_transition_observer(spec, request, memory, |_prev, _next| {})
+        self.run_with_observers(spec, request, memory, |_prev, _next| {}, None)
             .await
     }
 
@@ -158,6 +158,21 @@ where
         request: &RunRequest,
         memory: ResolvedMemory,
         mut on_transition: F,
+    ) -> Result<DispatchResult>
+    where
+        F: FnMut(Option<RunStatus>, RunStatus),
+    {
+        self.run_with_observers(spec, request, memory, &mut on_transition, None)
+            .await
+    }
+
+    pub async fn run_with_observers<F>(
+        &self,
+        spec: &crate::spec::AgentSpec,
+        request: &RunRequest,
+        memory: ResolvedMemory,
+        mut on_transition: F,
+        mut output_observer: Option<&mut dyn RunnerOutputObserver>,
     ) -> Result<DispatchResult>
     where
         F: FnMut(Option<RunStatus>, RunStatus),
@@ -211,7 +226,14 @@ where
             previous_status = tracker.metadata.status.clone();
             tracker.transition(RunStatus::Running);
             on_transition(Some(previous_status), RunStatus::Running);
-            let execution = self.runner.execute(spec, request, &compiled).await?;
+            let execution = match output_observer.as_deref_mut() {
+                Some(observer) => {
+                    self.runner
+                        .execute_with_observer(spec, request, &compiled, observer)
+                        .await?
+                }
+                None => self.runner.execute(spec, request, &compiled).await?,
+            };
 
             previous_status = tracker.metadata.status.clone();
             tracker.transition(RunStatus::Collecting);

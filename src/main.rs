@@ -1615,6 +1615,17 @@ fn load_run_events_incremental(
     Ok(events)
 }
 
+fn collect_watch_events_incremental(
+    state_dir: &Path,
+    handle_id: &str,
+    cursor: &mut EventStreamCursor,
+    all_events: &mut Vec<RunTimelineEvent>,
+) -> std::result::Result<Vec<RunTimelineEvent>, String> {
+    let new_events = load_run_events_incremental(state_dir, handle_id, cursor)?;
+    all_events.extend(new_events.iter().cloned());
+    Ok(new_events)
+}
+
 fn parse_rfc3339(value: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
 }
@@ -3362,7 +3373,8 @@ async fn watch_run(
 ) -> ExitCode {
     let started = Instant::now();
     let mut last_status = String::new();
-    let mut seen_event_count = 0usize;
+    let mut cursor = EventStreamCursor::default();
+    let mut all_events = Vec::new();
     let mut last_phase_progress = String::new();
     let mut observed_phase: Option<String> = None;
     let mut observed_phase_started_at = Instant::now();
@@ -3376,8 +3388,13 @@ async fn watch_run(
         };
 
         if !json {
-            if let Ok(events) = load_run_events(&cfg.state_dir, &handle_id) {
-                for event in events.iter().skip(seen_event_count) {
+            if let Ok(new_events) = collect_watch_events_incremental(
+                &cfg.state_dir,
+                &handle_id,
+                &mut cursor,
+                &mut all_events,
+            ) {
+                for event in &new_events {
                     if phase.as_deref().is_some_and(|needle| {
                         !event.phase.as_deref().is_some_and(|value| value == needle)
                     }) {
@@ -3398,14 +3415,13 @@ async fn watch_run(
                         );
                     }
                 }
-                seen_event_count = events.len();
-                let current_phase = latest_event(&events).and_then(|evt| evt.phase.clone());
+                let current_phase = latest_event(&all_events).and_then(|evt| evt.phase.clone());
                 if current_phase != observed_phase {
                     observed_phase = current_phase;
                     observed_phase_started_at = Instant::now();
                 }
                 if let Some(line) = build_phase_progress_line(
-                    &events,
+                    &all_events,
                     is_terminal_status(record.status.as_str()),
                     OffsetDateTime::now_utc(),
                     phase.as_deref(),
@@ -4222,6 +4238,8 @@ mod tests {
 
     use clap::Parser;
     use tempfile::tempdir;
+
+    use mcp_subagent::config::RuntimeConfig;
 
     use crate::{
         bootstrap_bridge_config_template, build_selected_file_inputs, clean_state_dir,
@@ -5083,6 +5101,94 @@ target/
             .expect("read completed");
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].seq, Some(1));
+    }
+
+    #[test]
+    fn collect_watch_events_incremental_only_returns_new_events() {
+        let dir = tempdir().expect("tempdir");
+        let run_dir = dir.path().join("runs").join("handle-1");
+        fs::create_dir_all(&run_dir).expect("mkdir run");
+        let events_path = run_dir.join("events.jsonl");
+        fs::write(
+            &events_path,
+            "{\"event\":\"run.accepted\",\"timestamp\":\"2026-03-25T00:00:00Z\",\"detail\":{},\"seq\":1}\n",
+        )
+        .expect("write initial event");
+
+        let mut cursor = super::EventStreamCursor::default();
+        let mut all_events = Vec::new();
+        let first = super::collect_watch_events_incremental(
+            dir.path(),
+            "handle-1",
+            &mut cursor,
+            &mut all_events,
+        )
+        .expect("first collect");
+        assert_eq!(first.len(), 1);
+        assert_eq!(all_events.len(), 1);
+
+        let second = super::collect_watch_events_incremental(
+            dir.path(),
+            "handle-1",
+            &mut cursor,
+            &mut all_events,
+        )
+        .expect("second collect");
+        assert!(second.is_empty());
+        assert_eq!(all_events.len(), 1);
+
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&events_path)
+            .expect("open append");
+        writeln!(
+            file,
+            "{{\"event\":\"provider.boot.started\",\"timestamp\":\"2026-03-25T00:00:01Z\",\"detail\":{{}},\"seq\":2}}"
+        )
+        .expect("append event");
+
+        let third = super::collect_watch_events_incremental(
+            dir.path(),
+            "handle-1",
+            &mut cursor,
+            &mut all_events,
+        )
+        .expect("third collect");
+        assert_eq!(third.len(), 1);
+        assert_eq!(all_events.len(), 2);
+        assert_eq!(all_events[1].event, "provider.boot.started");
+    }
+
+    #[tokio::test]
+    async fn watch_run_timeout_keeps_existing_timeout_semantics() {
+        let dir = tempdir().expect("tempdir");
+        let run_dir = dir.path().join("runs").join("handle-1");
+        fs::create_dir_all(&run_dir).expect("mkdir run");
+        fs::write(
+            run_dir.join("run.json"),
+            serde_json::json!({
+                "status": "running",
+                "updated_at": "2026-03-25T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .expect("write run record");
+        fs::write(
+            run_dir.join("events.jsonl"),
+            "{\"event\":\"run.accepted\",\"timestamp\":\"2026-03-25T00:00:00Z\",\"detail\":{},\"seq\":1,\"state\":\"accepted\",\"phase\":\"accepted\"}\n",
+        )
+        .expect("write events");
+
+        let cfg = RuntimeConfig {
+            agents_dirs: vec![PathBuf::from("./agents")],
+            state_dir: dir.path().to_path_buf(),
+            log_level: "info".to_string(),
+        };
+
+        let code =
+            super::watch_run(cfg, "handle-1".to_string(), None, 50, Some(0), None, false).await;
+        assert_eq!(code, std::process::ExitCode::from(1));
     }
 
     #[test]

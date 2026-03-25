@@ -2876,7 +2876,7 @@
   - 补充说明 CLI `spawn/submit` accepted 后立即退出，后续用 `watch/events/stats/result` 观察。
 - 已通过 `cargo fmt && cargo test -q`（186 + 62 + 3 全通过）。
 
-## T-109 V0.10-P1-RealtimeContextParseWorkspaceEvents (Pending)
+## T-109 V0.10-P1-RealtimeContextParseWorkspaceEvents (Completed 2026-03-25)
 
 任务：将 `workspace/context/parse` 事件从 synthetic 尾部补写改为运行时实时事件。  
 验收标准：
@@ -2887,8 +2887,20 @@
 4. 移除相应 synthetic 补写路径，不再依赖 `status_history` 回填。
 5. 新增测试覆盖事件时间顺序（probe -> workspace -> context -> parse -> completed）。
 6. `cargo test -q` 全量通过。
+完成记录：
 
-## T-110 V0.10-P1-ProviderDeltaStreamingRuntimePath (Pending)
+- 已升级 `src/mcp/service.rs::run_dispatch`：
+  - `workspace.prepare.completed` 在 workspace 准备完成后实时写入；
+  - 通过 `dispatcher.run_with_observers(..., on_transition, ...)` 在状态切换时实时写入
+    `context.compile.started/completed` 与 `parse.started/completed`。
+- 已升级 `src/runtime/dispatcher.rs`：
+  - 新增 `run_with_observers`，统一承载 transition observer（并为后续输出 observer 预留能力）。
+- 已移除 `src/mcp/tools.rs` 里依赖 `status_history` 的 synthetic 事件回填路径。
+- 已补齐/更新测试：
+  - `src/mcp/server.rs` 验证事件顺序覆盖 `probe -> workspace -> context -> parse -> completed`。
+- 已通过 `cargo test -q`（185 + 64 + 3 全通过）。
+
+## T-110 V0.10-P1-ProviderDeltaStreamingRuntimePath (Completed 2026-03-25)
 
 任务：把 `provider.stdout.delta/provider.stderr.delta` 从结束后一次性写入改成运行期流式增量写入。  
 验收标准：
@@ -2899,8 +2911,24 @@
 4. `watch/events/logs` 能在任务进行中消费到这些 delta 事件。
 5. 新增测试覆盖至少一个 provider runner 的增量输出路径（可用 fake runner fixture）。
 6. `cargo test -q` 全量通过。
+完成记录：
 
-## T-111 V0.10-P1-WatchIncrementalCursorParity (Pending)
+- 已升级 runner 输出观察器链路：
+  - `src/runtime/runners/mod.rs` 新增 `RunnerOutputObserver/RunnerOutputStream`；
+  - `AgentRunner` 新增 `execute_with_observer` 默认实现（兼容旧 runner）。
+- 已在 `src/runtime/runners/codex.rs` 落地真实增量输出路径：
+  - `execute_with_observer` 使用流式读取 child stdout/stderr，按 chunk 回调 observer；
+  - 保留超时/失败语义与 `--output-last-message` 拼接行为。
+- 已在 `src/mcp/service.rs` 增加运行期事件观察器：
+  - 首次 chunk 实时发 `provider.first_output`；
+  - 持续发 `provider.stdout.delta/provider.stderr.delta`。
+- 已升级 `src/mcp/tools.rs`：
+  - 保留完成态 fallback，但按事件去重，避免与实时流重复写入。
+- 已新增测试：
+  - `codex_runner_execute_with_observer_streams_output_chunks`（fake codex fixture，覆盖增量 stdout/stderr 观察）。
+- 已通过 `cargo test -q`（185 + 64 + 3 全通过）。
+
+## T-111 V0.10-P1-WatchIncrementalCursorParity (Completed 2026-03-25)
 
 任务：将 `watch` 路径与 `events --follow` 对齐为增量 cursor 消费，消除全量轮询读取。  
 验收标准：
@@ -2910,3 +2938,14 @@
 3. 与 `events --follow` 输出一致性保持（同一 run 同阶段不产生自相矛盾）。
 4. 新增测试覆盖 `watch` 增量读取与超时行为。
 5. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/main.rs::watch_run`：
+  - 从全量 `load_run_events` 轮询改为 `EventStreamCursor` 增量消费；
+  - 保持原有 `phase_progress/phase_timeout/terminal` 退出语义。
+- 已新增 watch 专属增量辅助函数：
+  - `collect_watch_events_incremental`（与 `events --follow` 共用增量读取模型）。
+- 已新增测试：
+  - `collect_watch_events_incremental_only_returns_new_events`；
+  - `watch_run_timeout_keeps_existing_timeout_semantics`。
+- 已通过 `cargo test -q`（185 + 64 + 3 全通过）。

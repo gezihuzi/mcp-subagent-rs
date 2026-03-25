@@ -2,16 +2,21 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    sync::mpsc::{self, error::TryRecvError},
+};
 
 use crate::{
     error::{McpSubagentError, Result},
-    runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
+    runtime::runners::{
+        AgentRunner, RunnerExecution, RunnerOutputObserver, RunnerOutputStream, RunnerTerminalState,
+    },
     spec::{
         provider_overrides::{CodexSandboxMode, ReasoningEffort},
         runtime_policy::{ApprovalPolicy, SandboxPolicy},
@@ -38,11 +43,12 @@ impl CodexRunner {
         Self { executable }
     }
 
-    pub async fn execute(
+    async fn execute_internal(
         &self,
         spec: &AgentSpec,
         request: &RunRequest,
         compiled: &CompiledContext,
+        mut observer: Option<&mut dyn RunnerOutputObserver>,
     ) -> Result<RunnerExecution> {
         let prompt = compose_prompt(compiled);
         let output_file = std::env::temp_dir().join(format!(
@@ -99,21 +105,56 @@ impl CodexRunner {
                 .map_err(McpSubagentError::Io)?;
         }
 
-        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(waited) => waited.map_err(McpSubagentError::Io)?,
-            Err(_) => {
-                let _ = fs::remove_file(&output_file);
-                let _ = fs::remove_file(&schema_file);
-                return Ok(RunnerExecution {
-                    terminal_state: RunnerTerminalState::TimedOut,
-                    stdout: String::new(),
-                    stderr: format!("codex execution exceeded timeout of {}s", timeout.as_secs()),
-                });
+        let (status, mut stdout, stderr, timed_out) = match observer.as_deref_mut() {
+            Some(output_observer) => {
+                let observed =
+                    collect_streaming_output(&mut child, timeout, output_observer).await?;
+                (
+                    observed.status,
+                    observed.stdout,
+                    observed.stderr,
+                    observed.timed_out,
+                )
             }
+            None => match tokio::time::timeout(timeout, child.wait_with_output()).await {
+                Ok(waited) => {
+                    let output = waited.map_err(McpSubagentError::Io)?;
+                    (
+                        output.status,
+                        String::from_utf8_lossy(&output.stdout).to_string(),
+                        String::from_utf8_lossy(&output.stderr).to_string(),
+                        false,
+                    )
+                }
+                Err(_) => {
+                    let _ = fs::remove_file(&output_file);
+                    let _ = fs::remove_file(&schema_file);
+                    return Ok(RunnerExecution {
+                        terminal_state: RunnerTerminalState::TimedOut,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "codex execution exceeded timeout of {}s",
+                            timeout.as_secs()
+                        ),
+                    });
+                }
+            },
         };
 
-        let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if timed_out {
+            let _ = fs::remove_file(&output_file);
+            let _ = fs::remove_file(&schema_file);
+            return Ok(RunnerExecution {
+                terminal_state: RunnerTerminalState::TimedOut,
+                stdout,
+                stderr: if stderr.is_empty() {
+                    format!("codex execution exceeded timeout of {}s", timeout.as_secs())
+                } else {
+                    stderr
+                },
+            });
+        }
+
         if let Ok(last_message) = fs::read_to_string(&output_file) {
             if !last_message.trim().is_empty() {
                 if !stdout.is_empty() && !stdout.ends_with('\n') {
@@ -125,10 +166,10 @@ impl CodexRunner {
         let _ = fs::remove_file(&output_file);
         let _ = fs::remove_file(&schema_file);
 
-        let terminal_state = if output.status.success() {
+        let terminal_state = if status.success() {
             RunnerTerminalState::Succeeded
         } else {
-            let exit_code = output.status.code().unwrap_or(-1);
+            let exit_code = status.code().unwrap_or(-1);
             let mut message = format!("codex exited with code {exit_code}");
             if let Some(summary_line) = summarize_codex_stderr(&stderr) {
                 message.push_str(": ");
@@ -143,6 +184,15 @@ impl CodexRunner {
             stderr,
         })
     }
+
+    pub async fn execute(
+        &self,
+        spec: &AgentSpec,
+        request: &RunRequest,
+        compiled: &CompiledContext,
+    ) -> Result<RunnerExecution> {
+        self.execute_internal(spec, request, compiled, None).await
+    }
 }
 
 #[async_trait]
@@ -155,6 +205,130 @@ impl AgentRunner for CodexRunner {
     ) -> Result<RunnerExecution> {
         CodexRunner::execute(self, spec, request, compiled).await
     }
+
+    async fn execute_with_observer(
+        &self,
+        spec: &AgentSpec,
+        request: &RunRequest,
+        compiled: &CompiledContext,
+        observer: &mut dyn RunnerOutputObserver,
+    ) -> Result<RunnerExecution> {
+        self.execute_internal(spec, request, compiled, Some(observer))
+            .await
+    }
+}
+
+struct StreamingOutput {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
+    timed_out: bool,
+}
+
+async fn read_stream_chunks<R>(
+    mut reader: R,
+    stream: RunnerOutputStream,
+    tx: mpsc::UnboundedSender<(RunnerOutputStream, Vec<u8>)>,
+) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let mut all = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        let bytes = chunk[..read].to_vec();
+        all.extend_from_slice(&bytes);
+        let _ = tx.send((stream, bytes));
+    }
+    Ok(all)
+}
+
+async fn join_chunk_task(
+    task: Option<tokio::task::JoinHandle<std::io::Result<Vec<u8>>>>,
+) -> Result<Vec<u8>> {
+    match task {
+        Some(task) => task
+            .await
+            .map_err(|err| McpSubagentError::Io(std::io::Error::other(err.to_string())))?
+            .map_err(McpSubagentError::Io),
+        None => Ok(Vec::new()),
+    }
+}
+
+async fn collect_streaming_output(
+    child: &mut tokio::process::Child,
+    timeout: Duration,
+    observer: &mut dyn RunnerOutputObserver,
+) -> Result<StreamingOutput> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<(RunnerOutputStream, Vec<u8>)>();
+    let stdout_task = child.stdout.take().map(|stdout| {
+        let tx = tx.clone();
+        tokio::spawn(read_stream_chunks(stdout, RunnerOutputStream::Stdout, tx))
+    });
+    let stderr_task = child.stderr.take().map(|stderr| {
+        let tx = tx.clone();
+        tokio::spawn(read_stream_chunks(stderr, RunnerOutputStream::Stderr, tx))
+    });
+    drop(tx);
+
+    let started = Instant::now();
+    let mut status: Option<std::process::ExitStatus> = None;
+    let mut channel_closed = false;
+    let mut timed_out = false;
+
+    loop {
+        loop {
+            match rx.try_recv() {
+                Ok((stream, chunk)) => {
+                    if !chunk.is_empty() {
+                        let text = String::from_utf8_lossy(&chunk);
+                        observer.on_output(stream, text.as_ref());
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    channel_closed = true;
+                    break;
+                }
+            }
+        }
+
+        if status.is_none() {
+            status = child.try_wait().map_err(McpSubagentError::Io)?;
+        }
+
+        if status.is_some() && channel_closed {
+            break;
+        }
+
+        if started.elapsed() >= timeout {
+            timed_out = true;
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    if timed_out {
+        let _ = child.kill().await;
+        status = Some(child.wait().await.map_err(McpSubagentError::Io)?);
+    }
+
+    let stdout = join_chunk_task(stdout_task).await?;
+    let stderr = join_chunk_task(stderr_task).await?;
+    let status = status
+        .ok_or_else(|| McpSubagentError::Io(std::io::Error::other("missing child status")))?;
+
+    Ok(StreamingOutput {
+        status,
+        stdout: String::from_utf8_lossy(&stdout).to_string(),
+        stderr: String::from_utf8_lossy(&stderr).to_string(),
+        timed_out,
+    })
 }
 
 fn compose_prompt(compiled: &CompiledContext) -> String {
@@ -286,7 +460,7 @@ mod tests {
                 build_codex_output_schema_json, normalize_openai_strict_schema,
                 summarize_codex_stderr, CodexRunner,
             },
-            runners::RunnerTerminalState,
+            runners::{AgentRunner, RunnerOutputObserver, RunnerOutputStream, RunnerTerminalState},
         },
         spec::{
             core::{AgentSpecCore, Provider},
@@ -332,6 +506,17 @@ mod tests {
             working_dir,
             run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+        }
+    }
+
+    #[derive(Default)]
+    struct CollectingObserver {
+        events: Vec<(RunnerOutputStream, String)>,
+    }
+
+    impl RunnerOutputObserver for CollectingObserver {
+        fn on_output(&mut self, stream: RunnerOutputStream, chunk: &str) {
+            self.events.push((stream, chunk.to_string()));
         }
     }
 
@@ -494,6 +679,86 @@ exit 7
             other => panic!("unexpected terminal state: {other:?}"),
         }
         assert!(execution.stderr.contains("auth required"));
+    }
+
+    #[tokio::test]
+    async fn codex_runner_execute_with_observer_streams_output_chunks() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("fake-codex-stream.sh");
+        let script = r#"#!/bin/sh
+set -eu
+output_file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output-last-message)
+      output_file="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+cat >/dev/null
+echo "stdout-chunk-1"
+sleep 0.1
+echo "stdout-chunk-2"
+echo "stderr-chunk-1" >&2
+sleep 0.1
+echo "stderr-chunk-2" >&2
+cat >"$output_file" <<'EOF'
+<<<MCP_SUBAGENT_SUMMARY_JSON_START>>>
+{
+  "summary": "ok",
+  "key_findings": [],
+  "artifacts": [],
+  "open_questions": [],
+  "next_steps": [],
+  "exit_code": 0,
+  "verification_status": "Passed",
+  "touched_files": [],
+  "plan_refs": []
+}
+<<<MCP_SUBAGENT_SUMMARY_JSON_END>>>
+EOF
+exit 0
+"#;
+        fs::write(&script_path, script).expect("write script");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod");
+
+        let runner = CodexRunner::new(script_path);
+        let mut observer = CollectingObserver::default();
+        let execution = <CodexRunner as AgentRunner>::execute_with_observer(
+            &runner,
+            &sample_spec(),
+            &sample_request(dir.path().to_path_buf()),
+            &CompiledContext {
+                system_prefix: "sys".to_string(),
+                injected_prompt: "prompt".to_string(),
+                source_manifest: Vec::new(),
+            },
+            &mut observer,
+        )
+        .await
+        .expect("execute with observer");
+
+        assert_eq!(execution.terminal_state, RunnerTerminalState::Succeeded);
+        assert!(
+            observer.events.iter().any(|(stream, chunk)| matches!(
+                stream,
+                RunnerOutputStream::Stdout
+            ) && chunk.contains("stdout-chunk")),
+            "observer should receive stdout chunks"
+        );
+        assert!(
+            observer.events.iter().any(|(stream, chunk)| matches!(
+                stream,
+                RunnerOutputStream::Stderr
+            ) && chunk.contains("stderr-chunk")),
+            "observer should receive stderr chunks"
+        );
     }
 
     #[tokio::test]

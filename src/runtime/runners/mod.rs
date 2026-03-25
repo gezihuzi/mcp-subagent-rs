@@ -20,6 +20,16 @@ pub enum RunnerTerminalState {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerOutputStream {
+    Stdout,
+    Stderr,
+}
+
+pub trait RunnerOutputObserver: Send {
+    fn on_output(&mut self, stream: RunnerOutputStream, chunk: &str);
+}
+
 #[derive(Debug, Clone)]
 pub struct RunnerExecution {
     pub terminal_state: RunnerTerminalState,
@@ -35,6 +45,16 @@ pub trait AgentRunner: Send + Sync {
         request: &RunRequest,
         compiled: &CompiledContext,
     ) -> Result<RunnerExecution>;
+
+    async fn execute_with_observer(
+        &self,
+        spec: &AgentSpec,
+        request: &RunRequest,
+        compiled: &CompiledContext,
+        _observer: &mut dyn RunnerOutputObserver,
+    ) -> Result<RunnerExecution> {
+        self.execute(spec, request, compiled).await
+    }
 }
 
 #[async_trait]
@@ -49,5 +69,17 @@ where
         compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
         (**self).execute(spec, request, compiled).await
+    }
+
+    async fn execute_with_observer(
+        &self,
+        spec: &AgentSpec,
+        request: &RunRequest,
+        compiled: &CompiledContext,
+        observer: &mut dyn RunnerOutputObserver,
+    ) -> Result<RunnerExecution> {
+        (**self)
+            .execute_with_observer(spec, request, compiled, observer)
+            .await
     }
 }

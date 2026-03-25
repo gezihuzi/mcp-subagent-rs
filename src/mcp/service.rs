@@ -16,7 +16,7 @@ use crate::{
         runners::{
             self,
             mock::{MockRunPlan, MockRunner},
-            AgentRunner,
+            AgentRunner, RunnerOutputObserver, RunnerOutputStream,
         },
         workspace::{prepare_workspace, PreparedWorkspace, WorkspaceMode},
     },
@@ -71,8 +71,9 @@ pub(crate) async fn run_dispatch(
 
     let runner = select_runner(&effective_spec.core.provider);
     let dispatcher = Dispatcher::new(DefaultContextCompiler, runner);
+    let mut delta_observer = RunDeltaEventObserver::new(state_dir, handle_id);
     let mut result = dispatcher
-        .run_with_transition_observer(
+        .run_with_observers(
             &effective_spec,
             &effective_request,
             resolved_memory,
@@ -148,6 +149,7 @@ pub(crate) async fn run_dispatch(
                     );
                 }
             },
+            Some(&mut delta_observer),
         )
         .await
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
@@ -160,6 +162,63 @@ pub(crate) async fn run_dispatch(
         memory_resolution,
         _workspace_cleanup: workspace_cleanup,
     })
+}
+
+struct RunDeltaEventObserver<'a> {
+    state_dir: &'a Path,
+    handle_id: &'a str,
+    first_output_emitted: bool,
+}
+
+impl<'a> RunDeltaEventObserver<'a> {
+    fn new(state_dir: &'a Path, handle_id: &'a str) -> Self {
+        Self {
+            state_dir,
+            handle_id,
+            first_output_emitted: false,
+        }
+    }
+}
+
+impl RunnerOutputObserver for RunDeltaEventObserver<'_> {
+    fn on_output(&mut self, stream: RunnerOutputStream, chunk: &str) {
+        if chunk.trim().is_empty() {
+            return;
+        }
+        if !self.first_output_emitted {
+            self.first_output_emitted = true;
+            let _ = append_run_event(
+                self.state_dir,
+                self.handle_id,
+                "provider.first_output",
+                "running",
+                "running",
+                "provider",
+                "provider produced output",
+                json!({
+                    "stdout_bytes": if matches!(stream, RunnerOutputStream::Stdout) { chunk.len() } else { 0 },
+                    "stderr_bytes": if matches!(stream, RunnerOutputStream::Stderr) { chunk.len() } else { 0 },
+                }),
+            );
+        }
+        let (event, message) = match stream {
+            RunnerOutputStream::Stdout => ("provider.stdout.delta", "provider stdout received"),
+            RunnerOutputStream::Stderr => ("provider.stderr.delta", "provider stderr received"),
+        };
+        let _ = append_run_event(
+            self.state_dir,
+            self.handle_id,
+            event,
+            "running",
+            "running",
+            "provider",
+            message,
+            json!({
+                "bytes": chunk.len(),
+                "lines": chunk.lines().count(),
+            }),
+        );
+    }
 }
 
 fn apply_workspace_runtime_overrides(

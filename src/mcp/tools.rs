@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -777,43 +777,8 @@ fn collect_wait_reasons(events: &[RunEventOutput]) -> (Vec<String>, Option<Strin
     (reasons, current)
 }
 
-fn append_provider_output_delta_events(
-    state_dir: &Path,
-    handle_id: &str,
-    stdout: &str,
-    stderr: &str,
-) -> std::result::Result<(), ErrorData> {
-    if !stdout.trim().is_empty() {
-        append_run_event(
-            state_dir,
-            handle_id,
-            "provider.stdout.delta",
-            "running",
-            "running",
-            "provider",
-            "provider stdout received",
-            json!({
-                "bytes": stdout.len(),
-                "lines": stdout.lines().count(),
-            }),
-        )?;
-    }
-    if !stderr.trim().is_empty() {
-        append_run_event(
-            state_dir,
-            handle_id,
-            "provider.stderr.delta",
-            "running",
-            "running",
-            "provider",
-            "provider stderr received",
-            json!({
-                "bytes": stderr.len(),
-                "lines": stderr.lines().count(),
-            }),
-        )?;
-    }
-    Ok(())
+fn has_event_named(events: &[RunEventOutput], name: &str) -> bool {
+    events.iter().any(|event| event.event == name)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1683,25 +1648,60 @@ impl McpSubagentServer {
                     if !(dispatch_result.stdout.trim().is_empty()
                         && dispatch_result.stderr.trim().is_empty())
                     {
-                        let _ = append_provider_output_delta_events(
-                            &state_dir,
-                            &task_handle_id,
-                            &dispatch_result.stdout,
-                            &dispatch_result.stderr,
-                        );
-                        let _ = append_run_event(
-                            &state_dir,
-                            &task_handle_id,
-                            "provider.first_output",
-                            "running",
-                            "running",
-                            "provider",
-                            "provider produced output",
-                            json!({
-                                "stdout_bytes": dispatch_result.stdout.len(),
-                                "stderr_bytes": dispatch_result.stderr.len(),
-                            }),
-                        );
+                        let existing_events =
+                            load_run_events(&state_dir, &task_handle_id).unwrap_or_default();
+                        let has_first_output =
+                            has_event_named(&existing_events, "provider.first_output");
+                        let has_stdout_delta =
+                            has_event_named(&existing_events, "provider.stdout.delta");
+                        let has_stderr_delta =
+                            has_event_named(&existing_events, "provider.stderr.delta");
+
+                        if !dispatch_result.stdout.trim().is_empty() && !has_stdout_delta {
+                            let _ = append_run_event(
+                                &state_dir,
+                                &task_handle_id,
+                                "provider.stdout.delta",
+                                "running",
+                                "running",
+                                "provider",
+                                "provider stdout received",
+                                json!({
+                                    "bytes": dispatch_result.stdout.len(),
+                                    "lines": dispatch_result.stdout.lines().count(),
+                                }),
+                            );
+                        }
+                        if !dispatch_result.stderr.trim().is_empty() && !has_stderr_delta {
+                            let _ = append_run_event(
+                                &state_dir,
+                                &task_handle_id,
+                                "provider.stderr.delta",
+                                "running",
+                                "running",
+                                "provider",
+                                "provider stderr received",
+                                json!({
+                                    "bytes": dispatch_result.stderr.len(),
+                                    "lines": dispatch_result.stderr.lines().count(),
+                                }),
+                            );
+                        }
+                        if !has_first_output {
+                            let _ = append_run_event(
+                                &state_dir,
+                                &task_handle_id,
+                                "provider.first_output",
+                                "running",
+                                "running",
+                                "provider",
+                                "provider produced output",
+                                json!({
+                                    "stdout_bytes": dispatch_result.stdout.len(),
+                                    "stderr_bytes": dispatch_result.stderr.len(),
+                                }),
+                            );
+                        }
                     }
                     let wait_text =
                         format!("{}\n{}", dispatch_result.stdout, dispatch_result.stderr);
@@ -2006,13 +2006,11 @@ impl McpSubagentServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_provider_output_delta_events, build_watch_advice, classify_block_reason,
-        classify_block_reason_from_events, classify_block_reason_from_text, collect_wait_reasons,
-        current_phase_age_ms, detect_provider_wait_signal, load_run_events, parse_rfc3339,
-        RunEventOutput,
+        build_watch_advice, classify_block_reason, classify_block_reason_from_events,
+        classify_block_reason_from_text, collect_wait_reasons, current_phase_age_ms,
+        detect_provider_wait_signal, parse_rfc3339, RunEventOutput,
     };
     use crate::runtime::dispatcher::RunStatus;
-    use tempfile::tempdir;
 
     #[test]
     fn detect_provider_wait_signal_matches_trust_prompt() {
@@ -2174,36 +2172,6 @@ mod tests {
         assert!(
             advice.iter().any(|item| item.contains("get_run_result")),
             "{advice:?}"
-        );
-    }
-
-    #[test]
-    fn append_provider_output_delta_events_emits_stdout_and_stderr_deltas() {
-        let dir = tempdir().expect("tempdir");
-        append_provider_output_delta_events(dir.path(), "run-2", "a\nb\n", "warn")
-            .expect("append output delta events");
-        let events = load_run_events(dir.path(), "run-2").expect("load events");
-        let stdout_event = events
-            .iter()
-            .find(|event| event.event == "provider.stdout.delta")
-            .expect("stdout delta event");
-        let stderr_event = events
-            .iter()
-            .find(|event| event.event == "provider.stderr.delta")
-            .expect("stderr delta event");
-        assert_eq!(
-            stdout_event
-                .detail
-                .get("lines")
-                .and_then(|value| value.as_u64()),
-            Some(2)
-        );
-        assert_eq!(
-            stderr_event
-                .detail
-                .get("bytes")
-                .and_then(|value| value.as_u64()),
-            Some(4)
         );
     }
 }
