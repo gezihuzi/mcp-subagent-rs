@@ -1200,10 +1200,16 @@ sandbox = "read_only"
         let events_res = client
             .call_tool(
                 CallToolRequestParams::new("watch_agent_events").with_arguments(
-                    json!({ "handle_id": handle_id.clone(), "since_seq": 0, "limit": 50 })
-                        .as_object()
-                        .expect("object")
-                        .clone(),
+                    json!({
+                        "handle_id": handle_id.clone(),
+                        "since_seq": 0,
+                        "limit": 50,
+                        "phase": "completed",
+                        "phase_timeout_secs": 1
+                    })
+                    .as_object()
+                    .expect("object")
+                    .clone(),
                 ),
             )
             .await
@@ -1217,6 +1223,9 @@ sandbox = "read_only"
             .and_then(|value| value.as_array())
             .expect("events array");
         assert!(!events.is_empty(), "expected incremental events");
+        assert!(events_json.get("current_phase").is_some());
+        assert!(events_json.get("current_phase_age_ms").is_some());
+        assert!(events_json.get("phase_timeout_hit").is_some());
 
         let second_spawn_res = client
             .call_tool(

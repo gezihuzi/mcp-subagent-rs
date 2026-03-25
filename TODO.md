@@ -2540,3 +2540,31 @@
 - 已同步 README：
   - 命令面新增 `--phase` / `--phase-timeout-secs`；
   - 增加 phase-timeout 使用说明。
+
+## T-096 V0.10-P1-McpPhaseFilterAndWatchdog (Completed 2026-03-25)
+
+任务：将 phase 过滤与 phase watchdog 能力对齐到 MCP 事件工具面，避免 Host 侧只能自行拼接状态逻辑。  
+验收标准：
+
+1. MCP `watch_agent_events` 入参新增 `phase` 与 `phase_timeout_secs`。
+2. MCP `watch_agent_events` 出参新增 `current_phase`、`current_phase_age_ms`、`phase_timeout_hit`。
+3. `watch_agent_events` 支持按 phase 过滤事件返回。
+4. `phase_timeout_hit` 基于“当前 phase 持续时长”计算，可被 Host 直接消费。
+5. MCP roundtrip 测试覆盖新增字段存在性与 phase 过滤调用路径。
+6. README MCP 工具说明更新。
+7. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 DTO：
+  - `src/mcp/dto.rs::WatchAgentEventsInput` 新增 `phase/phase_timeout_secs`；
+  - `src/mcp/dto.rs::WatchAgentEventsOutput` 新增 `current_phase/current_phase_age_ms/phase_timeout_hit`。
+- 已升级工具实现：
+  - `src/mcp/tools.rs::watch_agent_events` 支持 phase 过滤；
+  - 新增 `current_phase_age_ms` 计算；
+  - 新增 phase timeout 命中计算（`phase_timeout_hit`）。
+- 已补单测：
+  - `current_phase_age_ms_tracks_latest_phase_window`。
+- 已补 MCP roundtrip：
+  - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 使用 `phase + phase_timeout_secs` 调用并断言新增输出字段。
+- 已同步 README：
+  - MCP tools 段新增 `watch_agent_events` phase/watchdog 能力说明。

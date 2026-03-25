@@ -248,6 +248,10 @@ pub struct WatchAgentEventsInput {
     pub since_seq: Option<u64>,
     #[serde(default)]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub phase_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -276,6 +280,12 @@ pub struct WatchAgentEventsOutput {
     pub events: Vec<RunEventOutput>,
     #[serde(default)]
     pub next_seq: Option<u64>,
+    #[serde(default)]
+    pub current_phase: Option<String>,
+    #[serde(default)]
+    pub current_phase_age_ms: Option<u64>,
+    #[serde(default)]
+    pub phase_timeout_hit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]

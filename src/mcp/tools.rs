@@ -344,6 +344,43 @@ fn latest_event(events: &[RunEventOutput]) -> Option<&RunEventOutput> {
     events.last()
 }
 
+fn current_phase_age_ms(
+    events: &[RunEventOutput],
+    now: OffsetDateTime,
+) -> (Option<String>, Option<u64>) {
+    let mut current_phase: Option<String> = None;
+    let mut phase_started_at: Option<OffsetDateTime> = None;
+
+    for event in events {
+        let Some(ts) = event_time(event) else {
+            continue;
+        };
+        let Some(phase) = event.phase.clone().filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        match current_phase.as_deref() {
+            None => {
+                current_phase = Some(phase);
+                phase_started_at = Some(ts);
+            }
+            Some(existing) if existing == phase.as_str() => {}
+            Some(_) => {
+                current_phase = Some(phase);
+                phase_started_at = Some(ts);
+            }
+        }
+    }
+
+    let age = phase_started_at.and_then(|started| {
+        if now < started {
+            None
+        } else {
+            Some((now - started).whole_milliseconds().max(0) as u64)
+        }
+    });
+    (current_phase, age)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ProviderWaitSignal {
     event: &'static str,
@@ -1039,10 +1076,27 @@ impl McpSubagentServer {
         Parameters(input): Parameters<WatchAgentEventsInput>,
     ) -> std::result::Result<Json<WatchAgentEventsOutput>, ErrorData> {
         let record = self.get_or_load_run_record(&input.handle_id).await?;
-        let mut events = load_run_events(self.state_dir(), &input.handle_id)?;
+        let all_events = load_run_events(self.state_dir(), &input.handle_id)?;
+        let now = OffsetDateTime::now_utc();
+        let (current_phase, current_phase_age_ms) = current_phase_age_ms(&all_events, now);
+        let phase_timeout_hit = input.phase_timeout_secs.is_some_and(|timeout_secs| {
+            let matches_phase = input.phase.as_deref().map_or(true, |phase| {
+                current_phase
+                    .as_deref()
+                    .is_some_and(|current| current == phase)
+            });
+            matches_phase
+                && current_phase_age_ms
+                    .is_some_and(|age_ms| age_ms >= timeout_secs.saturating_mul(1000))
+        });
+
+        let mut events = all_events;
 
         if let Some(since_seq) = input.since_seq {
             events.retain(|event| event.seq.is_some_and(|seq| seq > since_seq));
+        }
+        if let Some(phase) = input.phase.as_deref() {
+            events.retain(|event| event.phase.as_deref().is_some_and(|value| value == phase));
         }
 
         let limit = input.limit.unwrap_or(200).max(1);
@@ -1065,6 +1119,9 @@ impl McpSubagentServer {
             terminal: is_terminal_status(&record.status),
             events,
             next_seq,
+            current_phase,
+            current_phase_age_ms,
+            phase_timeout_hit,
         }))
     }
 
@@ -1695,8 +1752,8 @@ impl McpSubagentServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_block_reason_from_events, collect_wait_reasons, detect_provider_wait_signal,
-        RunEventOutput,
+        classify_block_reason_from_events, collect_wait_reasons, current_phase_age_ms,
+        detect_provider_wait_signal, parse_rfc3339, RunEventOutput,
     };
 
     #[test]
@@ -1763,5 +1820,35 @@ mod tests {
             vec!["auth_required".to_string(), "trust_required".to_string()]
         );
         assert_eq!(current.as_deref(), Some("trust_required"));
+    }
+
+    #[test]
+    fn current_phase_age_ms_tracks_latest_phase_window() {
+        let events = vec![
+            RunEventOutput {
+                seq: Some(1),
+                event: "provider.probe.started".to_string(),
+                timestamp: "2026-03-25T00:00:01Z".to_string(),
+                state: Some("preparing".to_string()),
+                phase: Some("provider_probe".to_string()),
+                source: Some("provider".to_string()),
+                message: None,
+                detail: serde_json::json!({}),
+            },
+            RunEventOutput {
+                seq: Some(2),
+                event: "provider.boot.started".to_string(),
+                timestamp: "2026-03-25T00:00:03Z".to_string(),
+                state: Some("running".to_string()),
+                phase: Some("provider_boot".to_string()),
+                source: Some("provider".to_string()),
+                message: None,
+                detail: serde_json::json!({}),
+            },
+        ];
+        let now = parse_rfc3339("2026-03-25T00:00:08Z").expect("parse now");
+        let (phase, age_ms) = current_phase_age_ms(&events, now);
+        assert_eq!(phase.as_deref(), Some("provider_boot"));
+        assert_eq!(age_ms, Some(5_000));
     }
 }
