@@ -178,7 +178,8 @@ mcp-subagent watch <handle-id>
 ```
 
 `spawn/submit --json` now returns accepted envelope fields (`status=accepted`, `state=accepted`, `phase=accepted`, `queued_at`) for easier host-side lifecycle wiring.
-CLI `spawn/submit` exits immediately after acceptance; use `watch/events/stats/result` to observe completion.
+CLI `spawn/submit` now defaults to "accepted + keepalive": it prints accepted envelope immediately, then keeps the process alive until the async run settles (to avoid one-shot CLI exiting before background task persistence).  
+If you explicitly want immediate return in one-shot mode, set `MCP_SUBAGENT_CLI_SPAWN_ACCEPT_ONLY=1`.
 
 `ps` now includes observability fields for running jobs: `phase`, `elapsed`, `last_event`, `stalled`, `block_reason`.
 `stats` now includes stage timing splits (`workspace_prepare_ms`, `provider_boot_ms`), first-output watchdog markers, and aggregated `wait_reasons`.

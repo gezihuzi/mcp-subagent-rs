@@ -46,7 +46,7 @@ impl CodexRunner {
         spec: &AgentSpec,
         request: &RunRequest,
         compiled: &CompiledContext,
-        mut observer: Option<&mut dyn RunnerOutputObserver>,
+        observer: Option<&mut dyn RunnerOutputObserver>,
     ) -> Result<RunnerExecution> {
         let prompt = compose_prompt(compiled);
         let output_file = std::env::temp_dir().join(format!(

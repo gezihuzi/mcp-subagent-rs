@@ -3925,18 +3925,23 @@ async fn spawn_agent(
 
     match server.spawn_agent(Parameters(input)).await {
         Ok(result) => {
+            let output = result.0;
             if cli_spawn_waits_for_completion() {
-                let handle_id = result.0.handle_id.clone();
-                server.wait_for_run(&handle_id).await;
+                eprintln!(
+                    "spawn accepted; keeping CLI process alive until run settles (set MCP_SUBAGENT_CLI_SPAWN_ACCEPT_ONLY=1 for immediate return)"
+                );
             }
             if json {
-                print_json(&result.0);
+                print_json(&output);
             } else {
-                println!("handle_id: {}", result.0.handle_id);
-                println!("status: {}", result.0.status);
-                println!("state: {}", result.0.state);
-                println!("phase: {}", result.0.phase);
-                println!("queued_at: {}", result.0.queued_at);
+                println!("handle_id: {}", output.handle_id);
+                println!("status: {}", output.status);
+                println!("state: {}", output.state);
+                println!("phase: {}", output.phase);
+                println!("queued_at: {}", output.queued_at);
+            }
+            if cli_spawn_waits_for_completion() {
+                server.wait_for_run(&output.handle_id).await;
             }
             ExitCode::SUCCESS
         }
@@ -3948,7 +3953,9 @@ async fn spawn_agent(
 }
 
 fn cli_spawn_waits_for_completion() -> bool {
-    false
+    !std::env::var("MCP_SUBAGENT_CLI_SPAWN_ACCEPT_ONLY")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
 }
 
 async fn get_status(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
@@ -5690,7 +5697,7 @@ target/
     }
 
     #[test]
-    fn cli_spawn_does_not_wait_for_completion() {
-        assert!(!super::cli_spawn_waits_for_completion());
+    fn cli_spawn_waits_for_completion_by_default() {
+        assert!(super::cli_spawn_waits_for_completion());
     }
 }
