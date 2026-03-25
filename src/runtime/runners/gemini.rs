@@ -1,4 +1,5 @@
 use std::{
+    fs,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -10,11 +11,15 @@ use crate::{
     error::{McpSubagentError, Result},
     runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
     spec::{
-        runtime_policy::{ApprovalPolicy, SandboxPolicy},
+        runtime_policy::{ApprovalPolicy, NativeDiscoveryPolicy, SandboxPolicy},
         AgentSpec,
     },
     types::{CompiledContext, RunRequest},
 };
+
+const GEMINI_DISCOVERY_TEMP_PREFIX: &str = "mcp-subagent-gemini-discovery";
+const ISOLATED_FALLBACK_NOTE: &str =
+    "mcp-subagent: isolated native discovery failed with auth-like error; retried with minimal discovery.";
 
 #[derive(Debug, Clone)]
 pub struct GeminiRunner {
@@ -43,18 +48,60 @@ impl GeminiRunner {
         let prompt = compose_prompt(compiled);
         let timeout = Duration::from_secs(spec.runtime.timeout_secs.max(1));
         let approval_mode = resolve_approval_mode(spec)?;
+        let discovery_policy = spec.runtime.native_discovery.clone();
 
+        let execution = self
+            .execute_once(
+                spec,
+                request,
+                &prompt,
+                approval_mode,
+                timeout,
+                &discovery_policy,
+            )
+            .await?;
+
+        if matches!(discovery_policy, NativeDiscoveryPolicy::Isolated)
+            && should_retry_isolated_with_minimal(&execution)
+        {
+            let mut retried = self
+                .execute_once(
+                    spec,
+                    request,
+                    &prompt,
+                    approval_mode,
+                    timeout,
+                    &NativeDiscoveryPolicy::Minimal,
+                )
+                .await?;
+            retried.stderr = merge_fallback_stderr(&execution.stderr, &retried.stderr);
+            return Ok(retried);
+        }
+
+        Ok(execution)
+    }
+
+    async fn execute_once(
+        &self,
+        spec: &AgentSpec,
+        request: &RunRequest,
+        prompt: &str,
+        approval_mode: &str,
+        timeout: Duration,
+        discovery_policy: &NativeDiscoveryPolicy,
+    ) -> Result<RunnerExecution> {
+        let launch = prepare_discovery_launch(discovery_policy, &request.working_dir)?;
         let mut command = tokio::process::Command::new(&self.executable);
         command
             .arg("--prompt")
-            .arg(&prompt)
+            .arg(prompt)
             .arg("--output-format")
             .arg("text")
             .arg("--approval-mode")
             .arg(approval_mode)
             .arg("--include-directories")
-            .arg(&request.working_dir)
-            .current_dir(&request.working_dir)
+            .arg(&launch.include_dir)
+            .current_dir(&launch.current_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -63,10 +110,14 @@ impl GeminiRunner {
         if let Some(model) = spec.core.model.as_deref() {
             command.arg("--model").arg(model);
         }
+        for (key, value) in &launch.env_overrides {
+            command.env(key, value);
+        }
 
         let output = match tokio::time::timeout(timeout, command.output()).await {
             Ok(waited) => waited.map_err(McpSubagentError::Io)?,
             Err(_) => {
+                cleanup_discovery_dirs(&launch.cleanup_dirs);
                 return Ok(RunnerExecution {
                     terminal_state: RunnerTerminalState::TimedOut,
                     stdout: String::new(),
@@ -77,6 +128,7 @@ impl GeminiRunner {
                 });
             }
         };
+        cleanup_discovery_dirs(&launch.cleanup_dirs);
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -105,6 +157,126 @@ impl GeminiRunner {
             stderr,
         })
     }
+}
+
+#[derive(Debug)]
+struct DiscoveryLaunch {
+    include_dir: PathBuf,
+    current_dir: PathBuf,
+    env_overrides: Vec<(String, String)>,
+    cleanup_dirs: Vec<PathBuf>,
+}
+
+fn prepare_discovery_launch(
+    policy: &NativeDiscoveryPolicy,
+    working_dir: &Path,
+) -> Result<DiscoveryLaunch> {
+    let include_dir = resolve_include_dir(working_dir)?;
+    match policy {
+        NativeDiscoveryPolicy::Inherit | NativeDiscoveryPolicy::Allowlist => Ok(DiscoveryLaunch {
+            include_dir: include_dir.clone(),
+            current_dir: include_dir,
+            env_overrides: Vec::new(),
+            cleanup_dirs: Vec::new(),
+        }),
+        NativeDiscoveryPolicy::Minimal => {
+            let launch_dir = create_temp_dir("minimal-launch")?;
+            Ok(DiscoveryLaunch {
+                include_dir,
+                current_dir: launch_dir.clone(),
+                env_overrides: Vec::new(),
+                cleanup_dirs: vec![launch_dir],
+            })
+        }
+        NativeDiscoveryPolicy::Isolated => {
+            let root = create_temp_dir("isolated-root")?;
+            let launch_dir = root.join("launch");
+            let home_dir = root.join("home");
+            let xdg_config = home_dir.join(".config");
+            let xdg_data = home_dir.join(".local/share");
+            let xdg_cache = home_dir.join(".cache");
+            for dir in [&launch_dir, &home_dir, &xdg_config, &xdg_data, &xdg_cache] {
+                fs::create_dir_all(dir).map_err(McpSubagentError::Io)?;
+            }
+            Ok(DiscoveryLaunch {
+                include_dir,
+                current_dir: launch_dir,
+                env_overrides: vec![
+                    ("HOME".to_string(), home_dir.display().to_string()),
+                    (
+                        "XDG_CONFIG_HOME".to_string(),
+                        xdg_config.display().to_string(),
+                    ),
+                    ("XDG_DATA_HOME".to_string(), xdg_data.display().to_string()),
+                    (
+                        "XDG_CACHE_HOME".to_string(),
+                        xdg_cache.display().to_string(),
+                    ),
+                    (
+                        "MCP_SUBAGENT_NATIVE_DISCOVERY".to_string(),
+                        "isolated".to_string(),
+                    ),
+                ],
+                cleanup_dirs: vec![root],
+            })
+        }
+    }
+}
+
+fn resolve_include_dir(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()
+        .map_err(McpSubagentError::Io)?
+        .join(path))
+}
+
+fn create_temp_dir(label: &str) -> Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!(
+        "{GEMINI_DISCOVERY_TEMP_PREFIX}-{label}-{}",
+        uuid::Uuid::now_v7()
+    ));
+    fs::create_dir_all(&path).map_err(McpSubagentError::Io)?;
+    Ok(path)
+}
+
+fn cleanup_discovery_dirs(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+fn should_retry_isolated_with_minimal(execution: &RunnerExecution) -> bool {
+    if !matches!(execution.terminal_state, RunnerTerminalState::Failed { .. }) {
+        return false;
+    }
+    let lowered = execution.stderr.to_ascii_lowercase();
+    [
+        "auth required",
+        "authentication",
+        "login",
+        "credential",
+        "api key",
+        "unauthorized",
+        "permission denied",
+    ]
+    .iter()
+    .any(|keyword| lowered.contains(keyword))
+}
+
+fn merge_fallback_stderr(primary_stderr: &str, retried_stderr: &str) -> String {
+    let mut merged = String::new();
+    if !retried_stderr.trim().is_empty() {
+        merged.push_str(retried_stderr.trim());
+        merged.push('\n');
+    }
+    merged.push_str(ISOLATED_FALLBACK_NOTE);
+    if !primary_stderr.trim().is_empty() {
+        merged.push_str("\ninitial isolated stderr:\n");
+        merged.push_str(primary_stderr.trim());
+    }
+    merged
 }
 
 #[async_trait]
@@ -169,13 +341,16 @@ mod tests {
         runtime::{runners::gemini::GeminiRunner, runners::RunnerTerminalState},
         spec::{
             core::{AgentSpecCore, Provider},
-            runtime_policy::{ApprovalPolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
+            runtime_policy::{
+                ApprovalPolicy, NativeDiscoveryPolicy, RuntimePolicy, SandboxPolicy,
+                WorkingDirPolicy,
+            },
             AgentSpec,
         },
         types::{CompiledContext, RunMode, RunRequest},
     };
 
-    fn sample_spec(timeout_secs: u64) -> AgentSpec {
+    fn sample_spec(timeout_secs: u64, native_discovery: NativeDiscoveryPolicy) -> AgentSpec {
         AgentSpec {
             core: AgentSpecCore {
                 name: "investigator".to_string(),
@@ -193,6 +368,7 @@ mod tests {
                 sandbox: SandboxPolicy::ReadOnly,
                 working_dir_policy: WorkingDirPolicy::InPlace,
                 timeout_secs,
+                native_discovery,
                 ..RuntimePolicy::default()
             },
             provider_overrides: Default::default(),
@@ -245,7 +421,7 @@ exit 0
         let runner = GeminiRunner::new(script_path);
         let execution = runner
             .execute(
-                &sample_spec(30),
+                &sample_spec(30, NativeDiscoveryPolicy::Inherit),
                 &sample_request(dir.path().to_path_buf()),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
@@ -306,7 +482,7 @@ exit 0
         let runner = GeminiRunner::new(script_path);
         let execution = runner
             .execute(
-                &sample_spec(30),
+                &sample_spec(30, NativeDiscoveryPolicy::Inherit),
                 &sample_request(dir.path().to_path_buf()),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
@@ -337,7 +513,7 @@ exit 9
         let runner = GeminiRunner::new(script_path);
         let execution = runner
             .execute(
-                &sample_spec(30),
+                &sample_spec(30, NativeDiscoveryPolicy::Inherit),
                 &sample_request(dir.path().to_path_buf()),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
@@ -373,7 +549,7 @@ sleep 2
         let runner = GeminiRunner::new(script_path);
         let execution = runner
             .execute(
-                &sample_spec(1),
+                &sample_spec(1, NativeDiscoveryPolicy::Inherit),
                 &sample_request(dir.path().to_path_buf()),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
@@ -390,7 +566,7 @@ sleep 2
     #[tokio::test]
     async fn gemini_runner_rejects_unvalidated_approval_policy() {
         let dir = tempdir().expect("tempdir");
-        let mut spec = sample_spec(30);
+        let mut spec = sample_spec(30, NativeDiscoveryPolicy::Inherit);
         spec.runtime.approval = ApprovalPolicy::Ask;
         let runner = GeminiRunner::new(PathBuf::from("gemini"));
 
@@ -410,5 +586,127 @@ sleep 2
             err.to_string().contains("not yet validated"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn gemini_runner_minimal_discovery_uses_isolated_launch_cwd() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("fake-gemini-minimal-discovery.sh");
+        let script = r#"#!/bin/sh
+set -eu
+include=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --include-directories)
+      include="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+echo "PWD:$PWD"
+echo "INCLUDE:$include"
+cat <<'EOF'
+<<<MCP_SUBAGENT_SUMMARY_JSON_START>>>
+{
+  "summary": "ok",
+  "key_findings": [],
+  "artifacts": [],
+  "open_questions": [],
+  "next_steps": [],
+  "exit_code": 0,
+  "verification_status": "Passed",
+  "touched_files": []
+}
+<<<MCP_SUBAGENT_SUMMARY_JSON_END>>>
+EOF
+exit 0
+"#;
+        fs::write(&script_path, script).expect("write script");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod");
+
+        let working_dir = dir.path().join("workspace");
+        fs::create_dir_all(&working_dir).expect("workspace");
+        let runner = GeminiRunner::new(script_path);
+        let execution = runner
+            .execute(
+                &sample_spec(30, NativeDiscoveryPolicy::Minimal),
+                &sample_request(working_dir.clone()),
+                &CompiledContext {
+                    system_prefix: "sys".to_string(),
+                    injected_prompt: "prompt".to_string(),
+                    source_manifest: Vec::new(),
+                },
+            )
+            .await
+            .expect("execute");
+
+        let pwd_line = execution
+            .stdout
+            .lines()
+            .find(|line| line.starts_with("PWD:"))
+            .expect("pwd line");
+        assert_ne!(
+            pwd_line.trim_start_matches("PWD:"),
+            working_dir.display().to_string()
+        );
+        assert!(execution
+            .stdout
+            .contains(&format!("INCLUDE:{}", working_dir.display())));
+    }
+
+    #[tokio::test]
+    async fn gemini_runner_isolated_discovery_falls_back_to_minimal_on_auth_error() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("fake-gemini-isolated-fallback.sh");
+        let script = r#"#!/bin/sh
+set -eu
+if echo "${HOME:-}" | grep -q "mcp-subagent-gemini-discovery"; then
+  echo "authentication required in isolated profile" >&2
+  exit 42
+fi
+cat <<'EOF'
+<<<MCP_SUBAGENT_SUMMARY_JSON_START>>>
+{
+  "summary": "ok",
+  "key_findings": [],
+  "artifacts": [],
+  "open_questions": [],
+  "next_steps": [],
+  "exit_code": 0,
+  "verification_status": "Passed",
+  "touched_files": []
+}
+<<<MCP_SUBAGENT_SUMMARY_JSON_END>>>
+EOF
+exit 0
+"#;
+        fs::write(&script_path, script).expect("write script");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod");
+
+        let working_dir = dir.path().join("workspace");
+        fs::create_dir_all(&working_dir).expect("workspace");
+        let runner = GeminiRunner::new(script_path);
+        let execution = runner
+            .execute(
+                &sample_spec(30, NativeDiscoveryPolicy::Isolated),
+                &sample_request(working_dir),
+                &CompiledContext {
+                    system_prefix: "sys".to_string(),
+                    injected_prompt: "prompt".to_string(),
+                    source_manifest: Vec::new(),
+                },
+            )
+            .await
+            .expect("execute");
+
+        assert_eq!(execution.terminal_state, RunnerTerminalState::Succeeded);
+        assert!(execution.stderr.contains("retried with minimal discovery"));
     }
 }

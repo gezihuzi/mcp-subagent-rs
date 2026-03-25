@@ -1853,3 +1853,34 @@
   - `README.md` 命令面同步新增 `submit` 和新 preset 名称。
 - 已通过回归：
   - `cargo test -q`（`151 + 27 + 3` tests passed）。
+
+## T-073 V0.9-P0-GeminiNativeDiscoveryIsolationAndFallback (Completed 2026-03-25)
+
+任务：把 `native_discovery` 从配置字段落到 Gemini runner 实际执行路径，解决子代理被 ambient workspace skills 污染的问题。  
+验收标准：
+
+1. Gemini runner 支持 `native_discovery` 策略分流：`inherit/allowlist` 维持原行为，`minimal` 使用隔离 launch cwd，`isolated` 使用临时 HOME/XDG 隔离。
+2. `minimal`/`isolated` 模式下，`--include-directories` 仍指向任务工作目录，避免丢失目标目录可见性。
+3. `isolated` 模式遇到认证类失败时自动回退到 `minimal` 并保留可审计提示，不直接硬失败。
+4. `init` 模板更新为 v0.9 默认策略：预设中显式写入 `delegation_context/output_mode/parse_policy`，Gemini 角色默认 `native_discovery = "isolated"`。
+5. README Happy Path 改为 `claude-opus-supervisor-minimal`。
+6. `cargo test -q` 通过。
+完成记录：
+
+- 已改造 `src/runtime/runners/gemini.rs`：
+  - 新增 `DiscoveryLaunch` 与 `prepare_discovery_launch`；
+  - `minimal` 策略使用临时 launch cwd，避免 workspace 层 skills 自动发现；
+  - `isolated` 策略额外注入临时 `HOME/XDG_*` 环境；
+  - 新增认证类失败检测与自动回退 `minimal`；
+  - 新增回退 stderr 合并提示，保留初次失败证据。
+- 已补充 Gemini runner 测试覆盖：
+  - `gemini_runner_minimal_discovery_uses_isolated_launch_cwd`
+  - `gemini_runner_isolated_discovery_falls_back_to_minimal_on_auth_error`
+  - 现有 runner 测试同步到显式 `native_discovery` 样例。
+- 已同步模板与文档：
+  - `src/init.rs` 各预设 runtime 段落新增 v0.9 策略字段；
+  - Gemini 角色默认 `native_discovery = "isolated"`；
+  - `README.md` Quick Onboarding preset 更新为 `claude-opus-supervisor-minimal`。
+- 已通过回归：
+  - `cargo test -q runtime::runners::gemini::tests`
+  - `cargo test -q`（`153 + 27 + 3` tests passed）。

@@ -90,7 +90,7 @@ For bootstrap mode, `init` also patches project `.gitignore` idempotently to ign
 Use this fixed order for first-time setup:
 
 ```bash
-mcp-subagent init --preset claude-opus-supervisor
+mcp-subagent init --preset claude-opus-supervisor-minimal
 mcp-subagent validate
 mcp-subagent doctor
 mcp-subagent connect --host claude

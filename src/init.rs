@@ -262,6 +262,7 @@ Catalog version: `{}`
 
 Available presets:
 
+- `claude-opus-supervisor-minimal`
 - `claude-opus-supervisor`
 - `codex-primary-builder`
 - `gemini-frontend-team`
@@ -330,12 +331,16 @@ tags = ["research", "read-only", "fast"]
 
 [runtime]
 context_mode = "expanded_brief"
+delegation_context = "minimal"
 memory_sources = ["auto_project_memory"]
+native_discovery = "isolated"
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "read_only"
 approval = "provider_default"
 timeout_secs = 600
+output_mode = "both"
+parse_policy = "best_effort"
 spawn_policy = "sync"
 
 [workflow]
@@ -354,12 +359,16 @@ tags = ["build", "backend", "rust", "codex"]
 
 [runtime]
 context_mode = { selected_files = ["src/**", "Cargo.toml", "PLAN.md"] }
+delegation_context = "selected_files"
 memory_sources = ["auto_project_memory"]
+native_discovery = "minimal"
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "workspace_write"
 approval = "deny_by_default"
 timeout_secs = 1200
+output_mode = "both"
+parse_policy = "best_effort"
 spawn_policy = "async"
 
 [provider_overrides.codex]
@@ -381,12 +390,16 @@ tags = ["build", "frontend", "ui", "gemini"]
 
 [runtime]
 context_mode = { selected_files = ["web/**", "src/**", "package.json", "PLAN.md"] }
+delegation_context = "selected_files"
 memory_sources = ["auto_project_memory"]
+native_discovery = "isolated"
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "workspace_write"
 approval = "provider_default"
 timeout_secs = 1200
+output_mode = "both"
+parse_policy = "best_effort"
 spawn_policy = "async"
 
 [provider_overrides.gemini]
@@ -408,12 +421,16 @@ tags = ["review", "correctness", "codex"]
 
 [runtime]
 context_mode = "summary_only"
+delegation_context = "plan_section"
 memory_sources = ["auto_project_memory"]
+native_discovery = "minimal"
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "read_only"
 approval = "deny_by_default"
 timeout_secs = 900
+output_mode = "both"
+parse_policy = "best_effort"
 spawn_policy = "sync"
 
 [provider_overrides.codex]
@@ -435,12 +452,16 @@ tags = ["review", "style", "claude"]
 
 [runtime]
 context_mode = "summary_only"
+delegation_context = "selected_files"
 memory_sources = ["auto_project_memory"]
+native_discovery = "minimal"
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "read_only"
 approval = "deny_by_default"
 timeout_secs = 900
+output_mode = "both"
+parse_policy = "best_effort"
 spawn_policy = "sync"
 
 [workflow]
@@ -459,12 +480,16 @@ tags = ["review", "style", "codex"]
 
 [runtime]
 context_mode = "summary_only"
+delegation_context = "selected_files"
 memory_sources = ["auto_project_memory"]
+native_discovery = "minimal"
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "read_only"
 approval = "deny_by_default"
 timeout_secs = 900
+output_mode = "both"
+parse_policy = "best_effort"
 spawn_policy = "sync"
 
 [provider_overrides.codex]
@@ -486,12 +511,16 @@ tags = ["review", "style", "gemini"]
 
 [runtime]
 context_mode = "summary_only"
+delegation_context = "selected_files"
 memory_sources = ["auto_project_memory"]
+native_discovery = "isolated"
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "read_only"
 approval = "provider_default"
 timeout_secs = 900
+output_mode = "both"
+parse_policy = "best_effort"
 spawn_policy = "sync"
 
 [workflow]
@@ -510,12 +539,16 @@ tags = ["build", "local", "ollama", "fallback"]
 
 [runtime]
 context_mode = { selected_files = ["src/**", "PLAN.md"] }
+delegation_context = "selected_files"
 memory_sources = ["auto_project_memory"]
+native_discovery = "minimal"
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "workspace_write"
 approval = "deny_by_default"
 timeout_secs = 1200
+output_mode = "both"
+parse_policy = "best_effort"
 spawn_policy = "async"
 
 [workflow]
@@ -534,12 +567,16 @@ tags = ["build", "codex", "minimal"]
 
 [runtime]
 context_mode = { selected_files = ["src/**", "PLAN.md"] }
+delegation_context = "selected_files"
 memory_sources = ["auto_project_memory"]
+native_discovery = "minimal"
 working_dir_policy = "auto"
 file_conflict_policy = "serialize"
 sandbox = "workspace_write"
 approval = "deny_by_default"
 timeout_secs = 900
+output_mode = "both"
+parse_policy = "best_effort"
 spawn_policy = "sync"
 
 [workflow]
