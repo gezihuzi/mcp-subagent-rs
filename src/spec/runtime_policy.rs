@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "snake_case")]
 pub enum ContextMode {
     Isolated,
     SummaryOnly,
@@ -11,12 +11,17 @@ pub enum ContextMode {
 
 impl std::fmt::Display for ContextMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        match self {
+            Self::Isolated => write!(f, "isolated"),
+            Self::SummaryOnly => write!(f, "summary_only"),
+            Self::SelectedFiles(paths) => write!(f, "selected_files({})", paths.join(",")),
+            Self::ExpandedBrief => write!(f, "expanded_brief"),
+        }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "snake_case")]
 pub enum MemorySource {
     AutoProjectMemory,
     ActivePlan,
@@ -27,7 +32,7 @@ pub enum MemorySource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "snake_case")]
 pub enum WorkingDirPolicy {
     Auto,
     InPlace,
@@ -37,12 +42,18 @@ pub enum WorkingDirPolicy {
 
 impl std::fmt::Display for WorkingDirPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        let s = match self {
+            Self::Auto => "auto",
+            Self::InPlace => "in_place",
+            Self::TempCopy => "temp_copy",
+            Self::GitWorktree => "git_worktree",
+        };
+        write!(f, "{s}")
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "snake_case")]
 pub enum FileConflictPolicy {
     Deny,
     Serialize,
@@ -50,7 +61,7 @@ pub enum FileConflictPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "snake_case")]
 pub enum SandboxPolicy {
     ReadOnly,
     WorkspaceWrite,
@@ -59,12 +70,17 @@ pub enum SandboxPolicy {
 
 impl std::fmt::Display for SandboxPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        let s = match self {
+            Self::ReadOnly => "read_only",
+            Self::WorkspaceWrite => "workspace_write",
+            Self::FullAccess => "full_access",
+        };
+        write!(f, "{s}")
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "snake_case")]
 pub enum ApprovalPolicy {
     ProviderDefault,
     Ask,
@@ -73,14 +89,14 @@ pub enum ApprovalPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "snake_case")]
 pub enum BackgroundPreference {
     PreferForeground,
     PreferBackground,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "snake_case")]
 pub enum SpawnPolicy {
     Sync,
     Async,

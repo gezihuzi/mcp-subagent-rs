@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::spec::Provider;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "snake_case")]
 pub enum ProbeStatus {
     Ready,
     MissingBinary,
@@ -28,15 +28,16 @@ impl ProbeStatus {
 
 impl std::fmt::Display for ProbeStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Ready => write!(f, "Ready"),
-            Self::MissingBinary => write!(f, "MissingBinary"),
-            Self::PermissionDenied => write!(f, "PermissionDenied"),
-            Self::UnsupportedVersion => write!(f, "UnsupportedVersion"),
-            Self::NeedsAuthentication => write!(f, "NeedsAuthentication"),
-            Self::ExperimentalUnavailable => write!(f, "ExperimentalUnavailable"),
-            Self::ProbeFailed => write!(f, "ProbeFailed"),
-        }
+        let s = match self {
+            Self::Ready => "ready",
+            Self::MissingBinary => "missing_binary",
+            Self::PermissionDenied => "permission_denied",
+            Self::UnsupportedVersion => "unsupported_version",
+            Self::NeedsAuthentication => "needs_authentication",
+            Self::ExperimentalUnavailable => "experimental_unavailable",
+            Self::ProbeFailed => "probe_failed",
+        };
+        write!(f, "{s}")
     }
 }
 

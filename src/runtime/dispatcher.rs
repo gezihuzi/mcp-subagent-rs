@@ -25,7 +25,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     Received,
     Validating,
@@ -46,7 +46,24 @@ pub enum RunStatus {
 
 impl std::fmt::Display for RunStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        let s = match self {
+            Self::Received => "received",
+            Self::Validating => "validating",
+            Self::ProbingProvider => "probing_provider",
+            Self::PreparingWorkspace => "preparing_workspace",
+            Self::ResolvingMemory => "resolving_memory",
+            Self::CompilingContext => "compiling_context",
+            Self::Launching => "launching",
+            Self::Running => "running",
+            Self::Collecting => "collecting",
+            Self::ParsingSummary => "parsing_summary",
+            Self::Finalizing => "finalizing",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+        };
+        write!(f, "{s}")
     }
 }
 

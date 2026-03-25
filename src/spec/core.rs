@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "snake_case")]
 pub enum Provider {
     Mock,
     Claude,
@@ -15,11 +15,11 @@ pub enum Provider {
 impl Provider {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Mock => "Mock",
-            Self::Claude => "Claude",
-            Self::Codex => "Codex",
-            Self::Gemini => "Gemini",
-            Self::Ollama => "Ollama",
+            Self::Mock => "mock",
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::Ollama => "ollama",
         }
     }
 }
