@@ -66,10 +66,15 @@ allow_same_provider_dual_review = true
 prefer_cross_provider_review = false
 TOML
 
-FAKE_CODEX_BIN="$TMP_DIR/fake-codex"
+FAKE_CODEX_BIN="$TMP_DIR/codex"
 cat >"$FAKE_CODEX_BIN" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+  echo "codex-fake 0.8.0"
+  exit 0
+fi
 
 OUTPUT_LAST_MESSAGE=""
 while [[ "$#" -gt 0 ]]; do
@@ -107,6 +112,8 @@ echo "fake codex stdout"
 exit 0
 SH
 chmod +x "$FAKE_CODEX_BIN"
+# Ensure provider probe (`codex --version`) resolves the fake binary in CI.
+export PATH="$TMP_DIR:$PATH"
 export MCP_SUBAGENT_CODEX_BIN="$FAKE_CODEX_BIN"
 
 run_cmd() {

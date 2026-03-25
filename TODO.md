@@ -1598,6 +1598,26 @@
   - `cargo test -q`（`134 + 10 + 3` tests passed）
   - `./scripts/smoke_v08.sh` 全链路通过。
 
+## T-064 V0.8-P0-CiProbeReliabilityAndNode24Warning (Completed 2026-03-25)
+
+任务：修复 CI 中 codex provider probe 误判 MissingBinary 导致 smoke 失败，并处理 Node.js 20 actions 警告。  
+验收标准：
+
+1. `scripts/smoke_v08.sh` 中 codex fake binary 能被 provider probe 识别为 PATH 内 `codex`，避免 `run codex_runner` 前置可用性失败。
+2. CI workflow 不再使用 `actions/checkout@v4`，升级到支持 Node.js 24 的版本。
+3. 本地通过：`./scripts/smoke_v08.sh`。
+完成记录：
+
+- 已修复 smoke codex probe 路径：
+  - `scripts/smoke_v08.sh` 将 fake binary 命名为 `codex`；
+  - fake binary 新增 `--version` 输出分支，满足 provider probe 前置探测；
+  - 将 `TMP_DIR` 注入 `PATH`，确保 probe 执行 `codex --version` 命中 fake binary。
+- 已更新 CI action 版本：
+  - `.github/workflows/ci.yml` `actions/checkout@v4` 升级为 `actions/checkout@v5`。
+- 已通过验收回归：
+  - `cargo test -q`（`134 + 10 + 3` tests passed）
+  - `./scripts/smoke_v08.sh` 全链路通过。
+
 ## T-063 Refactoring-DisplayFormattingForEnums (Completed 2026-03-25)
 
 任务：对于某些需要格式化的数据类型，将 `{:?}` 换成 `{}` 并支持 `Display`。
