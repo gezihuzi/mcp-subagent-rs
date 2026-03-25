@@ -1559,6 +1559,39 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
+fn auth_is_ready_signal(lowered: &str) -> bool {
+    contains_any(
+        lowered,
+        &[
+            "loaded cached credentials",
+            "credentials loaded",
+            "already authenticated",
+            "auth restored",
+            "using filekeychain fallback for secure storage",
+        ],
+    )
+}
+
+fn auth_is_wait_signal(lowered: &str) -> bool {
+    if auth_is_ready_signal(lowered) {
+        return false;
+    }
+    contains_any(
+        lowered,
+        &[
+            "auth required",
+            "authentication required",
+            "authentication failed",
+            "unauthorized",
+            "login required",
+            "missing credentials",
+            "credentials required",
+            "api key missing",
+            "invalid api key",
+        ],
+    )
+}
+
 fn classify_block_reason_from_text(text: &str) -> Option<&'static str> {
     let lowered = text.to_ascii_lowercase();
     if contains_any(
@@ -1573,18 +1606,7 @@ fn classify_block_reason_from_text(text: &str) -> Option<&'static str> {
     ) {
         return Some("trust_required");
     }
-    if contains_any(
-        &lowered,
-        &[
-            "auth required",
-            "authentication",
-            "unauthorized",
-            "login required",
-            "credentials",
-            "api key",
-            "keychain",
-        ],
-    ) {
+    if auth_is_wait_signal(&lowered) {
         return Some("auth_required");
     }
     if contains_any(
@@ -1701,6 +1723,9 @@ fn classify_block_reason(
     events: &[RunTimelineEvent],
     error_message: Option<&str>,
 ) -> Option<String> {
+    if status == "succeeded" {
+        return None;
+    }
     if let Some(message) = error_message {
         if let Some(reason) = classify_block_reason_from_text(message) {
             return Some(reason.to_string());
@@ -2653,7 +2678,9 @@ async fn read_events_all(
             if *seen > snapshot.events.len() {
                 *seen = snapshot.events.len();
             }
+            let mut had_new_events = false;
             for evt in snapshot.events.iter().skip(*seen) {
+                had_new_events = true;
                 if json {
                     if let Err(err) = print_json_line(&serde_json::json!({
                         "kind": "event",
@@ -2714,7 +2741,7 @@ async fn read_events_all(
                     let last = last_phase_progress
                         .entry(snapshot.handle_id.clone())
                         .or_default();
-                    if *last != line {
+                    if *last != line && (had_new_events || last.is_empty()) {
                         println!("[{}] {line}", snapshot.handle_id);
                         *last = line;
                     }
@@ -4980,6 +5007,37 @@ target/
         }];
         let reason = super::classify_block_reason("running", Some("running"), true, &events, None);
         assert_eq!(reason.as_deref(), Some("auth_required"));
+    }
+
+    #[test]
+    fn classify_block_reason_ignores_cached_credentials_text() {
+        let reason = super::classify_block_reason_from_text(
+            "Loaded cached credentials. Using FileKeychain fallback for secure storage.",
+        );
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn classify_block_reason_is_none_for_succeeded_status() {
+        let reason = super::classify_block_reason(
+            "succeeded",
+            Some("completed"),
+            false,
+            &[super::RunTimelineEvent {
+                event: "provider.waiting_for_auth".to_string(),
+                timestamp: "2026-03-25T00:00:00Z".to_string(),
+                detail: serde_json::json!({}),
+                seq: Some(1),
+                ts: None,
+                level: None,
+                state: Some("running".to_string()),
+                phase: Some("waiting_for_auth".to_string()),
+                source: Some("provider".to_string()),
+                message: Some("provider is waiting for authentication".to_string()),
+            }],
+            None,
+        );
+        assert!(reason.is_none());
     }
 
     #[test]

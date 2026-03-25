@@ -2753,3 +2753,29 @@
   - 全局 follow 改为持续轮询并输出增量事件。
 - 已同步 README：
   - 在示例段明确 `events --all --follow` 会持续监听直到 Ctrl-C 或 timeout。
+
+## T-104 V0.10-P1-GlobalEventsNoiseAndAuthFalsePositiveFix (Completed 2026-03-25)
+
+任务：修复全局事件流的两类可用性问题：`phase_progress` 噪音刷屏、以及成功任务误判 `auth_required`。  
+验收标准：
+
+1. `events --all --follow` 的 `phase_progress` 只在对应 handle 有新增事件时更新，不再按轮询周期对旧 run 刷屏。
+2. `auth_required` 检测不再把“已加载凭证”日志误判为阻塞（如 `Loaded cached credentials` / keychain fallback）。
+3. `succeeded` 终态不再输出 `block_reason=auth_required` 这类误导阻塞原因。
+4. provider heartbeat 在首输出前保持 `provider_boot` phase，避免早期误切到 `running` 造成 phase 抖动。
+5. 新增单测覆盖 cached credential 误判防护与 succeeded block_reason 行为。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/main.rs`：
+  - 新增 `auth_is_ready_signal/auth_is_wait_signal`；
+  - `classify_block_reason_from_text` 收紧 auth 识别；
+  - `classify_block_reason` 对 `status=succeeded` 直接返回 `None`；
+  - `read_events_all` 改为仅在 handle 有新增事件时更新该 handle 的 `phase_progress`。
+- 已升级 `src/mcp/tools.rs`：
+  - 新增同等 auth 信号判定函数，`detect_provider_wait_signal` 与 `classify_block_reason_from_text` 共用；
+  - `classify_block_reason` 对 `RunStatus::Succeeded` 返回 `None`；
+  - dispatch 心跳事件 phase 从 `running` 调整为 `provider_boot`（首输出前阶段语义更准确）。
+- 已补测试：
+  - main: `classify_block_reason_ignores_cached_credentials_text`、`classify_block_reason_is_none_for_succeeded_status`
+  - mcp/tools: `detect_provider_wait_signal_ignores_cached_credentials_log`、`classify_block_reason_is_none_for_succeeded_status`、`classify_block_reason_from_text_ignores_cached_credentials_log`

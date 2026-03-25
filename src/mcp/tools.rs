@@ -408,18 +408,7 @@ fn detect_provider_wait_signal(text: &str) -> Option<ProviderWaitSignal> {
             message: "provider is waiting for workspace trust",
         });
     }
-    if contains_any(
-        &lowered,
-        &[
-            "auth required",
-            "authentication",
-            "unauthorized",
-            "login required",
-            "credentials",
-            "api key",
-            "keychain",
-        ],
-    ) {
+    if auth_is_wait_signal(&lowered) {
         return Some(ProviderWaitSignal {
             event: "provider.waiting_for_auth",
             phase: "waiting_for_auth",
@@ -485,6 +474,39 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
+fn auth_is_ready_signal(lowered: &str) -> bool {
+    contains_any(
+        lowered,
+        &[
+            "loaded cached credentials",
+            "credentials loaded",
+            "already authenticated",
+            "auth restored",
+            "using filekeychain fallback for secure storage",
+        ],
+    )
+}
+
+fn auth_is_wait_signal(lowered: &str) -> bool {
+    if auth_is_ready_signal(lowered) {
+        return false;
+    }
+    contains_any(
+        lowered,
+        &[
+            "auth required",
+            "authentication required",
+            "authentication failed",
+            "unauthorized",
+            "login required",
+            "missing credentials",
+            "credentials required",
+            "api key missing",
+            "invalid api key",
+        ],
+    )
+}
+
 fn classify_block_reason_from_text(text: &str) -> Option<&'static str> {
     let lowered = text.to_ascii_lowercase();
     if contains_any(
@@ -499,18 +521,7 @@ fn classify_block_reason_from_text(text: &str) -> Option<&'static str> {
     ) {
         return Some("trust_required");
     }
-    if contains_any(
-        &lowered,
-        &[
-            "auth required",
-            "authentication",
-            "unauthorized",
-            "login required",
-            "credentials",
-            "api key",
-            "keychain",
-        ],
-    ) {
+    if auth_is_wait_signal(&lowered) {
         return Some("auth_required");
     }
     if contains_any(
@@ -627,6 +638,9 @@ fn classify_block_reason(
     events: &[RunEventOutput],
     error_message: Option<&str>,
 ) -> Option<String> {
+    if matches!(status, RunStatus::Succeeded) {
+        return None;
+    }
     if let Some(message) = error_message {
         if let Some(reason) = classify_block_reason_from_text(message) {
             return Some(reason.to_string());
@@ -1577,7 +1591,7 @@ impl McpSubagentServer {
                             &task_handle_id,
                             "provider.heartbeat",
                             "running",
-                            "running",
+                            "provider_boot",
                             "runtime",
                             "still alive",
                             json!({
@@ -1931,8 +1945,9 @@ impl McpSubagentServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_watch_advice, classify_block_reason_from_events, collect_wait_reasons,
-        current_phase_age_ms, detect_provider_wait_signal, parse_rfc3339, RunEventOutput,
+        build_watch_advice, classify_block_reason, classify_block_reason_from_events,
+        classify_block_reason_from_text, collect_wait_reasons, current_phase_age_ms,
+        detect_provider_wait_signal, parse_rfc3339, RunEventOutput,
     };
     use crate::runtime::dispatcher::RunStatus;
 
@@ -1958,6 +1973,44 @@ mod tests {
         }];
         let reason = classify_block_reason_from_events(&events, true);
         assert_eq!(reason, Some("provider_output_wait"));
+    }
+
+    #[test]
+    fn detect_provider_wait_signal_ignores_cached_credentials_log() {
+        let signal = detect_provider_wait_signal(
+            "Using FileKeychain fallback for secure storage. Loaded cached credentials.",
+        );
+        assert!(signal.is_none());
+    }
+
+    #[test]
+    fn classify_block_reason_is_none_for_succeeded_status() {
+        let events = vec![RunEventOutput {
+            seq: Some(1),
+            event: "provider.waiting_for_auth".to_string(),
+            timestamp: "2026-03-25T00:00:00Z".to_string(),
+            state: Some("running".to_string()),
+            phase: Some("waiting_for_auth".to_string()),
+            source: Some("provider".to_string()),
+            message: Some("provider is waiting for authentication".to_string()),
+            detail: serde_json::json!({}),
+        }];
+        let reason = classify_block_reason(
+            &RunStatus::Succeeded,
+            Some("completed"),
+            false,
+            &events,
+            None,
+        );
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn classify_block_reason_from_text_ignores_cached_credentials_log() {
+        let reason = classify_block_reason_from_text(
+            "Loaded cached credentials. Using FileKeychain fallback for secure storage.",
+        );
+        assert!(reason.is_none());
     }
 
     #[test]
