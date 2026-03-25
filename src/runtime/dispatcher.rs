@@ -148,19 +148,43 @@ where
         request: &RunRequest,
         memory: ResolvedMemory,
     ) -> Result<DispatchResult> {
+        self.run_with_transition_observer(spec, request, memory, |_prev, _next| {})
+            .await
+    }
+
+    pub async fn run_with_transition_observer<F>(
+        &self,
+        spec: &crate::spec::AgentSpec,
+        request: &RunRequest,
+        memory: ResolvedMemory,
+        mut on_transition: F,
+    ) -> Result<DispatchResult>
+    where
+        F: FnMut(Option<RunStatus>, RunStatus),
+    {
         let mut tracker = RunTracker::new(spec, request.working_dir.clone());
 
+        let mut previous_status = tracker.metadata.status.clone();
         tracker.transition(RunStatus::Validating);
+        on_transition(Some(previous_status), RunStatus::Validating);
         validate_agent_spec(spec)?;
         enforce_readonly_gitworktree_scope(spec, request)?;
         enforce_runtime_depth(spec, request)?;
         enforce_workflow_gate(spec, request)?;
 
+        previous_status = tracker.metadata.status.clone();
         tracker.transition(RunStatus::ProbingProvider);
+        on_transition(Some(previous_status), RunStatus::ProbingProvider);
+        previous_status = tracker.metadata.status.clone();
         tracker.transition(RunStatus::PreparingWorkspace);
+        on_transition(Some(previous_status), RunStatus::PreparingWorkspace);
+        previous_status = tracker.metadata.status.clone();
         tracker.transition(RunStatus::ResolvingMemory);
+        on_transition(Some(previous_status), RunStatus::ResolvingMemory);
 
+        previous_status = tracker.metadata.status.clone();
         tracker.transition(RunStatus::CompilingContext);
+        on_transition(Some(previous_status), RunStatus::CompilingContext);
         let compiled = self.compiler.compile(spec, request, memory)?;
         let compiled_context_markdown =
             format!("{}\n\n{}", compiled.system_prefix, compiled.injected_prompt);
@@ -181,12 +205,20 @@ where
 
         for attempt in 1..=attempt_budget {
             tracker.metadata.attempts_used = attempt;
+            previous_status = tracker.metadata.status.clone();
             tracker.transition(RunStatus::Launching);
+            on_transition(Some(previous_status), RunStatus::Launching);
+            previous_status = tracker.metadata.status.clone();
             tracker.transition(RunStatus::Running);
+            on_transition(Some(previous_status), RunStatus::Running);
             let execution = self.runner.execute(spec, request, &compiled).await?;
 
+            previous_status = tracker.metadata.status.clone();
             tracker.transition(RunStatus::Collecting);
+            on_transition(Some(previous_status), RunStatus::Collecting);
+            previous_status = tracker.metadata.status.clone();
             tracker.transition(RunStatus::ParsingSummary);
+            on_transition(Some(previous_status), RunStatus::ParsingSummary);
             let summary_envelope = self
                 .compiler
                 .parse_summary(&execution.stdout, &execution.stderr)?;
@@ -245,8 +277,13 @@ where
         tracker.metadata.retry_attempts = tracker.metadata.attempts_used.saturating_sub(1);
         tracker.metadata.retry_classification = final_retry_classification;
         tracker.metadata.retry_classification_reason = final_retry_classification_reason;
+        previous_status = tracker.metadata.status.clone();
         tracker.transition(RunStatus::Finalizing);
-        tracker.finish(final_status, final_error_message);
+        on_transition(Some(previous_status), RunStatus::Finalizing);
+        tracker.metadata.error_message = final_error_message;
+        previous_status = tracker.metadata.status.clone();
+        tracker.transition(final_status.clone());
+        on_transition(Some(previous_status), final_status);
         let native_usage = crate::runtime::usage::parse_native_usage(
             &spec.core.provider,
             &execution.stdout,
@@ -937,11 +974,6 @@ impl RunTracker {
         self.metadata.status = status.clone();
         self.metadata.updated_at = OffsetDateTime::now_utc();
         self.metadata.status_history.push(status);
-    }
-
-    fn finish(&mut self, status: RunStatus, error_message: Option<String>) {
-        self.metadata.error_message = error_message;
-        self.transition(status);
     }
 
     fn set_attempt_budget(&mut self, max_attempts: u32, max_turns: Option<u32>) {

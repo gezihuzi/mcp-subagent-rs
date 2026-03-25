@@ -1254,6 +1254,72 @@ sandbox = "read_only"
         assert!(events_json.get("block_reason").is_some());
         assert!(events_json.get("advice").is_some());
 
+        let all_events_res = client
+            .call_tool(
+                CallToolRequestParams::new("watch_agent_events").with_arguments(
+                    json!({
+                        "handle_id": handle_id.clone(),
+                        "since_seq": 0,
+                        "limit": 300
+                    })
+                    .as_object()
+                    .expect("object")
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("watch all events");
+        let all_events_json = all_events_res
+            .structured_content
+            .expect("watch all events structured");
+        let all_event_names = all_events_json
+            .get("events")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|entry| entry.get("event").and_then(|value| value.as_str()))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for expected in [
+            "workspace.prepare.completed",
+            "context.compile.started",
+            "context.compile.completed",
+            "parse.started",
+            "parse.completed",
+        ] {
+            assert!(
+                all_event_names.iter().any(|event| event == expected),
+                "expected event `{expected}`, got {all_event_names:?}"
+            );
+        }
+        let context_started = all_event_names
+            .iter()
+            .position(|name| name == "context.compile.started")
+            .expect("context.compile.started");
+        let context_completed = all_event_names
+            .iter()
+            .position(|name| name == "context.compile.completed")
+            .expect("context.compile.completed");
+        let parse_started = all_event_names
+            .iter()
+            .position(|name| name == "parse.started")
+            .expect("parse.started");
+        let parse_completed = all_event_names
+            .iter()
+            .position(|name| name == "parse.completed")
+            .expect("parse.completed");
+        let completed = all_event_names
+            .iter()
+            .position(|name| name == "run.completed")
+            .expect("run.completed");
+        assert!(context_started < context_completed);
+        assert!(context_completed < parse_started);
+        assert!(parse_started < parse_completed);
+        assert!(parse_completed < completed);
+
         let second_spawn_res = client
             .call_tool(
                 CallToolRequestParams::new("spawn_agent").with_arguments(
@@ -1524,13 +1590,11 @@ sandbox = "workspace_write"
             })
             .collect::<Vec<_>>();
         for required in [
-            "probe",
-            "gate",
-            "workspace",
-            "memory",
-            "policy",
-            "parse",
-            "cleanup",
+            "workspace.prepare.completed",
+            "context.compile.started",
+            "context.compile.completed",
+            "parse.started",
+            "parse.completed",
         ] {
             assert!(
                 event_names.iter().any(|event| event == required),

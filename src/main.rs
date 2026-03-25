@@ -3909,13 +3909,10 @@ async fn spawn_agent(
 
     match server.spawn_agent(Parameters(input)).await {
         Ok(result) => {
-            let handle_id = result.0.handle_id.clone();
-            // In CLI mode the process exits as soon as this function returns,
-            // which would kill any background tokio task before it can persist
-            // its results.  Wait for the task to finish before printing and
-            // exiting.  True fire-and-forget spawning is only available in the
-            // long-lived MCP server mode.
-            server.wait_for_run(&handle_id).await;
+            if cli_spawn_waits_for_completion() {
+                let handle_id = result.0.handle_id.clone();
+                server.wait_for_run(&handle_id).await;
+            }
             if json {
                 print_json(&result.0);
             } else {
@@ -3932,6 +3929,10 @@ async fn spawn_agent(
             ExitCode::from(1)
         }
     }
+}
+
+fn cli_spawn_waits_for_completion() -> bool {
+    false
 }
 
 async fn get_status(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
@@ -5580,5 +5581,10 @@ target/
             .find(|item: &&RunAgentSelectedFileInput| item.path == file.display().to_string())
             .expect("entry exists");
         assert_eq!(only.content.as_deref(), Some("override body"));
+    }
+
+    #[test]
+    fn cli_spawn_does_not_wait_for_completion() {
+        assert!(!super::cli_spawn_waits_for_completion());
     }
 }

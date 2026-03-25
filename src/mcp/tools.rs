@@ -777,103 +777,6 @@ fn collect_wait_reasons(events: &[RunEventOutput]) -> (Vec<String>, Option<Strin
     (reasons, current)
 }
 
-fn append_transition_derived_events(
-    state_dir: &Path,
-    handle_id: &str,
-    status_history: &[RunStatus],
-) -> std::result::Result<(), ErrorData> {
-    for (idx, status) in status_history.iter().enumerate() {
-        let previous = if idx == 0 {
-            None
-        } else {
-            Some(&status_history[idx - 1])
-        };
-        if matches!(status, RunStatus::CompilingContext) {
-            append_run_event(
-                state_dir,
-                handle_id,
-                "context.compile.started",
-                "preparing",
-                "context_compile",
-                "context",
-                "context compile started",
-                json!({
-                    "synthetic": true,
-                    "derived_from": "status_history",
-                }),
-            )?;
-        }
-        if matches!(status, RunStatus::ParsingSummary) {
-            append_run_event(
-                state_dir,
-                handle_id,
-                "parse.started",
-                "running",
-                "parse",
-                "parser",
-                "summary parse started",
-                json!({
-                    "synthetic": true,
-                    "derived_from": "status_history",
-                }),
-            )?;
-        }
-
-        if matches!(previous, Some(RunStatus::PreparingWorkspace))
-            && !matches!(status, RunStatus::PreparingWorkspace)
-        {
-            append_run_event(
-                state_dir,
-                handle_id,
-                "workspace.prepare.completed",
-                "preparing",
-                "workspace_prepare",
-                "workspace",
-                "workspace preparation completed",
-                json!({
-                    "synthetic": true,
-                    "derived_from": "status_history",
-                }),
-            )?;
-        }
-        if matches!(previous, Some(RunStatus::CompilingContext))
-            && !matches!(status, RunStatus::CompilingContext)
-        {
-            append_run_event(
-                state_dir,
-                handle_id,
-                "context.compile.completed",
-                "preparing",
-                "context_compile",
-                "context",
-                "context compile completed",
-                json!({
-                    "synthetic": true,
-                    "derived_from": "status_history",
-                }),
-            )?;
-        }
-        if matches!(previous, Some(RunStatus::ParsingSummary))
-            && !matches!(status, RunStatus::ParsingSummary)
-        {
-            append_run_event(
-                state_dir,
-                handle_id,
-                "parse.completed",
-                "running",
-                "parse",
-                "parser",
-                "summary parse completed",
-                json!({
-                    "synthetic": true,
-                    "derived_from": "status_history",
-                }),
-            )?;
-        }
-    }
-    Ok(())
-}
-
 fn append_provider_output_delta_events(
     state_dir: &Path,
     handle_id: &str,
@@ -1863,11 +1766,6 @@ impl McpSubagentServer {
                         Some(dispatch_result.compiled_context_markdown);
                     record.usage = dispatch_result.native_usage;
                     record.retry_classification = Some(retry_classification);
-                    let _ = append_transition_derived_events(
-                        &state_dir,
-                        &task_handle_id,
-                        &record.status_history,
-                    );
                     let final_status = format!("{}", record.status);
                     let final_event = match record.status {
                         RunStatus::Succeeded => "run.completed",
@@ -2108,10 +2006,10 @@ impl McpSubagentServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_provider_output_delta_events, append_transition_derived_events, build_watch_advice,
-        classify_block_reason, classify_block_reason_from_events, classify_block_reason_from_text,
-        collect_wait_reasons, current_phase_age_ms, detect_provider_wait_signal, load_run_events,
-        parse_rfc3339, RunEventOutput,
+        append_provider_output_delta_events, build_watch_advice, classify_block_reason,
+        classify_block_reason_from_events, classify_block_reason_from_text, collect_wait_reasons,
+        current_phase_age_ms, detect_provider_wait_signal, load_run_events, parse_rfc3339,
+        RunEventOutput,
     };
     use crate::runtime::dispatcher::RunStatus;
     use tempfile::tempdir;
@@ -2277,34 +2175,6 @@ mod tests {
             advice.iter().any(|item| item.contains("get_run_result")),
             "{advice:?}"
         );
-    }
-
-    #[test]
-    fn append_transition_derived_events_emits_context_parse_and_workspace_completion() {
-        let dir = tempdir().expect("tempdir");
-        let history = vec![
-            RunStatus::Received,
-            RunStatus::PreparingWorkspace,
-            RunStatus::ResolvingMemory,
-            RunStatus::CompilingContext,
-            RunStatus::Launching,
-            RunStatus::Running,
-            RunStatus::Collecting,
-            RunStatus::ParsingSummary,
-            RunStatus::Finalizing,
-            RunStatus::Succeeded,
-        ];
-        append_transition_derived_events(dir.path(), "run-1", &history).expect("append events");
-        let events = load_run_events(dir.path(), "run-1").expect("load events");
-        let event_names = events
-            .iter()
-            .map(|event| event.event.as_str())
-            .collect::<Vec<_>>();
-        assert!(event_names.contains(&"workspace.prepare.completed"));
-        assert!(event_names.contains(&"context.compile.started"));
-        assert!(event_names.contains(&"context.compile.completed"));
-        assert!(event_names.contains(&"parse.started"));
-        assert!(event_names.contains(&"parse.completed"));
     }
 
     #[test]

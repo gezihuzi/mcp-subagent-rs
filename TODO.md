@@ -2853,3 +2853,60 @@
 - 已新增测试：
   - `build_phase_progress_line_ignores_synthetic_events`。
 - 已通过 `cargo fmt && cargo test -q`（186 + 61 + 3 全通过）。
+
+## T-108 V0.10-P1-CliSpawnAcceptedOnlyNoWait (Completed 2026-03-25)
+
+任务：移除 CLI `spawn/submit` 的 `wait_for_run` 阻塞，让命令行也符合 accepted-only 语义。  
+验收标准：
+
+1. `mcp-subagent spawn ... --json` 返回后进程立即退出，不等待 run 完成。
+2. 输出保持 accepted envelope（`handle_id/status/state/phase/queued_at`）。
+3. `submit` 与 `spawn` 行为保持一致。
+4. README 命令行为说明同步更新。
+5. 新增测试覆盖 CLI spawn 不等待（最少覆盖逻辑级行为）。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/main.rs::spawn_agent`：
+  - 去除默认 `wait_for_run` 阻塞；
+  - 以 `cli_spawn_waits_for_completion()` 统一控制（当前固定为 `false`），CLI `spawn/submit` 立即返回 accepted 结果。
+- 已新增测试：
+  - `cli_spawn_does_not_wait_for_completion`（逻辑级行为锁定）。
+- 已同步 `README.md`：
+  - 补充说明 CLI `spawn/submit` accepted 后立即退出，后续用 `watch/events/stats/result` 观察。
+- 已通过 `cargo fmt && cargo test -q`（186 + 62 + 3 全通过）。
+
+## T-109 V0.10-P1-RealtimeContextParseWorkspaceEvents (Pending)
+
+任务：将 `workspace/context/parse` 事件从 synthetic 尾部补写改为运行时实时事件。  
+验收标准：
+
+1. `workspace.prepare.completed` 在 workspace 准备完成时即时写入。
+2. `context.compile.started/completed` 在编译前后即时写入。
+3. `parse.started/completed` 在 summary 解析前后即时写入。
+4. 移除相应 synthetic 补写路径，不再依赖 `status_history` 回填。
+5. 新增测试覆盖事件时间顺序（probe -> workspace -> context -> parse -> completed）。
+6. `cargo test -q` 全量通过。
+
+## T-110 V0.10-P1-ProviderDeltaStreamingRuntimePath (Pending)
+
+任务：把 `provider.stdout.delta/provider.stderr.delta` 从结束后一次性写入改成运行期流式增量写入。  
+验收标准：
+
+1. provider 执行期间可持续看到 stdout/stderr delta 事件，不等 run 结束。
+2. `provider.first_output` 保留并在首次真实输出时触发。
+3. 失败/取消路径下也不丢已产生的 delta 事件。
+4. `watch/events/logs` 能在任务进行中消费到这些 delta 事件。
+5. 新增测试覆盖至少一个 provider runner 的增量输出路径（可用 fake runner fixture）。
+6. `cargo test -q` 全量通过。
+
+## T-111 V0.10-P1-WatchIncrementalCursorParity (Pending)
+
+任务：将 `watch` 路径与 `events --follow` 对齐为增量 cursor 消费，消除全量轮询读取。  
+验收标准：
+
+1. `watch <handle> --follow`（默认）不再每轮全量 `load_run_events`。
+2. 保持 phase_progress、phase_timeout、terminal 退出语义不变。
+3. 与 `events --follow` 输出一致性保持（同一 run 同阶段不产生自相矛盾）。
+4. 新增测试覆盖 `watch` 增量读取与超时行为。
+5. `cargo test -q` 全量通过。

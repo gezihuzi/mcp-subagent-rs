@@ -4,7 +4,10 @@ use rmcp::ErrorData;
 use uuid::Uuid;
 
 use crate::{
-    mcp::state::{build_memory_resolution_snapshot, MemoryResolutionRecord, WorkspaceRecord},
+    mcp::{
+        persistence::append_run_event,
+        state::{build_memory_resolution_snapshot, MemoryResolutionRecord, WorkspaceRecord},
+    },
     runtime::{
         cleanup::WorkspaceCleanupGuard,
         context::DefaultContextCompiler,
@@ -22,6 +25,7 @@ use crate::{
     spec::Provider,
     types::RunRequest,
 };
+use serde_json::json;
 
 #[derive(Debug)]
 pub(crate) struct DispatchEnvelope {
@@ -40,6 +44,16 @@ pub(crate) async fn run_dispatch(
 ) -> std::result::Result<DispatchEnvelope, ErrorData> {
     let mut prepared_workspace = prepare_workspace(spec, request, state_dir, handle_id)
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+    let _ = append_run_event(
+        state_dir,
+        handle_id,
+        "workspace.prepare.completed",
+        "preparing",
+        "workspace_prepare",
+        "workspace",
+        "workspace preparation completed",
+        json!({}),
+    );
     let effective_spec = apply_workspace_runtime_overrides(spec, &mut prepared_workspace);
     let workspace_cleanup = WorkspaceCleanupGuard::for_workspace(&prepared_workspace);
     let workspace_record = to_workspace_record(&prepared_workspace, lock_keys);
@@ -58,7 +72,83 @@ pub(crate) async fn run_dispatch(
     let runner = select_runner(&effective_spec.core.provider);
     let dispatcher = Dispatcher::new(DefaultContextCompiler, runner);
     let mut result = dispatcher
-        .run(&effective_spec, &effective_request, resolved_memory)
+        .run_with_transition_observer(
+            &effective_spec,
+            &effective_request,
+            resolved_memory,
+            |prev, current| {
+                if matches!(
+                    current,
+                    crate::runtime::dispatcher::RunStatus::CompilingContext
+                ) {
+                    let _ = append_run_event(
+                        state_dir,
+                        handle_id,
+                        "context.compile.started",
+                        "preparing",
+                        "context_compile",
+                        "context",
+                        "context compile started",
+                        json!({}),
+                    );
+                }
+                if matches!(
+                    current,
+                    crate::runtime::dispatcher::RunStatus::ParsingSummary
+                ) {
+                    let _ = append_run_event(
+                        state_dir,
+                        handle_id,
+                        "parse.started",
+                        "running",
+                        "parse",
+                        "parser",
+                        "summary parse started",
+                        json!({}),
+                    );
+                }
+                if prev.as_ref().is_some_and(|status| {
+                    matches!(
+                        status,
+                        crate::runtime::dispatcher::RunStatus::CompilingContext
+                    )
+                }) && !matches!(
+                    current,
+                    crate::runtime::dispatcher::RunStatus::CompilingContext
+                ) {
+                    let _ = append_run_event(
+                        state_dir,
+                        handle_id,
+                        "context.compile.completed",
+                        "preparing",
+                        "context_compile",
+                        "context",
+                        "context compile completed",
+                        json!({}),
+                    );
+                }
+                if prev.as_ref().is_some_and(|status| {
+                    matches!(
+                        status,
+                        crate::runtime::dispatcher::RunStatus::ParsingSummary
+                    )
+                }) && !matches!(
+                    current,
+                    crate::runtime::dispatcher::RunStatus::ParsingSummary
+                ) {
+                    let _ = append_run_event(
+                        state_dir,
+                        handle_id,
+                        "parse.completed",
+                        "running",
+                        "parse",
+                        "parser",
+                        "summary parse completed",
+                        json!({}),
+                    );
+                }
+            },
+        )
         .await
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     result.metadata.handle_id = parse_handle_id(handle_id);
