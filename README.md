@@ -1,6 +1,6 @@
 # mcp-subagent-rs
 
-[![GitHub Release](https://img.shields.io/github/v/release/gezihuzi/mcp-subagent-rs?display_name=tag)](https://github.com/gezihuzi/mcp-subagent-rs/releases)
+[![GitHub Tag](https://img.shields.io/github/v/tag/gezihuzi/mcp-subagent-rs?sort=semver)](https://github.com/gezihuzi/mcp-subagent-rs/tags)
 [![GitHub License](https://img.shields.io/github/license/gezihuzi/mcp-subagent-rs)](https://github.com/gezihuzi/mcp-subagent-rs#license)
 
 Rust implementation of an MCP subagent runtime aligned to the technical design baseline in `docs/`.
