@@ -3800,6 +3800,9 @@ async fn spawn_agent(
             } else {
                 println!("handle_id: {}", result.0.handle_id);
                 println!("status: {}", result.0.status);
+                println!("state: {}", result.0.state);
+                println!("phase: {}", result.0.phase);
+                println!("queued_at: {}", result.0.queued_at);
             }
             ExitCode::SUCCESS
         }

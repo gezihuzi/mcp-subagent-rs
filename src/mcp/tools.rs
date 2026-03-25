@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -777,6 +777,127 @@ fn collect_wait_reasons(events: &[RunEventOutput]) -> (Vec<String>, Option<Strin
     (reasons, current)
 }
 
+fn append_transition_derived_events(
+    state_dir: &Path,
+    handle_id: &str,
+    status_history: &[RunStatus],
+) -> std::result::Result<(), ErrorData> {
+    for (idx, status) in status_history.iter().enumerate() {
+        let previous = if idx == 0 {
+            None
+        } else {
+            Some(&status_history[idx - 1])
+        };
+        if matches!(status, RunStatus::CompilingContext) {
+            append_run_event(
+                state_dir,
+                handle_id,
+                "context.compile.started",
+                "preparing",
+                "context_compile",
+                "context",
+                "context compile started",
+                json!({}),
+            )?;
+        }
+        if matches!(status, RunStatus::ParsingSummary) {
+            append_run_event(
+                state_dir,
+                handle_id,
+                "parse.started",
+                "running",
+                "parse",
+                "parser",
+                "summary parse started",
+                json!({}),
+            )?;
+        }
+
+        if matches!(previous, Some(RunStatus::PreparingWorkspace))
+            && !matches!(status, RunStatus::PreparingWorkspace)
+        {
+            append_run_event(
+                state_dir,
+                handle_id,
+                "workspace.prepare.completed",
+                "preparing",
+                "workspace_prepare",
+                "workspace",
+                "workspace preparation completed",
+                json!({}),
+            )?;
+        }
+        if matches!(previous, Some(RunStatus::CompilingContext))
+            && !matches!(status, RunStatus::CompilingContext)
+        {
+            append_run_event(
+                state_dir,
+                handle_id,
+                "context.compile.completed",
+                "preparing",
+                "context_compile",
+                "context",
+                "context compile completed",
+                json!({}),
+            )?;
+        }
+        if matches!(previous, Some(RunStatus::ParsingSummary))
+            && !matches!(status, RunStatus::ParsingSummary)
+        {
+            append_run_event(
+                state_dir,
+                handle_id,
+                "parse.completed",
+                "running",
+                "parse",
+                "parser",
+                "summary parse completed",
+                json!({}),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn append_provider_output_delta_events(
+    state_dir: &Path,
+    handle_id: &str,
+    stdout: &str,
+    stderr: &str,
+) -> std::result::Result<(), ErrorData> {
+    if !stdout.trim().is_empty() {
+        append_run_event(
+            state_dir,
+            handle_id,
+            "provider.stdout.delta",
+            "running",
+            "running",
+            "provider",
+            "provider stdout received",
+            json!({
+                "bytes": stdout.len(),
+                "lines": stdout.lines().count(),
+            }),
+        )?;
+    }
+    if !stderr.trim().is_empty() {
+        append_run_event(
+            state_dir,
+            handle_id,
+            "provider.stderr.delta",
+            "running",
+            "running",
+            "provider",
+            "provider stderr received",
+            json!({
+                "bytes": stderr.len(),
+                "lines": stderr.lines().count(),
+            }),
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default)]
 struct EventRuntimeSnapshot {
     state: Option<String>,
@@ -1431,6 +1552,7 @@ impl McpSubagentServer {
     ) -> std::result::Result<Json<SpawnAgentOutput>, ErrorData> {
         let (loaded, request, execution_policy) = self.prepare_run(input, RunMode::Async)?;
         let handle_id = Uuid::now_v7().to_string();
+        let queued_at = format_time(OffsetDateTime::now_utc());
         let running_record = RunRecord::running(
             request.task.clone(),
             Some(build_run_request_snapshot(&request)),
@@ -1464,7 +1586,9 @@ impl McpSubagentServer {
             "queueing",
             "runtime",
             "run queued for async execution",
-            json!({}),
+            json!({
+                "queued_at": queued_at.clone(),
+            }),
         )?;
 
         let state = self.runtime_state();
@@ -1641,6 +1765,12 @@ impl McpSubagentServer {
                     if !(dispatch_result.stdout.trim().is_empty()
                         && dispatch_result.stderr.trim().is_empty())
                     {
+                        let _ = append_provider_output_delta_events(
+                            &state_dir,
+                            &task_handle_id,
+                            &dispatch_result.stdout,
+                            &dispatch_result.stderr,
+                        );
                         let _ = append_run_event(
                             &state_dir,
                             &task_handle_id,
@@ -1718,6 +1848,11 @@ impl McpSubagentServer {
                         Some(dispatch_result.compiled_context_markdown);
                     record.usage = dispatch_result.native_usage;
                     record.retry_classification = Some(retry_classification);
+                    let _ = append_transition_derived_events(
+                        &state_dir,
+                        &task_handle_id,
+                        &record.status_history,
+                    );
                     let final_status = format!("{}", record.status);
                     let final_event = match record.status {
                         RunStatus::Succeeded => "run.completed",
@@ -1801,7 +1936,10 @@ impl McpSubagentServer {
 
         Ok(Json(SpawnAgentOutput {
             handle_id,
-            status: format!("{}", RunStatus::Running),
+            status: "accepted".to_string(),
+            state: "accepted".to_string(),
+            phase: "accepted".to_string(),
+            queued_at,
         }))
     }
 
@@ -1888,6 +2026,16 @@ impl McpSubagentServer {
                 record.artifact_index = artifact_index;
                 record.artifacts = artifacts;
             }
+            append_run_event(
+                self.state_dir(),
+                &input.handle_id,
+                "run.cancelled",
+                "cancelled",
+                "completed",
+                "runtime",
+                "run cancelled by user request",
+                json!({}),
+            )?;
             persist_run_record(self.state_dir(), &input.handle_id, record)?;
         }
 
@@ -1945,11 +2093,13 @@ impl McpSubagentServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_watch_advice, classify_block_reason, classify_block_reason_from_events,
-        classify_block_reason_from_text, collect_wait_reasons, current_phase_age_ms,
-        detect_provider_wait_signal, parse_rfc3339, RunEventOutput,
+        append_provider_output_delta_events, append_transition_derived_events, build_watch_advice,
+        classify_block_reason, classify_block_reason_from_events, classify_block_reason_from_text,
+        collect_wait_reasons, current_phase_age_ms, detect_provider_wait_signal, load_run_events,
+        parse_rfc3339, RunEventOutput,
     };
     use crate::runtime::dispatcher::RunStatus;
+    use tempfile::tempdir;
 
     #[test]
     fn detect_provider_wait_signal_matches_trust_prompt() {
@@ -2111,6 +2261,64 @@ mod tests {
         assert!(
             advice.iter().any(|item| item.contains("get_run_result")),
             "{advice:?}"
+        );
+    }
+
+    #[test]
+    fn append_transition_derived_events_emits_context_parse_and_workspace_completion() {
+        let dir = tempdir().expect("tempdir");
+        let history = vec![
+            RunStatus::Received,
+            RunStatus::PreparingWorkspace,
+            RunStatus::ResolvingMemory,
+            RunStatus::CompilingContext,
+            RunStatus::Launching,
+            RunStatus::Running,
+            RunStatus::Collecting,
+            RunStatus::ParsingSummary,
+            RunStatus::Finalizing,
+            RunStatus::Succeeded,
+        ];
+        append_transition_derived_events(dir.path(), "run-1", &history).expect("append events");
+        let events = load_run_events(dir.path(), "run-1").expect("load events");
+        let event_names = events
+            .iter()
+            .map(|event| event.event.as_str())
+            .collect::<Vec<_>>();
+        assert!(event_names.contains(&"workspace.prepare.completed"));
+        assert!(event_names.contains(&"context.compile.started"));
+        assert!(event_names.contains(&"context.compile.completed"));
+        assert!(event_names.contains(&"parse.started"));
+        assert!(event_names.contains(&"parse.completed"));
+    }
+
+    #[test]
+    fn append_provider_output_delta_events_emits_stdout_and_stderr_deltas() {
+        let dir = tempdir().expect("tempdir");
+        append_provider_output_delta_events(dir.path(), "run-2", "a\nb\n", "warn")
+            .expect("append output delta events");
+        let events = load_run_events(dir.path(), "run-2").expect("load events");
+        let stdout_event = events
+            .iter()
+            .find(|event| event.event == "provider.stdout.delta")
+            .expect("stdout delta event");
+        let stderr_event = events
+            .iter()
+            .find(|event| event.event == "provider.stderr.delta")
+            .expect("stderr delta event");
+        assert_eq!(
+            stdout_event
+                .detail
+                .get("lines")
+                .and_then(|value| value.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            stderr_event
+                .detail
+                .get("bytes")
+                .and_then(|value| value.as_u64()),
+            Some(4)
         );
     }
 }

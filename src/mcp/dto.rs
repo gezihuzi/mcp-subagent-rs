@@ -92,6 +92,12 @@ pub struct RunAgentOutput {
 pub struct SpawnAgentOutput {
     pub handle_id: String,
     pub status: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub queued_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]

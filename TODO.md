@@ -2779,3 +2779,29 @@
 - 已补测试：
   - main: `classify_block_reason_ignores_cached_credentials_text`、`classify_block_reason_is_none_for_succeeded_status`
   - mcp/tools: `detect_provider_wait_signal_ignores_cached_credentials_log`、`classify_block_reason_is_none_for_succeeded_status`、`classify_block_reason_from_text_ignores_cached_credentials_log`
+
+## T-105 V0.10-P1-SpawnAcceptedEnvelopeAndCoreEventCoverage (Completed 2026-03-25)
+
+任务：收口 `spawn` accepted 返回语义，并补齐 v0.10 必备事件里的关键缺口（context/parse/cancel/output delta）。  
+验收标准：
+
+1. `spawn_agent` 输出包含 accepted envelope：`status/state/phase/queued_at`（且 `status=accepted`）。
+2. 运行成功路径事件流补齐：`workspace.prepare.completed`、`context.compile.started/completed`、`parse.started/completed`。
+3. provider 输出事件补齐：`provider.stdout.delta` 与 `provider.stderr.delta`（至少包含 bytes/lines 指标）。
+4. `cancel_agent` 会写入 `run.cancelled` 事件，Host 可直接观察取消终态事件。
+5. CLI/README 与测试同步更新，`cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 `src/mcp/dto.rs::SpawnAgentOutput`：新增 `state/phase/queued_at` 字段，并保持 `status` 兼容。
+- 已升级 `src/mcp/tools.rs::spawn_agent`：
+  - 返回 accepted envelope（`status/state/phase=accepted` + `queued_at`）；
+  - 新增 `append_transition_derived_events`，从 `status_history` 衍生补齐 `workspace.prepare.completed`、`context.compile.*`、`parse.*`；
+  - 新增 `append_provider_output_delta_events`，输出 `provider.stdout.delta` / `provider.stderr.delta`（bytes/lines）。
+- 已升级 `src/mcp/tools.rs::cancel_agent`：取消路径追加 `run.cancelled` 事件。
+- 已同步 `src/main.rs` 非 JSON spawn 输出，补充 `state/phase/queued_at` 展示。
+- 已同步 MCP/集成测试与工具单测：
+  - `src/mcp/server.rs` 断言 spawn accepted envelope；
+  - roundtrip 断言取消后可观测 `run.cancelled`；
+  - `src/mcp/tools.rs` 新增 transition-derived events 与 provider delta events 单测。
+- 已同步 `README.md`：说明 `spawn/submit --json` 的 accepted envelope 字段。
+- 已通过 `cargo fmt && cargo test -q`（186 + 58 + 3 全通过）。

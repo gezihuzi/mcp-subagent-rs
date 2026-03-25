@@ -719,7 +719,10 @@ sandbox = "read_only"
             "spawn took {:?}, expected < 300ms",
             elapsed
         );
-        assert_eq!(spawn.status, "running");
+        assert_eq!(spawn.status, "accepted");
+        assert_eq!(spawn.state, "accepted");
+        assert_eq!(spawn.phase, "accepted");
+        assert!(!spawn.queued_at.is_empty());
 
         let status = server
             .get_agent_status(rmcp::handler::server::wrapper::Parameters(HandleInput {
@@ -773,7 +776,10 @@ sandbox = "read_only"
             .await
             .expect("spawn")
             .0;
-        assert_eq!(spawn.status, "running");
+        assert_eq!(spawn.status, "accepted");
+        assert_eq!(spawn.state, "accepted");
+        assert_eq!(spawn.phase, "accepted");
+        assert!(!spawn.queued_at.is_empty());
 
         server.wait_for_run(&spawn.handle_id).await;
 
@@ -1012,6 +1018,13 @@ sandbox = "read_only"
         let spawn_json = spawn_res
             .structured_content
             .expect("spawn has structured content");
+        assert_eq!(structured_field(&spawn_json, "status"), "accepted");
+        assert_eq!(structured_field(&spawn_json, "state"), "accepted");
+        assert_eq!(structured_field(&spawn_json, "phase"), "accepted");
+        assert!(spawn_json
+            .get("queued_at")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.is_empty()));
         let handle_id = structured_field(&spawn_json, "handle_id").to_string();
 
         let mut final_status = String::new();
@@ -1278,6 +1291,40 @@ sandbox = "read_only"
             .structured_content
             .expect("cancel structured content");
         assert_eq!(structured_field(&cancel_json, "status"), "cancelled");
+        let cancelled_events = client
+            .call_tool(
+                CallToolRequestParams::new("watch_agent_events").with_arguments(
+                    json!({
+                        "handle_id": second_handle,
+                        "since_seq": 0,
+                        "limit": 50
+                    })
+                    .as_object()
+                    .expect("object")
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("watch cancelled events");
+        let cancelled_events_json = cancelled_events
+            .structured_content
+            .expect("watch cancelled structured");
+        let cancelled_event_names = cancelled_events_json
+            .get("events")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|entry| entry.get("event").and_then(|value| value.as_str()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert!(
+            cancelled_event_names
+                .iter()
+                .any(|event| *event == "run.cancelled"),
+            "expected run.cancelled event, got {cancelled_event_names:?}"
+        );
 
         client.cancel().await.expect("cancel client");
         server_handle.await.expect("server join");
