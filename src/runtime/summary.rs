@@ -1,7 +1,9 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub const SUMMARY_START_SENTINEL: &str = "<<<MCP_SUBAGENT_SUMMARY_JSON_START>>>";
 pub const SUMMARY_END_SENTINEL: &str = "<<<MCP_SUBAGENT_SUMMARY_JSON_END>>>";
@@ -89,12 +91,15 @@ pub struct SummaryEnvelope {
 }
 
 pub fn parse_summary_envelope(raw_stdout: &str, raw_stderr: &str) -> SummaryEnvelope {
-    if let Some(json_block) = extract_json_block(raw_stdout) {
-        return parse_or_degrade(json_block, "stdout");
+    let mut invalid_candidate = None;
+    if let Some(parsed) = parse_from_raw(raw_stdout, "stdout", &mut invalid_candidate) {
+        return parsed;
     }
-
-    if let Some(json_block) = extract_json_block(raw_stderr) {
-        return parse_or_degrade(json_block, "stderr");
+    if let Some(parsed) = parse_from_raw(raw_stderr, "stderr", &mut invalid_candidate) {
+        return parsed;
+    }
+    if let Some((reason, raw_fallback_text)) = invalid_candidate {
+        return invalid_envelope(&reason, raw_fallback_text);
     }
 
     degraded_envelope(
@@ -103,31 +108,146 @@ pub fn parse_summary_envelope(raw_stdout: &str, raw_stderr: &str) -> SummaryEnve
     )
 }
 
-fn parse_or_degrade(json_block: &str, source: &str) -> SummaryEnvelope {
+fn parse_from_raw(
+    raw: &str,
+    source: &str,
+    invalid_candidate: &mut Option<(String, String)>,
+) -> Option<SummaryEnvelope> {
+    let mut seen = HashSet::new();
+    for json_block in extract_json_blocks(raw)
+        .into_iter()
+        .chain(extract_json_objects(raw))
+    {
+        let trimmed = json_block.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed) {
+            continue;
+        }
+
+        if let Some(parsed) = parse_json_candidate(trimmed) {
+            return Some(parsed);
+        }
+
+        *invalid_candidate = Some((
+            format!("invalid summary json from {source}"),
+            trimmed.to_string(),
+        ));
+    }
+
+    None
+}
+
+fn parse_json_candidate(json_block: &str) -> Option<SummaryEnvelope> {
     if let Ok(parsed_envelope) = serde_json::from_str::<SummaryEnvelope>(json_block) {
-        return parsed_envelope;
+        return Some(parsed_envelope);
     }
 
     if let Ok(parsed_summary) = serde_json::from_str::<StructuredSummary>(json_block) {
-        return SummaryEnvelope {
+        return Some(SummaryEnvelope {
             contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
             parse_status: SummaryParseStatus::Validated,
             summary: parsed_summary,
             raw_fallback_text: None,
-        };
+        });
     }
 
-    invalid_envelope(
-        &format!("invalid summary json from {source}"),
-        json_block.to_string(),
-    )
+    if let Ok(payload) = serde_json::from_str::<Value>(json_block) {
+        if let Some(wrapped) = wrap_json_payload(payload) {
+            return Some(wrapped);
+        }
+    }
+
+    None
 }
 
-fn extract_json_block(raw: &str) -> Option<&str> {
-    let start = raw.find(SUMMARY_START_SENTINEL)?;
-    let payload_start = start + SUMMARY_START_SENTINEL.len();
-    let end = raw[payload_start..].find(SUMMARY_END_SENTINEL)? + payload_start;
-    Some(raw[payload_start..end].trim())
+fn wrap_json_payload(payload: Value) -> Option<SummaryEnvelope> {
+    let Value::Object(map) = &payload else {
+        return None;
+    };
+    if map.is_empty() {
+        return None;
+    }
+
+    let payload_text = serde_json::to_string(&payload).ok()?;
+    Some(SummaryEnvelope {
+        contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
+        parse_status: SummaryParseStatus::Validated,
+        summary: StructuredSummary {
+            summary: "Provider returned JSON payload; runtime wrapped it into SummaryEnvelope."
+                .to_string(),
+            key_findings: vec![payload_text],
+            artifacts: Vec::new(),
+            open_questions: Vec::new(),
+            next_steps: Vec::new(),
+            exit_code: 0,
+            verification_status: VerificationStatus::Passed,
+            touched_files: Vec::new(),
+            plan_refs: Vec::new(),
+        },
+        raw_fallback_text: None,
+    })
+}
+
+fn extract_json_blocks(raw: &str) -> Vec<&str> {
+    let mut blocks = Vec::new();
+    let mut offset = 0usize;
+    while let Some(start_rel) = raw[offset..].find(SUMMARY_START_SENTINEL) {
+        let payload_start = offset + start_rel + SUMMARY_START_SENTINEL.len();
+        let Some(end_rel) = raw[payload_start..].find(SUMMARY_END_SENTINEL) else {
+            break;
+        };
+        let end = payload_start + end_rel;
+        blocks.push(raw[payload_start..end].trim());
+        offset = end + SUMMARY_END_SENTINEL.len();
+    }
+    blocks
+}
+
+fn extract_json_objects(raw: &str) -> Vec<&str> {
+    let mut objects = Vec::new();
+    let mut depth = 0usize;
+    let mut start_idx = None;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (idx, ch) in raw.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start_idx = Some(idx);
+                }
+                depth += 1;
+            }
+            '}' => {
+                if depth == 0 {
+                    continue;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(start) = start_idx.take() {
+                        let end = idx + ch.len_utf8();
+                        objects.push(raw[start..end].trim());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    objects
 }
 
 fn degraded_envelope(reason: &str, raw_fallback_text: Option<String>) -> SummaryEnvelope {
@@ -277,6 +397,57 @@ mod tests {
             parsed.summary.verification_status,
             VerificationStatus::NotRun
         );
+    }
+
+    #[test]
+    fn parses_valid_json_without_sentinels() {
+        let parsed = parse_summary_envelope(&legacy_summary_json(), "");
+        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
+        assert_eq!(parsed.summary.summary, "ok");
+    }
+
+    #[test]
+    fn parses_late_valid_json_after_placeholder_sentinel_block() {
+        let stdout = format!(
+            "OUTPUT SENTINELS\n{start}\n{{...valid json...}}\n{end}\nrunner logs\n{envelope}",
+            start = SUMMARY_START_SENTINEL,
+            end = SUMMARY_END_SENTINEL,
+            envelope = envelope_json()
+        );
+        let parsed = parse_summary_envelope(&stdout, "");
+        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
+        assert_eq!(parsed.summary.summary, "ok");
+    }
+
+    #[test]
+    fn parses_second_sentinel_block_when_first_is_placeholder() {
+        let stdout = format!(
+            "{start}\n{{...valid json...}}\n{end}\n{start}\n{json}\n{end}",
+            start = SUMMARY_START_SENTINEL,
+            end = SUMMARY_END_SENTINEL,
+            json = legacy_summary_json()
+        );
+        let parsed = parse_summary_envelope(&stdout, "");
+        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
+        assert_eq!(parsed.summary.summary, "ok");
+    }
+
+    #[test]
+    fn wraps_json_payload_inside_sentinel_as_validated() {
+        let stdout = format!(
+            "{start}\n{{\"name\":\"Octoclip\",\"url\":\"https://octoclip.app\"}}\n{end}",
+            start = SUMMARY_START_SENTINEL,
+            end = SUMMARY_END_SENTINEL
+        );
+        let parsed = parse_summary_envelope(&stdout, "");
+        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
+        assert_eq!(parsed.summary.exit_code, 0);
+        assert_eq!(
+            parsed.summary.verification_status,
+            VerificationStatus::Passed
+        );
+        assert_eq!(parsed.summary.key_findings.len(), 1);
+        assert!(parsed.summary.key_findings[0].contains("\"name\":\"Octoclip\""));
     }
 
     #[test]

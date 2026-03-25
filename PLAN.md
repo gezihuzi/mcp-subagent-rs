@@ -2,14 +2,37 @@
 
 ## North Star
 
-按 `docs/mcp-subagent_tech_design_v0.8.md` 交付首个“直接可用 beta”：首次接入路径可复制可运行、命令面与文档零漂移、默认场景稳定可验证。
+按 `docs/mcp-subagent_tech_design_v0.9.md` 推进“默认轻委派 + native-first 结果模型”的直接可用 beta：默认最小上下文、归一化失败不再硬失败、命令面更顺手。
+
+## Execution Strategy (v0.9 Current)
+
+### Batch V0.9-P0 - Delegation Minimal + Native-first（当前优先）
+
+目标：先完成默认策略收口和失败语义修正：`memory_sources` 默认去掉 `ActivePlan`、新增 `delegation_context/native_discovery/output_mode/parse_policy`、`parse_policy=best_effort` 下 provider 成功不因归一化失败判 hard fail、补 `submit` 命令别名。
+依赖顺序：`T-072 -> T-073 -> T-074`。
+回滚策略：新策略字段全部有默认值，旧 agent spec 可无缝加载；`spawn/status` 兼容保留，`submit` 只是别名扩展。
+风险与控制：放宽解析可能掩盖格式问题；通过在 summary 中保留 `parse_status` 与 raw artifact，并在 strict 模式保留旧失败语义。
+
+### Batch V0.9-P1 - MCP Run Result Surface（已完成）
+
+目标：在 MCP 工具面补齐 run 可观测能力：`list_runs/get_run_result/read_run_logs/watch_run`，让 host 不需要拼 `status + artifact` 才能消费结果。
+依赖顺序：`T-075 -> T-076 -> T-077 -> T-078 -> T-079 -> T-080 -> T-081`（已完成 native usage 采集与结果面回填）。
+回滚策略：新增 MCP tools 仅扩展协议面，不破坏既有 `list_agents/run_agent/spawn_agent/get_agent_status/cancel_agent/read_agent_artifact`。
+风险与控制：watch 轮询可能带来频繁 IO；通过最小轮询间隔（50ms）与可配置 timeout 控制开销。
+
+### Batch V0.9-P2 - Run Timeline + Usage + Retry Observability（已完成 T-082/T-083/T-084/T-085）
+
+目标：在已完成 `timeline`、usage 精度和 ambient 诊断基础上，补齐 retry 分类可观测性（仅输出，不变更重试策略）。
+依赖顺序：`T-082 -> T-083 -> T-084 -> T-085`（Completed 2026-03-25：输出层 retry classification 已落地，执行策略未改动）。
+回滚策略：仅新增输出字段与事件，不改变执行重试分支；移除字段即可无损回滚。
+风险与控制：错误文案规则可能误分类；通过保守 `unknown` 分类与 reason 明示降低误导。
 
 ## Execution Strategy (v0.8 Current)
 
 ### Batch V0.8-P0 - First Success Path（当前优先）
 
-目标：完成 `connect-snippet + init README + smoke_v08/CI + release docs/changelog/version + real examples/onboarding + CI reliability fixes` 收口，让用户首次接入、发布切点和示例落地都可复制可验证。
-依赖顺序：`T-059 -> T-060 -> T-061 -> T-062 -> T-064 -> T-065 -> T-066 -> T-067`。
+目标：完成 `connect-snippet + init README + smoke_v08/CI + release docs/changelog/version + real examples/onboarding + CI reliability fixes + summary parsing robustness` 收口，让用户首次接入、发布切点和示例落地都可复制可验证。
+依赖顺序：`T-059 -> T-060 -> T-061 -> T-062 -> T-064 -> T-065 -> T-066 -> T-067 -> T-068 -> T-069 -> T-070 -> T-071`。
 回滚策略：新增命令面与模板升级均保持向后兼容，不影响既有 `mcp/doctor/validate/run/spawn` 主链。
 风险与控制：路径绝对化与 shell 转义实现不当会导致复制失败；smoke 误依赖本机真实 codex 会导致 CI 不稳定。通过单测覆盖 host 模板、绝对路径和含空格路径转义，并在 smoke 中使用 fake codex runner 固定回归路径。
 

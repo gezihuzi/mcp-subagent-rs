@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.0 - 2026-03-25
+
+### Highlights
+
+- Completed v0.9 runtime strategy closure for delegation-minimal and native-first result handling.
+- Added observability command surface for run lifecycle: `submit/ps/show/result/logs/timeline/watch`.
+- Added MCP run observability tools parity: `list_runs/get_run_result/read_run_logs/watch_run`.
+- Stabilized result contract `mcp-subagent.result.v1` and published versioned contract docs.
+- Added native-first usage capture with mixed fallback and broader provider usage parsing coverage.
+- Added per-provider ambient isolation diagnostics in `doctor --json` (native discovery profile + skill conflict detection).
+- Added retry classification observability fields (`retry_classification`, `classification_reason`) to run result outputs.
+
+### Provider Status (Current Build)
+
+- `Codex`: Primary
+- `Claude`: Beta
+- `Gemini`: Experimental
+- `Mock`: Stable local debug
+- `Ollama`: Local
+
 ## 0.8.1 - 2026-03-25
 
 ### Highlights

@@ -86,7 +86,7 @@ mod tests {
 [core]
 name = "reviewer"
 description = "review code"
-provider = "Codex"
+provider = "codex"
 instructions = "review"
 "#;
         fs::write(&file, raw).expect("write file");
@@ -105,7 +105,7 @@ instructions = "review"
 [core]
 name = "broken"
 description = "desc"
-provider = "Codex"
+provider = "codex"
 instructions = "review"
 unknown_field = "boom"
 "#;

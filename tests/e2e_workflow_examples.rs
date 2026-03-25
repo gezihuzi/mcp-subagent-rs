@@ -46,7 +46,7 @@ async fn example_workflow_build_stage_with_plan_ref_succeeds() {
         .expect("run should succeed")
         .0;
 
-    assert_eq!(out.status, "Succeeded");
+    assert_eq!(out.status, "succeeded");
     assert_eq!(out.structured_summary.parse_status, "Validated");
 }
 

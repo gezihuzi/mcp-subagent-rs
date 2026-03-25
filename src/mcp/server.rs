@@ -27,10 +27,11 @@ use crate::{
 };
 
 pub use crate::mcp::dto::{
-    AgentListing, AgentStatusOutput, ArtifactOutput, CancelAgentOutput, HandleInput,
-    ListAgentsOutput, ReadAgentArtifactInput, ReadAgentArtifactOutput, RunAgentInput,
-    RunAgentOutput, RunAgentSelectedFileInput, RuntimePolicySummary, SpawnAgentOutput,
-    SummaryOutput,
+    AgentListing, AgentStatusOutput, ArtifactOutput, CancelAgentOutput, GetRunResultInput,
+    GetRunResultOutput, HandleInput, ListAgentsOutput, ListRunsInput, ListRunsOutput,
+    ReadAgentArtifactInput, ReadAgentArtifactOutput, ReadRunLogsInput, ReadRunLogsOutput,
+    RunAgentInput, RunAgentOutput, RunAgentSelectedFileInput, RunListingOutput, RunUsageOutput,
+    RuntimePolicySummary, SpawnAgentOutput, SummaryOutput, WatchRunInput, WatchRunOutput,
 };
 
 #[tool_handler(router = self.tool_router)]
@@ -231,6 +232,19 @@ impl McpSubagentServer {
         Ok(record)
     }
 
+    /// Wait for an in-progress async run task to complete.
+    /// This is used by the CLI `spawn` command so the process doesn't exit
+    /// before the background task has a chance to persist its results.
+    pub async fn wait_for_run(&self, handle_id: &str) {
+        let task = {
+            let mut state = self.runtime_state.lock().await;
+            state.tasks.remove(handle_id)
+        };
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+    }
+
     pub(crate) async fn upsert_and_persist_run(
         &self,
         handle_id: &str,
@@ -368,15 +382,15 @@ mod tests {
     use crate::{mcp::artifacts::build_runtime_artifacts, mcp::state::RuntimeState};
 
     fn write_agent_spec(dir: &Path) {
-        write_agent_spec_with_provider_and_runtime(dir, "Mock", "");
+        write_agent_spec_with_provider_and_runtime(dir, "mock", "");
     }
 
     fn write_codex_agent_spec(dir: &Path) {
-        write_agent_spec_with_provider_and_runtime(dir, "Codex", "");
+        write_agent_spec_with_provider_and_runtime(dir, "codex", "");
     }
 
     fn write_gemini_agent_spec(dir: &Path) {
-        write_agent_spec_with_provider_and_runtime(dir, "Gemini", "");
+        write_agent_spec_with_provider_and_runtime(dir, "gemini", "");
     }
 
     fn write_agent_spec_with_provider(dir: &Path, provider: &str) {
@@ -393,8 +407,8 @@ provider = "{provider}"
 instructions = "review"
 
 [runtime]
-working_dir_policy = "InPlace"
-sandbox = "ReadOnly"
+working_dir_policy = "in_place"
+sandbox = "read_only"
 {runtime_extra}
 "#
         );
@@ -561,7 +575,7 @@ sandbox = "ReadOnly"
         assert!(out.agents[0]
             .capability_notes
             .iter()
-            .any(|note| note.contains("MissingBinary")));
+            .any(|note| note.contains("missing_binary")));
     }
 
     #[tokio::test]
@@ -570,7 +584,7 @@ sandbox = "ReadOnly"
         let agents_dir = temp.path().join("agents");
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&agents_dir).expect("create agents");
-        write_agent_spec_with_provider(&agents_dir, "Ollama");
+        write_agent_spec_with_provider(&agents_dir, "ollama");
         let server = make_server(agents_dir, state_dir);
 
         let out = server.list_agents().await.expect("list").0;
@@ -611,7 +625,7 @@ sandbox = "ReadOnly"
             .expect("run")
             .0;
 
-        assert_eq!(out.status, "Succeeded");
+        assert_eq!(out.status, "succeeded");
         assert!(out
             .structured_summary
             .summary
@@ -656,7 +670,7 @@ sandbox = "ReadOnly"
         assert!(err
             .message
             .as_ref()
-            .contains("provider `Codex` is unavailable"));
+            .contains("provider `codex` is unavailable"));
     }
 
     #[tokio::test]
@@ -667,8 +681,8 @@ sandbox = "ReadOnly"
         fs::create_dir_all(&agents_dir).expect("create agents");
         write_agent_spec_with_provider_and_runtime(
             &agents_dir,
-            "Mock",
-            r#"spawn_policy = "Async""#,
+            "mock",
+            r#"spawn_policy = "async""#,
         );
         let server = make_server(agents_dir, state_dir);
 
@@ -704,8 +718,8 @@ sandbox = "ReadOnly"
         fs::create_dir_all(&agents_dir).expect("create agents");
         write_agent_spec_with_provider_and_runtime(
             &agents_dir,
-            "Mock",
-            r#"background_preference = "PreferBackground""#,
+            "mock",
+            r#"background_preference = "prefer_background""#,
         );
         let server = make_server(agents_dir, state_dir);
 
@@ -739,7 +753,7 @@ sandbox = "ReadOnly"
         let agents_dir = temp.path().join("agents");
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&agents_dir).expect("create agents");
-        write_agent_spec_with_provider(&agents_dir, "Ollama");
+        write_agent_spec_with_provider(&agents_dir, "ollama");
         let server = McpSubagentServer::new_with_state_dir_and_prober(
             vec![agents_dir],
             state_dir,
@@ -770,7 +784,7 @@ sandbox = "ReadOnly"
         assert!(err
             .message
             .as_ref()
-            .contains("provider `Ollama` is unavailable"));
+            .contains("provider `ollama` is unavailable"));
     }
 
     #[derive(Debug, Clone, Default)]
@@ -847,11 +861,15 @@ sandbox = "ReadOnly"
         let tools = client.list_all_tools().await.expect("list tools");
         for expected in [
             "list_agents",
+            "list_runs",
             "run_agent",
             "spawn_agent",
             "get_agent_status",
+            "get_run_result",
             "cancel_agent",
             "read_agent_artifact",
+            "read_run_logs",
+            "watch_run",
         ] {
             assert!(tools.iter().any(|tool| tool.name == expected));
         }
@@ -895,13 +913,13 @@ sandbox = "ReadOnly"
             final_status = structured_field(&status_json, "status").to_string();
             if matches!(
                 final_status.as_str(),
-                "Succeeded" | "Failed" | "Cancelled" | "TimedOut"
+                "succeeded" | "failed" | "cancelled" | "timed_out"
             ) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(40)).await;
         }
-        assert_eq!(final_status, "Succeeded");
+        assert_eq!(final_status, "succeeded");
 
         let artifact_res = client
             .call_tool(
@@ -921,6 +939,94 @@ sandbox = "ReadOnly"
             .structured_content
             .expect("artifact has structured content");
         assert!(structured_field(&artifact_json, "content").contains("Mock run completed"));
+
+        let list_runs_res = client
+            .call_tool(
+                CallToolRequestParams::new("list_runs")
+                    .with_arguments(json!({ "limit": 5 }).as_object().expect("object").clone()),
+            )
+            .await
+            .expect("list runs");
+        let list_runs_json = list_runs_res
+            .structured_content
+            .expect("list_runs has structured content");
+        let run_rows = list_runs_json
+            .get("runs")
+            .and_then(|value| value.as_array())
+            .expect("runs array");
+        assert!(run_rows
+            .iter()
+            .any(|row| row.get("handle_id").and_then(|value| value.as_str())
+                == Some(handle_id.as_str())));
+
+        let result_res = client
+            .call_tool(
+                CallToolRequestParams::new("get_run_result").with_arguments(
+                    json!({ "handle_id": handle_id.clone() })
+                        .as_object()
+                        .expect("object")
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("get run result");
+        let result_json = result_res
+            .structured_content
+            .expect("get_run_result has structured content");
+        assert_eq!(structured_field(&result_json, "status"), "succeeded");
+        assert_eq!(
+            structured_field(&result_json, "contract_version"),
+            "mcp-subagent.result.v1"
+        );
+        assert_eq!(
+            result_json
+                .get("normalization_status")
+                .and_then(|value| value.as_str()),
+            Some("Validated")
+        );
+        assert_eq!(
+            result_json
+                .get("retry_classification")
+                .and_then(|value| value.as_str()),
+            Some("non_retryable")
+        );
+
+        let logs_res = client
+            .call_tool(
+                CallToolRequestParams::new("read_run_logs").with_arguments(
+                    json!({ "handle_id": handle_id.clone(), "stream": "stdout" })
+                        .as_object()
+                        .expect("object")
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("read run logs");
+        let logs_json = logs_res
+            .structured_content
+            .expect("read_run_logs has structured content");
+        assert!(logs_json.get("stdout").is_some());
+        assert!(logs_json.get("stderr").is_some());
+
+        let watch_res = client
+            .call_tool(
+                CallToolRequestParams::new("watch_run").with_arguments(
+                    json!({ "handle_id": handle_id.clone(), "timeout_secs": 1 })
+                        .as_object()
+                        .expect("object")
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("watch run");
+        let watch_json = watch_res
+            .structured_content
+            .expect("watch_run has structured content");
+        assert_eq!(structured_field(&watch_json, "status"), "succeeded");
+        assert_eq!(
+            watch_json.get("terminal").and_then(|value| value.as_bool()),
+            Some(true)
+        );
 
         let second_spawn_res = client
             .call_tool(
@@ -958,7 +1064,7 @@ sandbox = "ReadOnly"
         let cancel_json = cancel_res
             .structured_content
             .expect("cancel structured content");
-        assert_eq!(structured_field(&cancel_json, "status"), "Cancelled");
+        assert_eq!(structured_field(&cancel_json, "status"), "cancelled");
 
         client.cancel().await.expect("cancel client");
         server_handle.await.expect("server join");
@@ -1002,7 +1108,7 @@ sandbox = "ReadOnly"
             .await
             .expect("status")
             .0;
-        assert_eq!(status.status, "Succeeded");
+        assert_eq!(status.status, "succeeded");
 
         let artifact = restarted
             .read_agent_artifact(rmcp::handler::server::wrapper::Parameters(
@@ -1045,13 +1151,13 @@ sandbox = "ReadOnly"
 [core]
 name = "writer"
 description = "write code"
-provider = "Mock"
+provider = "mock"
 instructions = "write"
 
 [runtime]
-working_dir_policy = "TempCopy"
-file_conflict_policy = "Serialize"
-sandbox = "WorkspaceWrite"
+working_dir_policy = "temp_copy"
+file_conflict_policy = "serialize"
+sandbox = "workspace_write"
 "#;
         fs::write(agents_dir.join("writer.agent.toml"), agent).expect("write agent");
         let server = make_server(agents_dir, state_dir.clone());
@@ -1085,10 +1191,10 @@ sandbox = "WorkspaceWrite"
             project_dir.display().to_string()
         );
         assert_eq!(run_obj["spec_snapshot"]["name"], "writer");
-        assert_eq!(run_obj["spec_snapshot"]["working_dir_policy"], "TempCopy");
-        assert_eq!(run_obj["probe_result"]["provider"], "Mock");
+        assert_eq!(run_obj["spec_snapshot"]["working_dir_policy"], "temp_copy");
+        assert_eq!(run_obj["probe_result"]["provider"], "mock");
         assert!(!run_obj["memory_resolution"].is_null());
-        assert_eq!(run_obj["workspace"]["mode"], "TempCopy");
+        assert_eq!(run_obj["workspace"]["mode"], "temp_copy");
         assert!(!run_obj["execution_policy"].is_null());
         assert_eq!(run_obj["execution_policy"]["requested_run_mode"], "sync");
         assert_eq!(run_obj["execution_policy"]["effective_run_mode"], "sync");

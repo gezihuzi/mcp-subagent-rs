@@ -10,7 +10,7 @@ use crate::{
     probe::{ProviderProbe, ProviderProber},
     spec::{
         registry::{load_agent_specs_from_dirs, LoadedAgentSpec},
-        runtime_policy::WorkingDirPolicy,
+        runtime_policy::{NativeDiscoveryPolicy, WorkingDirPolicy},
         Provider,
     },
 };
@@ -29,6 +29,7 @@ pub struct DoctorReport {
     pub agents_error: Option<String>,
     pub probes: Vec<ProviderProbe>,
     pub workspace_policy_hints: Vec<WorkspacePolicyHint>,
+    pub ambient_isolation: AmbientIsolationReport,
     pub knowledge_layout: KnowledgeLayoutHealth,
     pub version_pins: ProviderVersionPinReport,
     pub status: String,
@@ -78,20 +79,67 @@ pub struct KnowledgeLayoutHealth {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AmbientIsolationReport {
+    pub provider_profiles: Vec<ProviderAmbientProfile>,
+    pub skill_roots: Vec<SkillRootStatus>,
+    pub skill_conflicts: Vec<SkillConflictRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderAmbientProfile {
+    pub provider: String,
+    pub agent_count: usize,
+    pub native_discovery_modes: Vec<NativeDiscoveryModeUsage>,
+    pub ambient_risk: String,
+    pub recommendation: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NativeDiscoveryModeUsage {
+    pub mode: String,
+    pub usage_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillRootStatus {
+    pub scope: String,
+    pub path: PathBuf,
+    pub exists: bool,
+    pub skill_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillConflictRecord {
+    pub skill: String,
+    pub sources: Vec<String>,
+}
+
 pub fn build_doctor_report(
     agents_dirs: Vec<PathBuf>,
     state_dir: PathBuf,
     prober: &dyn ProviderProber,
 ) -> DoctorReport {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    build_doctor_report_for_cwd(cwd, agents_dirs, state_dir, prober)
+    build_doctor_report_for_cwd_with_home(cwd, agents_dirs, state_dir, prober, home_dir())
 }
 
+#[cfg(test)]
 fn build_doctor_report_for_cwd(
     cwd: PathBuf,
     agents_dirs: Vec<PathBuf>,
     state_dir: PathBuf,
     prober: &dyn ProviderProber,
+) -> DoctorReport {
+    build_doctor_report_for_cwd_with_home(cwd, agents_dirs, state_dir, prober, home_dir())
+}
+
+fn build_doctor_report_for_cwd_with_home(
+    cwd: PathBuf,
+    agents_dirs: Vec<PathBuf>,
+    state_dir: PathBuf,
+    prober: &dyn ProviderProber,
+    user_home: Option<PathBuf>,
 ) -> DoctorReport {
     let (agents_loaded, agents_error, loaded_specs) = match load_agent_specs_from_dirs(&agents_dirs)
     {
@@ -100,14 +148,21 @@ fn build_doctor_report_for_cwd(
     };
 
     let workspace_policy_hints = build_workspace_policy_hints(&loaded_specs);
+    let ambient_isolation =
+        build_ambient_isolation_report(&cwd, &loaded_specs, user_home.as_deref());
     let knowledge_layout = build_knowledge_layout_health(&cwd);
     let probes: Vec<ProviderProbe> = all_providers()
         .into_iter()
         .map(|provider| prober.probe(&provider))
         .collect();
     let version_pins = build_provider_version_pin_report(&cwd, &probes);
-    let (status, issues, advice) =
-        build_doctor_health(&agents_error, &knowledge_layout, &probes, &version_pins);
+    let (status, issues, advice) = build_doctor_health(
+        &agents_error,
+        &knowledge_layout,
+        &probes,
+        &version_pins,
+        &ambient_isolation,
+    );
 
     DoctorReport {
         cwd,
@@ -117,6 +172,7 @@ fn build_doctor_report_for_cwd(
         agents_error,
         probes,
         workspace_policy_hints,
+        ambient_isolation,
         knowledge_layout,
         version_pins,
         status,
@@ -130,6 +186,7 @@ fn build_doctor_health(
     knowledge_layout: &KnowledgeLayoutHealth,
     probes: &[ProviderProbe],
     version_pins: &ProviderVersionPinReport,
+    ambient_isolation: &AmbientIsolationReport,
 ) -> (String, Vec<DoctorIssue>, Vec<String>) {
     let mut issues = Vec::new();
     let mut advice = Vec::new();
@@ -194,6 +251,37 @@ fn build_doctor_health(
         }
     }
 
+    for profile in &ambient_isolation.provider_profiles {
+        if profile.agent_count == 0 {
+            continue;
+        }
+        if profile.ambient_risk == "medium" || profile.ambient_risk == "high" {
+            issues.push(DoctorIssue {
+                level: "warning".to_string(),
+                code: format!("provider_{}_ambient_discovery", profile.provider),
+                message: format!(
+                    "provider {} ambient isolation risk is {}",
+                    profile.provider, profile.ambient_risk
+                ),
+                suggestion: Some(profile.recommendation.clone()),
+            });
+        }
+    }
+
+    if !ambient_isolation.skill_conflicts.is_empty() {
+        issues.push(DoctorIssue {
+            level: "warning".to_string(),
+            code: "ambient_skill_conflicts".to_string(),
+            message: format!(
+                "{} workspace-visible skill name conflicts detected across ambient roots",
+                ambient_isolation.skill_conflicts.len()
+            ),
+            suggestion: Some(
+                "Prefer runtime.native_discovery = \"isolated\" for Gemini agents and remove duplicated skill names between workspace/user roots.".to_string(),
+            ),
+        });
+    }
+
     if issues.is_empty() {
         advice.push("Environment looks healthy.".to_string());
         return ("ok".to_string(), issues, advice);
@@ -213,6 +301,234 @@ fn build_doctor_health(
         "warning"
     };
     (status.to_string(), issues, advice)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn build_ambient_isolation_report(
+    cwd: &Path,
+    loaded_specs: &[LoadedAgentSpec],
+    user_home: Option<&Path>,
+) -> AmbientIsolationReport {
+    let analyses = build_skill_root_analyses(cwd, user_home);
+    let skill_roots = analyses
+        .iter()
+        .map(|analysis| SkillRootStatus {
+            scope: analysis.scope.to_string(),
+            path: analysis.path.clone(),
+            exists: analysis.exists,
+            skill_count: analysis.skills.len(),
+        })
+        .collect::<Vec<_>>();
+    let skill_conflicts = build_skill_conflicts_from_analyses(&analyses);
+    let provider_profiles = build_provider_ambient_profiles(loaded_specs, skill_conflicts.len());
+    AmbientIsolationReport {
+        provider_profiles,
+        skill_roots,
+        skill_conflicts,
+    }
+}
+
+fn build_provider_ambient_profiles(
+    loaded_specs: &[LoadedAgentSpec],
+    workspace_conflict_count: usize,
+) -> Vec<ProviderAmbientProfile> {
+    let mut by_provider: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    for loaded in loaded_specs {
+        let provider = loaded.spec.core.provider.as_str().to_string();
+        let mode = native_discovery_mode_name(&loaded.spec.runtime.native_discovery).to_string();
+        *by_provider
+            .entry(provider)
+            .or_default()
+            .entry(mode)
+            .or_insert(0usize) += 1;
+    }
+
+    [Provider::Claude, Provider::Codex, Provider::Gemini]
+        .into_iter()
+        .map(|provider| {
+            let provider_name = provider.as_str().to_string();
+            let mode_counts = by_provider
+                .get(provider_name.as_str())
+                .cloned()
+                .unwrap_or_default();
+            let agent_count = mode_counts.values().copied().sum();
+            let native_discovery_modes = mode_counts
+                .into_iter()
+                .map(|(mode, usage_count)| NativeDiscoveryModeUsage { mode, usage_count })
+                .collect::<Vec<_>>();
+            let (ambient_risk, recommendation) = classify_provider_ambient_risk(
+                &provider,
+                agent_count,
+                &native_discovery_modes,
+                workspace_conflict_count,
+            );
+            ProviderAmbientProfile {
+                provider: provider_name,
+                agent_count,
+                native_discovery_modes,
+                ambient_risk: ambient_risk.to_string(),
+                recommendation: recommendation.to_string(),
+            }
+        })
+        .collect()
+}
+
+fn classify_provider_ambient_risk(
+    provider: &Provider,
+    agent_count: usize,
+    modes: &[NativeDiscoveryModeUsage],
+    workspace_conflict_count: usize,
+) -> (&'static str, &'static str) {
+    if agent_count == 0 {
+        return ("not_applicable", "no agents configured for this provider");
+    }
+    let has_loose_mode = modes
+        .iter()
+        .any(|mode| mode.mode == "inherit" || mode.mode == "allowlist");
+    if has_loose_mode {
+        if matches!(provider, Provider::Gemini) && workspace_conflict_count > 0 {
+            return (
+                "high",
+                "Set runtime.native_discovery = \"isolated\" for Gemini agents to suppress ambient skill conflicts.",
+            );
+        }
+        if matches!(provider, Provider::Gemini) {
+            return (
+                "medium",
+                "Prefer runtime.native_discovery = \"minimal\" or \"isolated\" for Gemini agents unless ambient discovery is explicitly required.",
+            );
+        }
+        return (
+            "medium",
+            "Prefer runtime.native_discovery = \"minimal\" for this provider unless ambient discovery is required.",
+        );
+    }
+    (
+        "low",
+        "Current native_discovery profile is isolation-friendly.",
+    )
+}
+
+fn native_discovery_mode_name(policy: &NativeDiscoveryPolicy) -> &'static str {
+    match policy {
+        NativeDiscoveryPolicy::Inherit => "inherit",
+        NativeDiscoveryPolicy::Minimal => "minimal",
+        NativeDiscoveryPolicy::Isolated => "isolated",
+        NativeDiscoveryPolicy::Allowlist => "allowlist",
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SkillRootAnalysis {
+    scope: &'static str,
+    path: PathBuf,
+    exists: bool,
+    workspace_root: bool,
+    skills: Vec<String>,
+}
+
+fn build_skill_root_analyses(cwd: &Path, user_home: Option<&Path>) -> Vec<SkillRootAnalysis> {
+    let mut roots = Vec::new();
+    roots.push(analyze_skill_root(
+        "workspace_agents",
+        cwd.join(".agents").join("skills"),
+        true,
+    ));
+    roots.push(analyze_skill_root(
+        "workspace_gemini",
+        cwd.join(".gemini").join("skills"),
+        true,
+    ));
+    if let Some(home) = user_home {
+        roots.push(analyze_skill_root(
+            "user_agents",
+            home.join(".agents").join("skills"),
+            false,
+        ));
+        roots.push(analyze_skill_root(
+            "user_gemini",
+            home.join(".gemini").join("skills"),
+            false,
+        ));
+    }
+    roots
+}
+
+fn analyze_skill_root(
+    scope: &'static str,
+    path: PathBuf,
+    workspace_root: bool,
+) -> SkillRootAnalysis {
+    let exists = path.is_dir();
+    let skills = if exists {
+        collect_skill_names(&path)
+    } else {
+        Vec::new()
+    };
+    SkillRootAnalysis {
+        scope,
+        path,
+        exists,
+        workspace_root,
+        skills,
+    }
+}
+
+fn collect_skill_names(root: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return names,
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if !path.join("SKILL.md").is_file() {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn build_skill_conflicts_from_analyses(analyses: &[SkillRootAnalysis]) -> Vec<SkillConflictRecord> {
+    let mut index: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    for analysis in analyses {
+        for skill in &analysis.skills {
+            index.entry(skill.clone()).or_default().push((
+                format!("{} ({})", analysis.scope, analysis.path.display()),
+                analysis.workspace_root,
+            ));
+        }
+    }
+    let mut conflicts = Vec::new();
+    for (skill, sources) in index {
+        if sources.len() < 2 {
+            continue;
+        }
+        if !sources.iter().any(|(_, workspace_root)| *workspace_root) {
+            continue;
+        }
+        conflicts.push(SkillConflictRecord {
+            skill,
+            sources: sources.into_iter().map(|(label, _)| label).collect(),
+        });
+    }
+    conflicts
 }
 
 fn build_provider_version_pin_report(
@@ -347,7 +663,7 @@ fn build_workspace_policy_hints(loaded_specs: &[LoadedAgentSpec]) -> Vec<Workspa
     ]
     .into_iter()
     .map(|policy| {
-        let policy_name = format!("{policy:?}");
+        let policy_name = format!("{policy}");
         WorkspacePolicyHint {
             policy: policy_name.clone(),
             usage_count: usage.get(&policy_name).copied().unwrap_or(0),
@@ -533,6 +849,48 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
         ));
     }
 
+    out.push_str("\nambient_isolation:\n");
+    out.push_str("  provider_profiles:\n");
+    for profile in &report.ambient_isolation.provider_profiles {
+        out.push_str(&format!(
+            "  - provider: {}\n    agent_count: {}\n    ambient_risk: {}\n    recommendation: {}\n",
+            profile.provider, profile.agent_count, profile.ambient_risk, profile.recommendation
+        ));
+        if profile.native_discovery_modes.is_empty() {
+            out.push_str("    native_discovery_modes: []\n");
+        } else {
+            out.push_str("    native_discovery_modes:\n");
+            for mode in &profile.native_discovery_modes {
+                out.push_str(&format!(
+                    "      - mode: {}\n        usage_count: {}\n",
+                    mode.mode, mode.usage_count
+                ));
+            }
+        }
+    }
+    out.push_str("  skill_roots:\n");
+    for root in &report.ambient_isolation.skill_roots {
+        out.push_str(&format!(
+            "  - scope: {}\n    path: {}\n    exists: {}\n    skill_count: {}\n",
+            root.scope,
+            root.path.display(),
+            root.exists,
+            root.skill_count
+        ));
+    }
+    if report.ambient_isolation.skill_conflicts.is_empty() {
+        out.push_str("  skill_conflicts: []\n");
+    } else {
+        out.push_str("  skill_conflicts:\n");
+        for conflict in &report.ambient_isolation.skill_conflicts {
+            out.push_str(&format!("    - skill: {}\n", conflict.skill));
+            out.push_str("      sources:\n");
+            for source in &conflict.sources {
+                out.push_str(&format!("        - {}\n", source));
+            }
+        }
+    }
+
     out.push_str("\nknowledge_layout_health:\n");
     out.push_str(&format!(
         "  root: {}\n",
@@ -603,7 +961,10 @@ mod tests {
 
     use crate::probe::{ProbeStatus, ProviderCapabilities, ProviderProbe, ProviderProber};
 
-    use super::{build_doctor_report, build_doctor_report_for_cwd, render_doctor_report};
+    use super::{
+        build_doctor_report, build_doctor_report_for_cwd, build_doctor_report_for_cwd_with_home,
+        render_doctor_report,
+    };
 
     #[derive(Debug, Clone, Default)]
     struct FakeProber {
@@ -653,7 +1014,7 @@ mod tests {
 [core]
 name = "reviewer"
 description = "review code"
-provider = "Mock"
+provider = "mock"
 instructions = "review"
 "#,
         )
@@ -680,15 +1041,16 @@ instructions = "review"
         let rendered = render_doctor_report(&report);
         assert!(rendered.contains("mcp-subagent doctor"));
         assert!(rendered.contains("agents_loaded: 1"));
-        assert!(rendered.contains("provider: Mock"));
-        assert!(rendered.contains("provider: Ollama"));
-        assert!(rendered.contains("provider: Codex"));
-        assert!(rendered.contains("status: MissingBinary"));
+        assert!(rendered.contains("provider: mock"));
+        assert!(rendered.contains("provider: ollama"));
+        assert!(rendered.contains("provider: codex"));
+        assert!(rendered.contains("status: missing_binary"));
         assert!(rendered.contains("supports_native_project_memory: true"));
         assert!(rendered.contains("validated_flags"));
         assert!(rendered.contains("--ask-for-approval"));
         assert!(rendered.contains("binary missing"));
         assert!(rendered.contains("workspace_policy_hints"));
+        assert!(rendered.contains("ambient_isolation"));
         assert!(rendered.contains("knowledge_layout_health"));
     }
 
@@ -709,12 +1071,12 @@ instructions = "review"
 [core]
 name = "writer"
 description = "write code"
-provider = "Mock"
+provider = "mock"
 instructions = "write"
 
 [runtime]
-working_dir_policy = "GitWorktree"
-sandbox = "WorkspaceWrite"
+working_dir_policy = "git_worktree"
+sandbox = "workspace_write"
 "#,
         )
         .expect("write agent");
@@ -735,7 +1097,7 @@ sandbox = "WorkspaceWrite"
             report
                 .workspace_policy_hints
                 .iter()
-                .find(|hint| hint.policy == "GitWorktree")
+                .find(|hint| hint.policy == "git_worktree")
                 .map(|hint| hint.usage_count),
             Some(1)
         );
@@ -765,7 +1127,7 @@ codex = "test-version"
             .version_pins
             .entries
             .iter()
-            .find(|entry| entry.provider == "Codex")
+            .find(|entry| entry.provider == "codex")
             .expect("codex entry");
         assert_eq!(codex.compatibility, "matched");
     }
@@ -794,7 +1156,7 @@ codex = "9.9.9"
             .version_pins
             .entries
             .iter()
-            .find(|entry| entry.provider == "Codex")
+            .find(|entry| entry.provider == "codex")
             .expect("codex entry");
         assert_eq!(codex.compatibility, "drift");
     }
@@ -823,8 +1185,75 @@ codex = "test-version"
             .version_pins
             .entries
             .iter()
-            .find(|entry| entry.provider == "Codex")
+            .find(|entry| entry.provider == "codex")
             .expect("codex entry");
         assert_eq!(codex.compatibility, "disabled");
+    }
+
+    #[test]
+    fn ambient_isolation_detects_workspace_visible_skill_conflict_for_gemini() {
+        let temp = tempdir().expect("tempdir");
+        let home = tempdir().expect("home tempdir");
+        let agents_dir = temp.path().join("agents");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        fs::create_dir_all(temp.path().join(".agents/skills/find-skills"))
+            .expect("create workspace skill");
+        fs::create_dir_all(home.path().join(".agents/skills/find-skills"))
+            .expect("create user skill");
+        fs::write(
+            temp.path().join(".agents/skills/find-skills/SKILL.md"),
+            "# workspace skill",
+        )
+        .expect("write workspace skill");
+        fs::write(
+            home.path().join(".agents/skills/find-skills/SKILL.md"),
+            "# user skill",
+        )
+        .expect("write user skill");
+        fs::write(
+            agents_dir.join("fast-researcher.agent.toml"),
+            r#"
+[core]
+name = "fast-researcher"
+description = "research"
+provider = "gemini"
+instructions = "research"
+
+[runtime]
+native_discovery = "inherit"
+"#,
+        )
+        .expect("write gemini agent");
+
+        let report = build_doctor_report_for_cwd_with_home(
+            temp.path().to_path_buf(),
+            vec![agents_dir],
+            temp.path().join("state"),
+            &FakeProber::default(),
+            Some(home.path().to_path_buf()),
+        );
+
+        assert!(
+            report
+                .ambient_isolation
+                .skill_conflicts
+                .iter()
+                .any(|conflict| conflict.skill == "find-skills"),
+            "expected workspace-visible skill conflict"
+        );
+        let gemini_profile = report
+            .ambient_isolation
+            .provider_profiles
+            .iter()
+            .find(|profile| profile.provider == "gemini")
+            .expect("gemini profile");
+        assert_eq!(gemini_profile.ambient_risk, "high");
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ambient_skill_conflicts"),
+            "expected ambient conflict issue"
+        );
     }
 }

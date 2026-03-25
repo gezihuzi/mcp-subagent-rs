@@ -1710,3 +1710,527 @@
   - 缺失文件创建；
   - 部分规则补齐；
   - catch-all 已存在保持不变。
+
+## T-068 V0.8-P0-ConnectApplyAndHostLaunch (Completed 2026-03-25)
+
+任务：新增可直接执行的 `connect` 命令，支持一键接入 host，并可选立即启动对应 host，保留 `connect-snippet` 作为只输出文本路径。  
+验收标准：
+
+1. 新增 `mcp-subagent connect --host claude|codex|gemini`，默认直接执行对应 host 的 MCP 注册命令。
+2. 新增 `--run-host`，在注册成功后直接启动对应 host CLI。
+3. 保持 `connect-snippet` 兼容；两者都复用同一套路径解析与 host 参数映射。
+4. 新增 CLI 解析测试与 connect 构建测试，`cargo test` 通过。
+5. README 命令面与 onboarding 同步新命令，并说明 `connect-snippet` 用于仅打印命令。
+完成记录：
+
+- 已新增 `connect` 命令面并保持 `connect-snippet` 兼容：
+  - `mcp-subagent connect --host claude|codex|gemini [--run-host]`；
+  - `connect` 默认直接执行 host MCP 注册命令；
+  - `--run-host` 在注册成功后立即启动对应 host CLI。
+- 已在 connect 模块收口 host 参数映射：
+  - `src/connect.rs` 新增 `ConnectInvocation`；
+  - 新增 `build_connect_invocation` 和 `build_host_launch_invocation`，用于执行态命令构建；
+  - `connect-snippet` 保持原输出格式，继续用于只打印命令。
+- 已在主命令层新增执行逻辑：
+  - `src/main.rs` 新增 `Commands::Connect` 分支；
+  - 新增 `connect_command`、`resolve_connect_paths`、`run_invocation` 执行链路与错误处理。
+- 已同步文档：
+  - `README.md` 命令面和 Quick Onboarding 改为优先 `connect --host ...`；
+  - `src/init.rs` 生成模板新增“直接接入”示例，并保留 snippet-only 指令。
+- 已通过回归：
+  - `cargo test -q`（`141 + 21 + 3` tests passed）
+  - `./scripts/smoke_v08.sh`（使用 provider stub 避免本机外部 CLI probe 阻塞）通过。
+
+## T-069 V0.8-P0-CodexOutputSchemaStrictCompat (Completed 2026-03-25)
+
+任务：修复 Codex CLI `--output-schema` 在 OpenAI 严格响应格式下的兼容性，避免 `invalid_json_schema` 导致子代理失败。  
+验收标准：
+
+1. Codex runner 输出 schema 满足当前 strict 要求：对象 `properties` 中所有键都在 `required` 中。
+2. 失败日志摘要优先展示真正错误行（如 `ERROR:`/`invalid_json_schema`），不再只显示 banner。
+3. 新增单测覆盖 schema 规范化与 stderr 错误行提取逻辑。
+4. `cargo test` 通过。
+完成记录：
+
+- 已修复 Codex `--output-schema` strict 兼容：
+  - `src/runtime/runners/codex.rs` 新增 schema 规范化流程；
+  - 对象 schema 会自动将 `properties` 中全部字段写入 `required`，满足 strict 响应格式要求（含 `media_type`）。
+- 已优化错误摘要提取：
+  - 失败时优先提取 `ERROR:` / `invalid_json_schema` 行，避免只显示 banner 导致误判。
+- 已补充测试覆盖：
+  - `strict_schema_marks_all_properties_as_required`
+  - `schema_json_includes_media_type_in_required_list`
+  - `summarize_stderr_prefers_error_lines`
+- 已通过回归：
+  - `cargo test -q`（`144 + 21 + 3` tests passed）
+
+## T-070 V0.8-P0-CleanCommandForRunLogCache (Completed 2026-03-25)
+
+任务：新增 `clean` 命令，清理历史 run 日志与缓存目录，降低 `state_dir` 噪音和体积。  
+验收标准：
+
+1. 新增 `mcp-subagent clean`，默认清理 `state_dir/runs`、`state_dir/server.log`、`state_dir/logs`。
+2. 新增 `--dry-run` 预览模式，不实际删除但返回将删除目标。
+3. 新增 `--all`，可清空整个 `state_dir`。
+4. 新增 CLI 解析与 clean 行为测试，`cargo test` 通过。
+5. README 命令面和使用说明同步 `clean`。
+完成记录：
+
+- 已新增 `clean` 命令面：
+  - `mcp-subagent clean [--all] [--dry-run] [--json]`；
+  - 默认模式清理 `state_dir/runs`、`state_dir/server.log`、`state_dir/logs`。
+- 已实现清理执行与报告输出：
+  - 新增 `clean_state_dir`、`estimate_path_size`、`print_clean_report`；
+  - 支持 dry-run 预览 `would_remove`；
+  - 支持 `--all` 清空整个 `state_dir`。
+- 已补测试覆盖：
+  - CLI 解析：`parses_clean_command_flags`
+  - 清理行为：默认清理、dry-run 不删除、all 模式清空 state_dir。
+- 已同步文档：
+  - `README.md` 命令面新增 `clean`；
+  - 新增 Cleanup 使用示例与三种模式说明。
+- 已通过回归：
+  - `cargo test -q`（`144 + 25 + 3` tests passed）。
+
+## T-071 V0.8-P0-SummaryParseRobustnessForProviderOutput (Completed 2026-03-25)
+
+任务：修复 provider 输出包含提示词占位 sentinel 或仅返回裸 JSON 时的 summary 解析失败，避免任务实际成功却被状态机误判为 failed。  
+验收标准：
+
+1. 当 stdout/stderr 出现多个 sentinel 区块时，解析器可跳过占位块并命中后续有效 JSON。
+2. 当 provider 未返回 sentinel、但返回合法 `SummaryEnvelope` 或 `StructuredSummary` JSON 时，可正确解析为 `Validated`。
+3. 保持现有语义：完全无 JSON 仍为 `Degraded`，仅有非法 JSON 时为 `Invalid`。
+4. 新增单测覆盖占位 sentinel + 有效 JSON、双 sentinel 首块占位、无 sentinel 裸 JSON 三条路径。
+5. 回归通过：`cargo test -q`。
+完成记录：
+
+- 已增强 summary 解析路径：
+  - `src/runtime/summary.rs` 从“单一 sentinel 提取”升级为“多候选扫描 + 逐个尝试解析”；
+  - 新增多 sentinel 区块遍历；
+  - 新增原始输出 JSON 对象提取（支持无 sentinel 裸 JSON 输出）。
+- 已保持失败语义兼容：
+  - 找到候选但全部解析失败 -> `Invalid`；
+  - 完全找不到候选 JSON -> `Degraded`。
+- 已新增测试：
+  - `parses_valid_json_without_sentinels`
+  - `parses_late_valid_json_after_placeholder_sentinel_block`
+  - `parses_second_sentinel_block_when_first_is_placeholder`
+- 已通过回归：
+  - `cargo test -q`（`147 + 25 + 3` tests passed）。
+
+## T-072 V0.9-P0-DelegationMinimalAndBestEffortResultSemantics (Completed 2026-03-25)
+
+任务：启动 v0.9 第一批重构，先把默认策略和成功判定语义切到“轻委派 + native-first”。  
+验收标准：
+
+1. `RuntimePolicy` 新增 `delegation_context/native_discovery/output_mode/parse_policy`，默认分别为 `minimal/minimal/both/best_effort`。
+2. `default_memory_sources()` 移除 `ActivePlan`，默认仅 `AutoProjectMemory`。
+3. provider 进程成功且 `parse_policy=best_effort` 时，即使 summary 归一化是 `Invalid/Degraded` 也不判 hard fail。
+4. CLI 新增 `submit` 命令，行为与 `spawn` 一致（兼容保留 `spawn`）。
+5. `init` 预设模板不再默认写入 `active_plan` memory source，并支持 `claude-opus-supervisor-minimal`。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 `src/spec/runtime_policy.rs`：
+  - 新增 `DelegationContextPolicy`、`NativeDiscoveryPolicy`、`OutputMode`、`ParsePolicy`；
+  - `RuntimePolicy` 增加对应字段；
+  - 默认值切到 `minimal/minimal/both/best_effort`；
+  - 默认 `memory_sources` 改为 `["auto_project_memory"]`；
+  - 新增默认值单测 `runtime_policy_defaults_follow_v09_minimal_profile`。
+- 已更新 `src/runtime/dispatcher.rs`：
+  - `assess_attempt_outcome` 引入 `parse_policy`；
+  - `best_effort` 模式下，provider 成功 + parse 非 Validated 会标记整体 `Succeeded`（保留 parse_status）；
+  - `strict` 模式保持原失败语义；
+  - 新增两条测试覆盖 best-effort/strict 分流。
+- 已更新 `src/runtime/summary.rs`：
+  - 对“provider 返回业务 JSON 但非 SummaryEnvelope”场景，支持包装为可消费的 Validated summary；
+  - 新增对应测试 `wraps_json_payload_inside_sentinel_as_validated`。
+- 已更新命令面与模板：
+  - `src/main.rs` 新增 `submit` 子命令（`spawn` 等价别名）；
+  - `src/main.rs` 的 `init` 默认 preset 切到 `claude-opus-supervisor-minimal`；
+  - `src/init.rs` 新增 `claude-opus-supervisor-minimal` preset 名称并纳入 preset 生成；
+  - `src/init.rs` 预设模板 `memory_sources` 默认移除 `active_plan`；
+  - `README.md` 命令面同步新增 `submit` 和新 preset 名称。
+- 已通过回归：
+  - `cargo test -q`（`151 + 27 + 3` tests passed）。
+
+## T-073 V0.9-P0-GeminiNativeDiscoveryIsolationAndFallback (Completed 2026-03-25)
+
+任务：把 `native_discovery` 从配置字段落到 Gemini runner 实际执行路径，解决子代理被 ambient workspace skills 污染的问题。  
+验收标准：
+
+1. Gemini runner 支持 `native_discovery` 策略分流：`inherit/allowlist` 维持原行为，`minimal` 使用隔离 launch cwd，`isolated` 使用临时 HOME/XDG 隔离。
+2. `minimal`/`isolated` 模式下，`--include-directories` 仍指向任务工作目录，避免丢失目标目录可见性。
+3. `isolated` 模式遇到认证类失败时自动回退到 `minimal` 并保留可审计提示，不直接硬失败。
+4. `init` 模板更新为 v0.9 默认策略：预设中显式写入 `delegation_context/output_mode/parse_policy`，Gemini 角色默认 `native_discovery = "isolated"`。
+5. README Happy Path 改为 `claude-opus-supervisor-minimal`。
+6. `cargo test -q` 通过。
+完成记录：
+
+- 已改造 `src/runtime/runners/gemini.rs`：
+  - 新增 `DiscoveryLaunch` 与 `prepare_discovery_launch`；
+  - `minimal` 策略使用临时 launch cwd，避免 workspace 层 skills 自动发现；
+  - `isolated` 策略额外注入临时 `HOME/XDG_*` 环境；
+  - 新增认证类失败检测与自动回退 `minimal`；
+  - 新增回退 stderr 合并提示，保留初次失败证据。
+- 已补充 Gemini runner 测试覆盖：
+  - `gemini_runner_minimal_discovery_uses_isolated_launch_cwd`
+  - `gemini_runner_isolated_discovery_falls_back_to_minimal_on_auth_error`
+  - 现有 runner 测试同步到显式 `native_discovery` 样例。
+- 已同步模板与文档：
+  - `src/init.rs` 各预设 runtime 段落新增 v0.9 策略字段；
+  - Gemini 角色默认 `native_discovery = "isolated"`；
+  - `README.md` Quick Onboarding preset 更新为 `claude-opus-supervisor-minimal`。
+- 已通过回归：
+  - `cargo test -q runtime::runners::gemini::tests`
+  - `cargo test -q`（`153 + 27 + 3` tests passed）。
+
+## T-074 V0.9-P0-RunObservabilityCommandsAndUsageSurface (Completed 2026-03-25)
+
+任务：收口 v0.9 可观测性和命令体验，新增顺手的 run 查看命令面并在 `show` 输出 usage/duration/provider_exit_code。  
+验收标准：
+
+1. CLI 新增 `ps/show/result/logs/watch`。
+2. `show` 输出包含 `status/provider/model/normalization_status/duration_ms/provider_exit_code/retries`。
+3. `result` 支持 `--raw` / `--normalized` / `--summary`（默认 summary）。
+4. `logs` 支持 `--stdout` / `--stderr` 并可 `--json` 输出。
+5. `watch` 支持 `--interval-ms` 与 `--timeout-secs`，终态自动退出。
+6. README 命令面同步新命令。
+7. `cargo test -q` 通过。
+完成记录：
+
+- 已扩展 `src/main.rs` 命令面：
+  - 新增 `Commands::Ps/Show/Result/Logs/Watch`；
+  - 新增对应 dispatch 分支与执行函数。
+- 已新增 run 持久化读取与观测模型：
+  - 新增 `StoredRunRecord` 系列结构用于从 `state_dir/runs/<id>/run.json` 读取；
+  - 新增 `UsageStatsOutput`，输出 `duration_ms/provider_exit_code/retries/token_source/estimated_*`；
+  - 新增 `RunListEntry/RunShowOutput/RunResultOutput/RunLogsOutput`。
+- 已实现命令行为：
+  - `ps` 按 `updated_at` 倒序列运行记录；
+  - `show` 输出运行摘要与 usage；
+  - `result` 支持 raw/normalized/summary 三种视图；
+  - `logs` 支持 stdout/stderr 选择；
+  - `watch` 轮询 run.json 并在终态退出，支持超时。
+- 已同步文档：
+  - `README.md` 命令面新增 `ps/show/result/logs/watch`。
+- 已通过回归：
+  - `cargo test -q`（`153 + 32 + 3` tests passed）。
+
+## T-075 V0.9-P1-McpRunObservabilityToolsParity (Completed 2026-03-25)
+
+任务：在 MCP 工具面补齐 run 观测与结果读取能力，新增 `list_runs/get_run_result/read_run_logs/watch_run`，让 host 无需拼接 `status + artifact`。
+验收标准：
+
+1. MCP tool 列表包含 `list_runs/get_run_result/read_run_logs/watch_run`。
+2. `list_runs` 可按最近更新时间返回 run 列表，支持 `limit`。
+3. `get_run_result` 返回 `native_result + normalized_result + usage`，并包含 `normalization_status/provider_exit_code/retries`。
+4. `read_run_logs` 支持 `stream=stdout|stderr|both`，默认 `both`。
+5. `watch_run` 支持 `interval_ms/timeout_secs`，终态返回 `terminal=true`，超时返回 `timed_out=true`。
+6. 增加 MCP 端到端测试覆盖新增工具链路，并保持 `cargo test -q` 通过。
+完成记录：
+
+- 已扩展 MCP DTO：
+  - `src/mcp/dto.rs` 新增 `ListRuns* / GetRunResult* / ReadRunLogs* / WatchRun*` 输入输出结构；
+  - 新增 `RunUsageOutput`，统一 usage/duration/provider_exit_code/retries 结果面。
+- 已扩展 MCP tools 实现：
+  - `src/mcp/tools.rs` 新增 `list_runs/get_run_result/read_run_logs/watch_run`；
+  - `list_runs` 支持 `limit` 并按 `updated_at` 倒序；
+  - `get_run_result` 同时返回 `native_result + normalized_result + usage`；
+  - `read_run_logs` 支持 `stream=stdout|stderr|both`；
+  - `watch_run` 支持 `interval_ms/timeout_secs`，返回 `terminal/timed_out`。
+- 已同步导出与文档：
+  - `src/mcp/server.rs` 导出新增 MCP DTO 类型；
+  - `README.md` MCP tools 列表加入四个新工具。
+- 已补端到端覆盖：
+  - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 覆盖新增工具调用链路（list/result/logs/watch）。
+- 已通过回归：
+  - `cargo test -q`（`153 + 32 + 3` tests passed）。
+
+## T-076 V0.9-P1-ResultJsonStableSchema (Completed 2026-03-25)
+
+任务：固定 `result --json` 输出 schema，并与 MCP `get_run_result` 结果模型对齐，减少 host 端解析分支。  
+验收标准：
+
+1. CLI `result --json` 输出包含固定字段：`contract_version/view/normalization_status/native_result/normalized_result/usage/provider_exit_code/retries`。
+2. MCP `get_run_result` 输出增加 `contract_version`，字段语义与 CLI 对齐。
+3. 新增测试覆盖固定 schema 的关键字段存在性（至少覆盖 CLI 序列化和 MCP e2e 返回）。
+4. README 命令说明补充固定 schema 约定（简要说明）。
+5. `cargo test -q` 通过。
+完成记录：
+
+- 已固定 CLI `result --json` 契约：
+  - `src/main.rs` 的 `RunResultOutput` 新增固定字段 `contract_version/view/summary/provider_exit_code/retries/usage/error_message/artifact_index`；
+  - `normalization_status` 改为稳定字符串（无 summary 时输出 `NotAvailable`）；
+  - 契约版本固定为 `mcp-subagent.result.v1`。
+- 已对齐 MCP `get_run_result`：
+  - `src/mcp/dto.rs` 的 `GetRunResultOutput` 新增 `contract_version`；
+  - `normalization_status` 改为稳定字符串；
+  - `src/mcp/tools.rs` 返回与 CLI 对齐的契约版本和状态语义。
+- 已补测试：
+  - `src/main.rs::result_json_schema_contains_stable_fields` 覆盖 CLI JSON 固定字段；
+  - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 增加 `contract_version` 断言。
+- 已同步文档：
+  - `README.md` 增加 `result --json` / `get_run_result` 使用同一 `contract_version` 说明。
+- 已通过回归：
+  - `cargo test -q`（`153 + 33 + 3` tests passed）。
+
+## T-077 V0.9-P1-PlanSectionSelectorRuntimeSupport (Completed 2026-03-25)
+
+任务：落地 `PlanSection` 的 section selector，从“策略枚举”升级为可执行行为：必须配置 selector，运行时仅注入目标 section。  
+验收标准：
+
+1. `RuntimePolicy` 新增 `plan_section_selector` 字段，并保持向后兼容默认值。
+2. `validate` 对 `delegation_context=plan_section` 强制要求 selector 非空。
+3. memory resolver 在 `delegation_context=plan_section` 时，从 `PLAN.md` 提取对应 section（按 heading 选择）并注入 memory，而非全量 plan。
+4. `init --preset claude-opus-supervisor*` 生成的 `correctness-reviewer` 默认携带 `plan_section_selector`。
+5. 新增单测覆盖：校验失败路径、selector 提取成功路径、selector 未命中失败路径。
+6. `cargo test -q` 通过。
+完成记录：
+
+- 已扩展 runtime policy：
+  - `src/spec/runtime_policy.rs` 新增 `plan_section_selector: Option<String>`；
+  - 默认值保持 `None`，兼容旧 spec。
+- 已落地校验规则：
+  - `src/spec/validate.rs` 在 `delegation_context=plan_section` 时强制要求 `plan_section_selector` 非空；
+  - 新增校验测试覆盖缺失 selector 失败、存在 selector 通过。
+- 已落地运行时行为：
+  - `src/runtime/memory.rs` 在 `delegation_context=plan_section` 时从 `PLAN.md` / `.mcp-subagent/PLAN.md` 提取目标 heading section；
+  - 支持 exact/contains（不区分大小写）匹配 heading；
+  - selector 未命中时返回明确错误而非注入全量 plan。
+- 已同步预设与可观测快照：
+  - `src/init.rs` 的 `correctness-reviewer` 模板新增 `plan_section_selector = "Acceptance Criteria"`；
+  - `src/mcp/state.rs` 的 `RunSpecSnapshot` 新增 `delegation_context/plan_section_selector`（含旧 run 兼容默认）。
+- 已补单测：
+  - `src/runtime/memory.rs` 新增 section 提取成功/未命中失败测试；
+  - `src/spec/validate.rs` 新增 plan_section selector 校验测试。
+- 已同步设计文档示例：
+  - `docs/mcp-subagent_tech_design_v0.9.md` 的 `correctness-reviewer` 示例补 `plan_section_selector`。
+- 已通过回归：
+  - `cargo test -q`（`157 + 33 + 3` tests passed）。
+
+## T-078 V0.9-P1-ReviewerDefaultAcceptanceCriteriaInjection (Completed 2026-03-25)
+
+任务：让 reviewer 路径默认附带 plan acceptance criteria，减少“审查与计划标准脱节”的情况。  
+验收标准：
+
+1. dispatch 阶段在 review 相关任务上自动吸收 `plan_section` memory 中的 checklist 条目并追加到 `request.acceptance_criteria`（不覆盖用户显式 criteria）。
+2. 注入策略要去重，避免重复标准。
+3. 无 `plan_section` 内容时保持原行为，不报错。
+4. 新增测试覆盖“review + plan_section”时 compiled prompt 含 plan 条目。
+5. `cargo test -q` 通过。
+完成记录：
+
+- 已在 dispatch 阶段落地 reviewer 默认标准注入：
+  - `src/mcp/service.rs` 新增 `attach_plan_section_acceptance_criteria`；
+  - 当任务为 review 相关（`delegation_context=plan_section` / `stage=review` / `tag=review`）时，从 `plan_section:*` memory 提取 checklist 项并追加到 `request.acceptance_criteria`。
+- 已实现提取与去重逻辑：
+  - 支持 markdown `-/*/+` 与 `1. ` 列表项提取；
+  - 通过不区分大小写比较避免重复注入。
+- 已保持兼容行为：
+  - 无 `plan_section` memory 或无 checklist 时保持原行为，不报错。
+- 已补测试：
+  - `src/mcp/service.rs::run_dispatch_attaches_plan_section_acceptance_criteria_for_reviewer` 验证 compiled prompt 出现 plan 衍生标准。
+- 已通过回归：
+  - `cargo test -q`（`158 + 33 + 3` tests passed）。
+
+## T-079 V0.9-P1-ShowCommandColorizedCompactOutput (Completed 2026-03-25)
+
+任务：实现 `show` 的彩色简洁文本输出，提高人工查看效率；`--json` 保持现有契约不变。  
+验收标准：
+
+1. `show` 默认文本输出改为紧凑单页，包含状态徽章、provider/model、normalization、duration、exit code、retries、summary/error。
+2. 终端支持且未设置 `NO_COLOR` 时输出 ANSI 颜色；`NO_COLOR` 或非终端时自动退化为纯文本。
+3. `show --json` 输出字段和语义保持不变。
+4. 新增测试覆盖彩色徽章和无彩色降级路径。
+5. `cargo test -q` 通过。
+完成记录：
+
+- 已实现 `show` 文本渲染器：
+  - `src/main.rs` 新增 `render_show_run_text`，输出紧凑单页信息（状态徽章、provider/model、normalization、duration、exit code、retries、summary/error）。
+  - `show` 默认文本路径改为统一调用该渲染器；`--json` 路径未改动。
+- 已实现颜色策略：
+  - 新增 `should_use_color_output`（`NO_COLOR`、`TERM=dumb`、非终端自动禁用）；
+  - 状态徽章按状态着色（succeeded/failed/running/timed_out/cancelled）。
+- 已补测试：
+  - `show_renderer_emits_color_badge_when_enabled`
+  - `show_renderer_is_plain_when_color_disabled`
+- 已同步文档：
+  - `README.md` 增加 `show` 的彩色输出与 `NO_COLOR/--json` 说明。
+- 已通过回归：
+  - `cargo test -q`（`158 + 35 + 3` tests passed）。
+
+## T-080 V0.9-P1-VersionedResultContractDocAndOnboardingEntry (Completed 2026-03-25)
+
+任务：发布版本化结果契约文档，给 CLI/MCP 集成方一个固定、可引用、可迁移的对接入口。  
+验收标准：
+
+1. 新增 `docs` 文档，明确 `mcp-subagent.result.v1` 的字段、类型、语义和兼容规则。
+2. 文档覆盖两条接口：CLI `result --json` 与 MCP `get_run_result`，并给出差异字段对照。
+3. README 增加契约文档入口，避免集成方只靠源码反推。
+4. TODO/PLAN 同步到 T-080 状态。
+5. `cargo test -q` 通过（确保文档变更未引入回归）。
+完成记录：
+
+- 已新增版本化契约文档：
+  - 新建 `docs/result_contract_v1.md`，固定声明 `mcp-subagent.result.v1`；
+  - 文档覆盖共享字段、CLI/MCP 差异字段、`usage` 子结构、兼容策略与最小示例。
+- 已补 README 入口：
+  - `README.md` 在 `result --json` 契约说明处增加文档链接，集成方可直接跳转。
+- 已同步流程状态：
+  - `PLAN.md` / `TODO.md` 更新为 T-080 完成。
+- 已通过回归：
+  - `cargo test -q`（`158 + 35 + 3` tests passed）。
+
+## T-081 V0.9-P1-NativeUsageCaptureAndFallbackMerge (Completed 2026-03-25)
+
+任务：把 usage 结果面升级为 native-first：优先采集 provider 原生 token usage，估算值仅做兜底。  
+验收标准：
+
+1. 运行时新增 native usage 解析与存储，`run.json` 持久化 usage 字段。
+2. CLI `show/result --json` 的 usage 计算优先使用 native usage，不可得时回落估算。
+3. MCP `get_run_result` 的 usage 计算同步 native-first，`token_source` 支持 `native|estimated|mixed|unknown`。
+4. 新增测试覆盖 native usage 解析关键路径（至少 codex tokens used 解析与无 usage 场景）。
+5. 文档契约更新 `token_source` 可选值。
+6. `cargo test -q` 通过。
+完成记录：
+
+- 已新增 native usage 解析链路：
+  - 新增 `src/runtime/usage.rs`，支持通用 token 字段解析与 Codex `tokens used` 解析；
+  - `DispatchResult` 新增 `native_usage`，在 dispatch 完成时随 stdout/stderr 一并产出。
+- 已落地持久化与读取：
+  - `src/mcp/state.rs` 的 `RunRecord`/`PersistedRunRecord` 新增 `usage` 字段；
+  - `src/mcp/persistence.rs` 已支持从 `run.json` 回填 usage。
+- 已完成 CLI/MCP usage 结果面收口：
+  - `src/main.rs` 与 `src/mcp/tools.rs` 的 usage 计算改为 native-first；
+  - `token_source` 细分为 `native|mixed|estimated|unknown`，native 不足时按字段级别回落估算。
+- 已补测试与契约文档：
+  - `src/runtime/usage.rs` 新增 native usage 解析测试（含 Codex multiline 与无 usage 场景）；
+  - `src/main.rs` 新增 usage source 选择测试；
+  - `docs/result_contract_v1.md` 已更新 `token_source` 可选值。
+- 已通过回归：
+  - `cargo test -q`（`161 + 37 + 3` tests passed）。
+
+## T-082 V0.9-P2-RunTimelineEventStreamCli (Completed 2026-03-25)
+
+任务：新增 run timeline 命令，直接读取并展示 `events.ndjson`，降低排障时手工翻目录成本。  
+验收标准：
+
+1. CLI 新增 `timeline <handle_id>` 子命令，默认文本输出事件流，并支持 `--json`。
+2. `timeline` 支持 `--event <name>` 过滤事件类型（例如 `parse`/`workspace`）。
+3. 当 run 或事件文件不存在时返回清晰错误，不静默成功。
+4. 新增单测覆盖命令解析与事件文件读取/过滤路径。
+5. README 命令面同步新增 `timeline`。
+6. `cargo test -q` 通过。
+完成记录：
+
+- 已新增 CLI 命令面：
+  - `src/main.rs` 新增 `timeline <handle_id> [--event ...] [--json]`；
+  - 默认文本输出事件流，`--json` 输出结构化 `RunTimelineOutput`。
+- 已落地事件读取与过滤：
+  - 新增 `run_events_path/load_run_events/filter_timeline_events`；
+  - 从 `state/runs/<id>/events.ndjson` 逐行解析，支持按 `--event` 过滤。
+- 已增强错误语义：
+  - run 或事件文件缺失、行级 JSON 损坏都会返回明确 `timeline failed: ...` 错误。
+- 已补测试与文档：
+  - 新增 `parses_timeline_command_flags`；
+  - 新增 `load_run_events_and_filter_by_event_name`；
+  - `README.md` 命令面新增 `timeline`。
+- 已通过回归：
+  - `cargo test -q`（`161 + 39 + 3` tests passed）。
+
+## T-083 V0.9-P2-ProviderUsagePrecisionParsing (Completed 2026-03-25)
+
+任务：增强 provider usage 解析精度，优先识别更多真实 usage 形态，减少 `estimated` 覆盖范围。  
+验收标准：
+
+1. 扩展 native usage 解析规则，覆盖 snake_case/camelCase 的常见 usage key（例如 `input_tokens`、`promptTokenCount`）。
+2. 扩展 token 关键词匹配，覆盖 `tokens_used` 及 `tokens used` 的跨行/同行形态。
+3. 保持 native-first 结果面不变，无法识别时继续回退估算。
+4. 新增单测覆盖至少两类新增格式（JSON key 与 camelCase key）及无效文本场景。
+5. `cargo test -q` 通过。
+完成记录：
+
+- 已扩展 usage key 解析白名单：
+  - `src/runtime/usage.rs` 新增 snake_case / 空格分隔 / camelCase 常见 key；
+  - 输入侧覆盖 `input_tokens/prompt_tokens/promptTokenCount` 等；
+  - 输出侧覆盖 `output_tokens/completion_tokens/candidatesTokenCount` 等；
+  - 总量侧覆盖 `total_tokens/totalTokenCount`，Codex 额外覆盖 `tokens used/tokens_used`。
+- 已增强值提取策略：
+  - 采用 key 边界判断 + key 后缀近邻解析，避免从无关上下文误吸数字；
+  - 显式忽略 `null` 值并保留 fallback 估算路径；
+  - 数字解析支持 `40,005` 与 `40_005` 形态。
+- 已补测试覆盖新增格式：
+  - `parses_usage_from_json_keys`
+  - `parses_usage_from_camel_case_token_counts`
+  - `does_not_treat_null_as_numeric_usage`
+  - 保留并通过原有 `tokens used` 与空文本场景测试。
+- 已通过回归：
+  - `cargo test -q runtime::usage::tests`
+  - `cargo fmt && cargo test -q`（`164 + 39 + 3` tests passed）。
+
+## T-084 V0.9-P2-PerProviderAmbientIsolationDiagnostics (Completed 2026-03-25)
+
+任务：在 `doctor` 增加 per-provider ambient isolation 诊断，让 Gemini/Claude/Codex 的 discovery 噪声风险可见可排障。  
+验收标准：
+
+1. `doctor --json` 输出新增 ambient isolation 结构，包含 provider 级 `native_discovery` 分布与风险等级。
+2. 诊断输出包含 skill roots 探测与 workspace-visible skill conflict 列表。
+3. 当存在高风险 discovery 配置或冲突时，`issues/advice` 给出明确建议。
+4. 文本模式 `doctor` 同步渲染上述诊断信息。
+5. 新增测试覆盖冲突识别与渲染关键字段。
+6. `cargo test -q` 通过。
+完成记录：
+
+- 已扩展 `DoctorReport`：
+  - `src/doctor.rs` 新增 `ambient_isolation` 字段及配套 DTO（provider profile、skill roots、skill conflicts）。
+- 已实现 per-provider 风险分析：
+  - 基于已加载 agent spec 统计 `native_discovery` 模式分布；
+  - 对 `gemini/claude/codex` 输出 `ambient_risk` 与推荐动作；
+  - `inherit/allowlist` 在 Gemini 且存在冲突时升级为 `high`。
+- 已实现 skill roots 与冲突检测：
+  - 探测 workspace/user 的 `.agents/skills` 与 `.gemini/skills`；
+  - 仅将“涉及 workspace root 的重名 skill”标记为冲突，避免纯用户态噪声。
+- 已接入健康判定：
+  - 新增 `provider_*_ambient_discovery` 与 `ambient_skill_conflicts` warning；
+  - `advice` 自动收敛到隔离建议。
+- 已同步文本输出与文档：
+  - `render_doctor_report` 增加 `ambient_isolation` 段落；
+  - `README.md` 增加 `doctor --json` 新诊断字段说明。
+- 已补测试：
+  - `builds_report_and_renders_key_fields` 增加 `ambient_isolation` 断言；
+  - 新增 `ambient_isolation_detects_workspace_visible_skill_conflict_for_gemini`。
+- 已通过回归：
+  - `cargo test -q`（`165 + 39 + 3` tests passed）。
+
+## T-085 V0.9-P2-RetryClassificationOutputOnly (Completed 2026-03-25)
+
+任务：增加 retry 分类可观测性输出，仅暴露分类与原因，不改变现有重试执行行为。  
+验收标准：
+
+1. 运行时记录最终尝试的 retry 分类（`retryable|non_retryable|unknown`）和分类原因。
+2. `run.json` 与 `events.ndjson` 持久化该分类信息。
+3. CLI `show/result --json` 和 MCP `get_run_result` 输出该分类信息。
+4. 不修改既有重试决策逻辑（是否重试、退避、次数保持原样）。
+5. 新增测试覆盖分类输出与持久化读取路径。
+6. `cargo test -q` 通过。
+完成记录：
+
+- 已在运行时输出 retry 分类信息（不改执行）：
+  - `src/runtime/dispatcher.rs` 新增 `RetryClassification`（`retryable|non_retryable|unknown`）；
+  - `RunMetadata` 新增 `retry_classification/retry_classification_reason`；
+  - 分类逻辑在失败文案解析、strict parse、timeout/cancel 等路径均会写入原因文本。
+- 已完成持久化与事件输出：
+  - `src/mcp/state.rs` 的 `RunRecord/PersistedRunRecord` 新增 `retry_classification`；
+  - `src/mcp/persistence.rs` 将其写入 `run.json`；
+  - `events.ndjson` 新增 `retry_classification` 事件（含分类与原因）。
+- 已完成 CLI/MCP 结果面透传：
+  - `src/main.rs` 的 `show/result --json` 新增 `retry_classification/classification_reason`；
+  - `src/mcp/dto.rs` + `src/mcp/tools.rs` 的 `get_run_result` 新增同名字段；
+  - 缺失历史字段时自动回退为 `unknown`。
+- 已同步契约文档与回归：
+  - `docs/result_contract_v1.md` 增补 retry 分类字段；
+  - `README.md` 增加结果面 retry 可观测性说明；
+  - 新增测试覆盖分类判定与结果字段输出，并更新 MCP e2e 断言。
+- 已通过回归：
+  - `cargo fmt && cargo test -q`（`167 + 41 + 3` tests passed）。

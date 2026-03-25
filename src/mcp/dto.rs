@@ -116,3 +116,101 @@ pub struct ReadAgentArtifactOutput {
     pub path: String,
     pub content: String,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct ListRunsInput {
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct RunUsageOutput {
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub provider: String,
+    pub model: Option<String>,
+    pub provider_exit_code: Option<i32>,
+    pub retries: u32,
+    pub token_source: String,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub estimated_prompt_bytes: Option<u64>,
+    pub estimated_output_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct RunListingOutput {
+    pub handle_id: String,
+    pub status: String,
+    pub updated_at: String,
+    pub provider: Option<String>,
+    pub agent: Option<String>,
+    pub task: String,
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct ListRunsOutput {
+    pub runs: Vec<RunListingOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct GetRunResultInput {
+    pub handle_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct GetRunResultOutput {
+    pub contract_version: String,
+    pub handle_id: String,
+    pub status: String,
+    pub updated_at: String,
+    pub error_message: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub normalization_status: String,
+    pub summary: Option<String>,
+    pub native_result: Option<String>,
+    pub normalized_result: Option<SummaryOutput>,
+    pub provider_exit_code: Option<i32>,
+    pub retries: u32,
+    pub retry_classification: String,
+    pub classification_reason: Option<String>,
+    pub usage: RunUsageOutput,
+    pub artifact_index: Vec<ArtifactOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct ReadRunLogsInput {
+    pub handle_id: String,
+    #[serde(default)]
+    pub stream: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct ReadRunLogsOutput {
+    pub handle_id: String,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct WatchRunInput {
+    pub handle_id: String,
+    #[serde(default)]
+    pub interval_ms: Option<u64>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct WatchRunOutput {
+    pub handle_id: String,
+    pub status: String,
+    pub updated_at: String,
+    pub error_message: Option<String>,
+    pub terminal: bool,
+    pub timed_out: bool,
+}

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, fs, time::Duration};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -11,32 +11,194 @@ use crate::{
     mcp::{
         archive::apply_archive_hook,
         artifacts::{
-            build_runtime_artifacts, read_artifact_from_disk, sanitize_relative_artifact_path,
+            build_runtime_artifacts, read_artifact_from_disk, run_root_dir,
+            sanitize_relative_artifact_path,
         },
         dto::{
-            AgentListing, AgentStatusOutput, CancelAgentOutput, HandleInput, ListAgentsOutput,
-            ReadAgentArtifactInput, ReadAgentArtifactOutput, RunAgentInput, RunAgentOutput,
-            RuntimePolicySummary, SpawnAgentOutput,
+            AgentListing, AgentStatusOutput, CancelAgentOutput, GetRunResultInput,
+            GetRunResultOutput, HandleInput, ListAgentsOutput, ListRunsInput, ListRunsOutput,
+            ReadAgentArtifactInput, ReadAgentArtifactOutput, ReadRunLogsInput, ReadRunLogsOutput,
+            RunAgentInput, RunAgentOutput, RunListingOutput, RunUsageOutput, RuntimePolicySummary,
+            SpawnAgentOutput, WatchRunInput, WatchRunOutput,
         },
         helpers::{
             build_capability_notes, cancelled_summary, failed_summary, format_time,
             map_summary_output,
         },
-        persistence::persist_run_record,
+        persistence::{load_run_record_from_disk, persist_run_record},
         review::apply_review_evidence_hook,
         server::{acquire_serialize_locks_from_state, McpSubagentServer},
         service::run_dispatch,
         state::{
             append_status_if_terminal, apply_execution_policy_outcome, build_probe_result_snapshot,
-            build_run_request_snapshot, build_run_spec_snapshot, RunRecord,
+            build_run_request_snapshot, build_run_spec_snapshot, RetryClassificationRecord,
+            RunRecord,
         },
     },
-    runtime::dispatcher::RunStatus,
+    runtime::dispatcher::{RetryClassification, RunMetadata, RunStatus},
     types::RunMode,
 };
 
 pub(crate) fn build_tool_router() -> ToolRouter<McpSubagentServer> {
     McpSubagentServer::tool_router()
+}
+
+const RUN_RESULT_CONTRACT_VERSION: &str = "mcp-subagent.result.v1";
+
+fn is_terminal_status(status: &RunStatus) -> bool {
+    matches!(
+        status,
+        RunStatus::Succeeded | RunStatus::Failed | RunStatus::TimedOut | RunStatus::Cancelled
+    )
+}
+
+fn compute_duration_ms(created_at: OffsetDateTime, updated_at: OffsetDateTime) -> Option<u64> {
+    if updated_at < created_at {
+        return None;
+    }
+    let millis = (updated_at - created_at).whole_milliseconds();
+    if millis < 0 {
+        None
+    } else {
+        Some(millis as u64)
+    }
+}
+
+fn estimate_tokens(bytes: Option<u64>) -> Option<u64> {
+    bytes.map(|value| value.saturating_add(3) / 4)
+}
+
+fn infer_provider_exit_code(record: &RunRecord) -> Option<i32> {
+    if let Some(summary) = &record.summary {
+        return Some(summary.summary.exit_code);
+    }
+
+    let message = record.error_message.as_deref()?;
+    let marker = "exited with code ";
+    let idx = message.find(marker)?;
+    let code_start = idx + marker.len();
+    let tail = &message[code_start..];
+    let digits = tail
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '-')
+        .collect::<String>();
+    digits.parse::<i32>().ok()
+}
+
+fn read_text_artifact(record: &RunRecord, path: &str) -> Option<String> {
+    record.artifacts.get(path).cloned()
+}
+
+fn build_usage_output(record: &RunRecord) -> RunUsageOutput {
+    let started_at = Some(format_time(record.created_at));
+    let finished_at = if is_terminal_status(&record.status) {
+        Some(format_time(record.updated_at))
+    } else {
+        None
+    };
+    let estimated_prompt_bytes = record
+        .compiled_context_markdown
+        .as_ref()
+        .map(|value| value.len() as u64);
+    let stdout_bytes = read_text_artifact(record, "stdout.txt").map(|text| text.len() as u64);
+    let stderr_bytes = read_text_artifact(record, "stderr.txt").map(|text| text.len() as u64);
+    let estimated_output_bytes = match (stdout_bytes, stderr_bytes) {
+        (None, None) => None,
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+    };
+    let input_tokens = estimate_tokens(estimated_prompt_bytes);
+    let output_tokens = estimate_tokens(estimated_output_bytes);
+    let estimated_total_tokens = match (input_tokens, output_tokens) {
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+        _ => None,
+    };
+    let native_usage = record.usage.as_ref();
+    let mut used_native = false;
+    let mut used_estimated = false;
+    let input_tokens = if let Some(value) = native_usage.and_then(|usage| usage.input_tokens) {
+        used_native = true;
+        Some(value)
+    } else {
+        if input_tokens.is_some() {
+            used_estimated = true;
+        }
+        input_tokens
+    };
+    let output_tokens = if let Some(value) = native_usage.and_then(|usage| usage.output_tokens) {
+        used_native = true;
+        Some(value)
+    } else {
+        if output_tokens.is_some() {
+            used_estimated = true;
+        }
+        output_tokens
+    };
+    let total_tokens = if let Some(value) = native_usage.and_then(|usage| usage.total_tokens) {
+        used_native = true;
+        Some(value)
+    } else if let (Some(input), Some(output)) = (input_tokens, output_tokens) {
+        Some(input.saturating_add(output))
+    } else {
+        if estimated_total_tokens.is_some() {
+            used_estimated = true;
+        }
+        estimated_total_tokens
+    };
+    let token_source = match (used_native, used_estimated) {
+        (true, true) => "mixed",
+        (true, false) => "native",
+        (false, true) => "estimated",
+        (false, false) => "unknown",
+    };
+
+    RunUsageOutput {
+        started_at: started_at.clone(),
+        finished_at,
+        duration_ms: compute_duration_ms(record.created_at, record.updated_at),
+        provider: record
+            .spec_snapshot
+            .as_ref()
+            .map(|spec| spec.provider.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
+        model: record
+            .spec_snapshot
+            .as_ref()
+            .and_then(|spec| spec.model.clone()),
+        provider_exit_code: infer_provider_exit_code(record),
+        retries: record
+            .execution_policy
+            .as_ref()
+            .and_then(|policy| policy.retries_used)
+            .unwrap_or(0),
+        token_source: token_source.to_string(),
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        estimated_prompt_bytes,
+        estimated_output_bytes,
+    }
+}
+
+fn map_retry_classification(metadata: &RunMetadata) -> RetryClassificationRecord {
+    RetryClassificationRecord {
+        classification: format!("{}", metadata.retry_classification),
+        reason: metadata.retry_classification_reason.clone(),
+    }
+}
+
+fn resolve_retry_classification(record: &RunRecord) -> (String, Option<String>) {
+    match &record.retry_classification {
+        Some(value) => {
+            let normalized = match value.classification.as_str() {
+                "retryable" | "non_retryable" | "unknown" => value.classification.clone(),
+                _ => "unknown".to_string(),
+            };
+            (normalized, value.reason.clone())
+        }
+        None => (format!("{}", RetryClassification::Unknown), None),
+    }
 }
 
 #[tool_router]
@@ -73,6 +235,214 @@ impl McpSubagentServer {
             .collect();
 
         Ok(Json(ListAgentsOutput { agents }))
+    }
+
+    #[tool(description = "List run handles ordered by latest update time.")]
+    pub async fn list_runs(
+        &self,
+        Parameters(input): Parameters<ListRunsInput>,
+    ) -> std::result::Result<Json<ListRunsOutput>, ErrorData> {
+        let mut run_map = {
+            let runtime_state = self.runtime_state();
+            let state = runtime_state.lock().await;
+            state
+                .runs
+                .iter()
+                .map(|(handle_id, record)| (handle_id.clone(), record.clone()))
+                .collect::<HashMap<_, _>>()
+        };
+
+        let run_root = run_root_dir(self.state_dir());
+        if run_root.exists() {
+            let entries = fs::read_dir(&run_root).map_err(|err| {
+                ErrorData::internal_error(
+                    format!(
+                        "failed to read runs directory {}: {err}",
+                        run_root.display()
+                    ),
+                    None,
+                )
+            })?;
+            for entry in entries {
+                let entry = entry.map_err(|err| {
+                    ErrorData::internal_error(
+                        format!("failed to read run entry in {}: {err}", run_root.display()),
+                        None,
+                    )
+                })?;
+                let file_type = entry.file_type().map_err(|err| {
+                    ErrorData::internal_error(
+                        format!(
+                            "failed to read run entry type {}: {err}",
+                            entry.path().display()
+                        ),
+                        None,
+                    )
+                })?;
+                if !file_type.is_dir() {
+                    continue;
+                }
+                let handle_id = entry.file_name().to_string_lossy().to_string();
+                if run_map.contains_key(&handle_id) {
+                    continue;
+                }
+                if let Some(record) = load_run_record_from_disk(self.state_dir(), &handle_id)? {
+                    run_map.insert(handle_id, record);
+                }
+            }
+        }
+
+        let mut rows = run_map.into_iter().collect::<Vec<_>>();
+        rows.sort_by_key(|(_, record)| record.updated_at);
+        rows.reverse();
+
+        let limit = input.limit.unwrap_or(50).max(1);
+        let runs = rows
+            .into_iter()
+            .take(limit)
+            .map(|(handle_id, record)| RunListingOutput {
+                handle_id,
+                status: format!("{}", record.status),
+                updated_at: format_time(record.updated_at),
+                provider: record
+                    .spec_snapshot
+                    .as_ref()
+                    .map(|spec| spec.provider.clone()),
+                agent: record.spec_snapshot.as_ref().map(|spec| spec.name.clone()),
+                task: record.task,
+                duration_ms: compute_duration_ms(record.created_at, record.updated_at),
+            })
+            .collect();
+
+        Ok(Json(ListRunsOutput { runs }))
+    }
+
+    #[tool(description = "Return normalized and native result for a run handle.")]
+    pub async fn get_run_result(
+        &self,
+        Parameters(input): Parameters<GetRunResultInput>,
+    ) -> std::result::Result<Json<GetRunResultOutput>, ErrorData> {
+        let record = self.get_or_load_run_record(&input.handle_id).await?;
+        let native_result = read_text_artifact(&record, "stdout.txt").or_else(|| {
+            record
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.raw_fallback_text.clone())
+        });
+        let usage = build_usage_output(&record);
+        let (retry_classification, classification_reason) = resolve_retry_classification(&record);
+
+        Ok(Json(GetRunResultOutput {
+            contract_version: RUN_RESULT_CONTRACT_VERSION.to_string(),
+            handle_id: input.handle_id,
+            status: format!("{}", record.status),
+            updated_at: format_time(record.updated_at),
+            error_message: record.error_message.clone(),
+            provider: record
+                .spec_snapshot
+                .as_ref()
+                .map(|spec| spec.provider.clone()),
+            model: record
+                .spec_snapshot
+                .as_ref()
+                .and_then(|spec| spec.model.clone()),
+            normalization_status: record
+                .summary
+                .as_ref()
+                .map(|summary| format!("{}", summary.parse_status))
+                .unwrap_or_else(|| "NotAvailable".to_string()),
+            summary: record
+                .summary
+                .as_ref()
+                .map(|summary| summary.summary.summary.clone()),
+            native_result,
+            normalized_result: record.summary.as_ref().map(map_summary_output),
+            provider_exit_code: usage.provider_exit_code,
+            retries: usage.retries,
+            retry_classification,
+            classification_reason,
+            usage,
+            artifact_index: record.artifact_index,
+        }))
+    }
+
+    #[tool(description = "Read stdout/stderr logs for a run handle.")]
+    pub async fn read_run_logs(
+        &self,
+        Parameters(input): Parameters<ReadRunLogsInput>,
+    ) -> std::result::Result<Json<ReadRunLogsOutput>, ErrorData> {
+        let record = self.get_or_load_run_record(&input.handle_id).await?;
+        let stream = input.stream.unwrap_or_else(|| "both".to_string());
+        let (stdout_enabled, stderr_enabled) = match stream.as_str() {
+            "stdout" => (true, false),
+            "stderr" => (false, true),
+            "both" => (true, true),
+            _ => {
+                return Err(ErrorData::invalid_params(
+                    format!("invalid stream `{}`; expected stdout|stderr|both", stream),
+                    None,
+                ))
+            }
+        };
+
+        let stdout = if stdout_enabled {
+            read_text_artifact(&record, "stdout.txt").or(read_artifact_from_disk(
+                self.state_dir(),
+                &input.handle_id,
+                "stdout.txt",
+            )?)
+        } else {
+            None
+        };
+        let stderr = if stderr_enabled {
+            read_text_artifact(&record, "stderr.txt").or(read_artifact_from_disk(
+                self.state_dir(),
+                &input.handle_id,
+                "stderr.txt",
+            )?)
+        } else {
+            None
+        };
+
+        Ok(Json(ReadRunLogsOutput {
+            handle_id: input.handle_id,
+            stdout,
+            stderr,
+        }))
+    }
+
+    #[tool(description = "Wait for a run to finish and return final status.")]
+    pub async fn watch_run(
+        &self,
+        Parameters(input): Parameters<WatchRunInput>,
+    ) -> std::result::Result<Json<WatchRunOutput>, ErrorData> {
+        let interval_ms = input.interval_ms.unwrap_or(500).max(50);
+        let timeout_secs = input.timeout_secs;
+        let started = std::time::Instant::now();
+        loop {
+            let record = self.get_or_load_run_record(&input.handle_id).await?;
+            if is_terminal_status(&record.status) {
+                return Ok(Json(WatchRunOutput {
+                    handle_id: input.handle_id,
+                    status: format!("{}", record.status),
+                    updated_at: format_time(record.updated_at),
+                    error_message: record.error_message,
+                    terminal: true,
+                    timed_out: false,
+                }));
+            }
+            if timeout_secs.is_some_and(|secs| started.elapsed().as_secs() >= secs) {
+                return Ok(Json(WatchRunOutput {
+                    handle_id: input.handle_id,
+                    status: format!("{}", record.status),
+                    updated_at: format_time(record.updated_at),
+                    error_message: record.error_message,
+                    terminal: false,
+                    timed_out: true,
+                }));
+            }
+            tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+        }
     }
 
     #[tool(description = "Run an agent synchronously and return structured summary.")]
@@ -143,6 +513,8 @@ impl McpSubagentServer {
             structured_summary: map_summary_output(&result.summary),
             artifact_index: artifact_index.clone(),
         };
+        let native_usage = result.native_usage;
+        let retry_classification = map_retry_classification(&result.metadata);
 
         let record = RunRecord {
             status: result.metadata.status,
@@ -160,6 +532,8 @@ impl McpSubagentServer {
             memory_resolution: Some(memory_resolution),
             workspace: Some(workspace),
             compiled_context_markdown: Some(result.compiled_context_markdown),
+            usage: native_usage,
+            retry_classification: Some(retry_classification),
             execution_policy,
         };
         drop(workspace_cleanup);
@@ -254,6 +628,7 @@ impl McpSubagentServer {
                             data: &mut artifacts,
                         },
                     );
+                    let retry_classification = map_retry_classification(&dispatch_result.metadata);
                     record.status = dispatch_result.metadata.status;
                     record.updated_at = OffsetDateTime::now_utc();
                     record.status_history = dispatch_result.metadata.status_history;
@@ -265,6 +640,8 @@ impl McpSubagentServer {
                     record.workspace = Some(workspace);
                     record.compiled_context_markdown =
                         Some(dispatch_result.compiled_context_markdown);
+                    record.usage = dispatch_result.native_usage;
+                    record.retry_classification = Some(retry_classification);
                     drop(workspace_cleanup);
                 }
                 Err(err) => {
@@ -281,6 +658,8 @@ impl McpSubagentServer {
                     record.memory_resolution = None;
                     record.workspace = None;
                     record.compiled_context_markdown = None;
+                    record.usage = None;
+                    record.retry_classification = None;
                 }
             }
 

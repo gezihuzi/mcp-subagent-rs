@@ -270,11 +270,16 @@ fn inject_memory_sources(
 
 fn compile_constraints(spec: &AgentSpec, request: &RunRequest) -> String {
     let mut constraints = format!(
-        "Do not request or rely on parent raw transcript.\nFollow agent instructions:\n{}\nProvider: {}\nContextMode: {}",
+        "Do not request or rely on parent raw transcript.\nFollow agent instructions:\n{}\nProvider: {}\nContextMode: {}\nDelegationContext: {:?}",
         spec.core.instructions,
         spec.core.provider.as_str(),
-        spec.runtime.context_mode
+        spec.runtime.context_mode,
+        spec.runtime.delegation_context
     );
+    if let Some(selector) = spec.runtime.plan_section_selector.as_deref() {
+        constraints.push('\n');
+        constraints.push_str(&format!("PlanSectionSelector: {selector}"));
+    }
     if let Some(stage) = request.stage.as_deref() {
         constraints.push('\n');
         constraints.push_str(&format!("WorkflowStage: {stage}"));
@@ -641,7 +646,7 @@ mod tests {
             task_brief: None,
             parent_summary: None,
             selected_files: Vec::new(),
-            stage: Some("Build".to_string()),
+            stage: Some("build".to_string()),
             plan_ref: None,
             working_dir: PathBuf::from("."),
             run_mode: RunMode::Sync,
@@ -651,7 +656,7 @@ mod tests {
         let compiled = compiler
             .compile(&spec, &req, ResolvedMemory::default())
             .expect("compile");
-        assert!(compiled.injected_prompt.contains("WorkflowStage: Build"));
+        assert!(compiled.injected_prompt.contains("WorkflowStage: build"));
         assert!(compiled
             .injected_prompt
             .contains("StageRolePriority: Builder -> Reviewer -> Planner"));

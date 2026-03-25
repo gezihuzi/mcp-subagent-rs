@@ -7,6 +7,7 @@ use tokio::{sync::Mutex, task::JoinHandle};
 use crate::{
     mcp::dto::ArtifactOutput,
     probe::ProviderProbe,
+    runtime::usage::NativeUsage,
     runtime::{dispatcher::RunStatus, summary::SummaryEnvelope},
     spec::{
         runtime_policy::{
@@ -42,6 +43,8 @@ pub(crate) struct RunRecord {
     pub(crate) memory_resolution: Option<MemoryResolutionRecord>,
     pub(crate) workspace: Option<WorkspaceRecord>,
     pub(crate) compiled_context_markdown: Option<String>,
+    pub(crate) usage: Option<NativeUsage>,
+    pub(crate) retry_classification: Option<RetryClassificationRecord>,
     pub(crate) execution_policy: Option<ExecutionPolicyRecord>,
 }
 
@@ -75,9 +78,19 @@ impl RunRecord {
             memory_resolution: None,
             workspace: None,
             compiled_context_markdown: None,
+            usage: None,
+            retry_classification: None,
             execution_policy,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetryClassificationRecord {
+    pub(crate) classification: String,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -158,6 +171,10 @@ pub(crate) struct RunSpecSnapshot {
     #[serde(default)]
     pub(crate) model: Option<String>,
     pub(crate) context_mode: String,
+    #[serde(default = "default_delegation_context_snapshot")]
+    pub(crate) delegation_context: String,
+    #[serde(default)]
+    pub(crate) plan_section_selector: Option<String>,
     pub(crate) working_dir_policy: String,
     pub(crate) file_conflict_policy: String,
     pub(crate) sandbox: String,
@@ -195,8 +212,9 @@ pub(crate) struct MemoryResolutionRecord {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PersistedRunRecord {
     pub(crate) status: RunStatus,
-    #[serde(default)]
+    #[serde(default, with = "time::serde::rfc3339::option")]
     pub(crate) created_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339")]
     pub(crate) updated_at: OffsetDateTime,
     #[serde(default)]
     pub(crate) status_history: Vec<RunStatus>,
@@ -216,6 +234,10 @@ pub(crate) struct PersistedRunRecord {
     pub(crate) workspace: Option<WorkspaceRecord>,
     #[serde(default)]
     pub(crate) compiled_context_markdown: Option<String>,
+    #[serde(default)]
+    pub(crate) usage: Option<NativeUsage>,
+    #[serde(default)]
+    pub(crate) retry_classification: Option<RetryClassificationRecord>,
     #[serde(default)]
     pub(crate) execution_policy: Option<ExecutionPolicyRecord>,
 }
@@ -237,6 +259,8 @@ impl From<&RunRecord> for PersistedRunRecord {
             memory_resolution: value.memory_resolution.clone(),
             workspace: value.workspace.clone(),
             compiled_context_markdown: value.compiled_context_markdown.clone(),
+            usage: value.usage.clone(),
+            retry_classification: value.retry_classification.clone(),
             execution_policy: value.execution_policy.clone(),
         }
     }
@@ -270,6 +294,8 @@ pub(crate) fn build_run_spec_snapshot(spec: &AgentSpec) -> RunSpecSnapshot {
         provider: spec.core.provider.as_str().to_string(),
         model: spec.core.model.clone(),
         context_mode: context_mode_to_str(&spec.runtime.context_mode),
+        delegation_context: delegation_context_policy_to_str(&spec.runtime.delegation_context),
+        plan_section_selector: spec.runtime.plan_section_selector.clone(),
         working_dir_policy: working_dir_policy_to_str(&spec.runtime.working_dir_policy),
         file_conflict_policy: file_conflict_policy_to_str(&spec.runtime.file_conflict_policy),
         sandbox: sandbox_policy_to_str(&spec.runtime.sandbox),
@@ -292,6 +318,10 @@ pub(crate) fn build_probe_result_snapshot(probe: &ProviderProbe) -> ProbeResultR
         status: probe.status.to_string(),
         notes: probe.notes.clone(),
     }
+}
+
+fn default_delegation_context_snapshot() -> String {
+    "minimal".to_string()
 }
 
 pub(crate) fn build_memory_resolution_snapshot(memory: &ResolvedMemory) -> MemoryResolutionRecord {
@@ -384,68 +414,89 @@ fn retry_policy_source(value: &RetryPolicy, default: &RetryPolicy) -> PolicyValu
 
 fn context_mode_to_str(mode: &ContextMode) -> String {
     match mode {
-        ContextMode::Isolated => "Isolated".to_string(),
-        ContextMode::SummaryOnly => "SummaryOnly".to_string(),
-        ContextMode::SelectedFiles(paths) => format!("SelectedFiles({})", paths.join(",")),
-        ContextMode::ExpandedBrief => "ExpandedBrief".to_string(),
+        ContextMode::Isolated => "isolated".to_string(),
+        ContextMode::SummaryOnly => "summary_only".to_string(),
+        ContextMode::SelectedFiles(paths) => format!("selected_files({})", paths.join(",")),
+        ContextMode::ExpandedBrief => "expanded_brief".to_string(),
+    }
+}
+
+fn delegation_context_policy_to_str(
+    policy: &crate::spec::runtime_policy::DelegationContextPolicy,
+) -> String {
+    match policy {
+        crate::spec::runtime_policy::DelegationContextPolicy::Minimal => "minimal".to_string(),
+        crate::spec::runtime_policy::DelegationContextPolicy::SummaryOnly => {
+            "summary_only".to_string()
+        }
+        crate::spec::runtime_policy::DelegationContextPolicy::SelectedFiles => {
+            "selected_files".to_string()
+        }
+        crate::spec::runtime_policy::DelegationContextPolicy::PlanSection => {
+            "plan_section".to_string()
+        }
+        crate::spec::runtime_policy::DelegationContextPolicy::FullPlan => "full_plan".to_string(),
+        crate::spec::runtime_policy::DelegationContextPolicy::ProviderNativeOnly => {
+            "provider_native_only".to_string()
+        }
     }
 }
 
 fn working_dir_policy_to_str(policy: &WorkingDirPolicy) -> String {
     match policy {
-        WorkingDirPolicy::Auto => "Auto".to_string(),
-        WorkingDirPolicy::InPlace => "InPlace".to_string(),
-        WorkingDirPolicy::TempCopy => "TempCopy".to_string(),
-        WorkingDirPolicy::GitWorktree => "GitWorktree".to_string(),
+        WorkingDirPolicy::Auto => "auto".to_string(),
+        WorkingDirPolicy::InPlace => "in_place".to_string(),
+        WorkingDirPolicy::TempCopy => "temp_copy".to_string(),
+        WorkingDirPolicy::GitWorktree => "git_worktree".to_string(),
     }
 }
 
 fn file_conflict_policy_to_str(policy: &FileConflictPolicy) -> String {
     match policy {
-        FileConflictPolicy::Deny => "Deny".to_string(),
-        FileConflictPolicy::Serialize => "Serialize".to_string(),
-        FileConflictPolicy::AllowWithMergeReview => "AllowWithMergeReview".to_string(),
+        FileConflictPolicy::Deny => "deny".to_string(),
+        FileConflictPolicy::Serialize => "serialize".to_string(),
+        FileConflictPolicy::AllowWithMergeReview => "allow_with_merge_review".to_string(),
     }
 }
 
 fn sandbox_policy_to_str(policy: &SandboxPolicy) -> String {
     match policy {
-        SandboxPolicy::ReadOnly => "ReadOnly".to_string(),
-        SandboxPolicy::WorkspaceWrite => "WorkspaceWrite".to_string(),
-        SandboxPolicy::FullAccess => "FullAccess".to_string(),
+        SandboxPolicy::ReadOnly => "read_only".to_string(),
+        SandboxPolicy::WorkspaceWrite => "workspace_write".to_string(),
+        SandboxPolicy::FullAccess => "full_access".to_string(),
     }
 }
 
 fn approval_policy_to_str(policy: &ApprovalPolicy) -> String {
     match policy {
-        ApprovalPolicy::ProviderDefault => "ProviderDefault".to_string(),
-        ApprovalPolicy::Ask => "Ask".to_string(),
-        ApprovalPolicy::AutoAcceptEdits => "AutoAcceptEdits".to_string(),
-        ApprovalPolicy::DenyByDefault => "DenyByDefault".to_string(),
+        ApprovalPolicy::ProviderDefault => "provider_default".to_string(),
+        ApprovalPolicy::Ask => "ask".to_string(),
+        ApprovalPolicy::AutoAcceptEdits => "auto_accept_edits".to_string(),
+        ApprovalPolicy::DenyByDefault => "deny_by_default".to_string(),
     }
 }
 
 fn memory_source_to_str(source: &MemorySource) -> String {
     match source {
-        MemorySource::AutoProjectMemory => "AutoProjectMemory".to_string(),
-        MemorySource::ActivePlan => "ActivePlan".to_string(),
-        MemorySource::ArchivedPlans => "ArchivedPlans".to_string(),
-        MemorySource::File(path) => format!("File({path})"),
-        MemorySource::Glob(pattern) => format!("Glob({pattern})"),
-        MemorySource::Inline(_) => "Inline(<content>)".to_string(),
+        MemorySource::AutoProjectMemory => "auto_project_memory".to_string(),
+        MemorySource::ActivePlan => "active_plan".to_string(),
+        MemorySource::ArchivedPlans => "archived_plans".to_string(),
+        MemorySource::File(path) => format!("file({path})"),
+        MemorySource::Glob(pattern) => format!("glob({pattern})"),
+        MemorySource::Inline(_) => "inline(<content>)".to_string(),
     }
 }
 
 fn spawn_policy_to_str(policy: &SpawnPolicy) -> String {
     match policy {
-        SpawnPolicy::Sync => "Sync".to_string(),
-        SpawnPolicy::Async => "Async".to_string(),
+        SpawnPolicy::Sync => "sync".to_string(),
+        SpawnPolicy::Async => "async".to_string(),
     }
 }
 
 fn background_preference_to_str(preference: &BackgroundPreference) -> String {
     match preference {
-        BackgroundPreference::PreferForeground => "PreferForeground".to_string(),
-        BackgroundPreference::PreferBackground => "PreferBackground".to_string(),
+        BackgroundPreference::PreferForeground => "prefer_foreground".to_string(),
+        BackgroundPreference::PreferBackground => "prefer_background".to_string(),
     }
 }

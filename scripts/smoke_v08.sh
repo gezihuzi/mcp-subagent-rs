@@ -15,7 +15,7 @@ cat >"$AGENTS_DIR/mock_runner.agent.toml" <<'TOML'
 [core]
 name = "mock_runner"
 description = "local smoke mock agent"
-provider = "Mock"
+provider = "mock"
 instructions = "run mock smoke task"
 TOML
 
@@ -23,7 +23,7 @@ cat >"$AGENTS_DIR/codex_runner.agent.toml" <<'TOML'
 [core]
 name = "codex_runner"
 description = "local smoke codex agent"
-provider = "Codex"
+provider = "codex"
 instructions = "run codex smoke task"
 TOML
 
@@ -31,24 +31,24 @@ cat >"$AGENTS_DIR/async_only_runner.agent.toml" <<'TOML'
 [core]
 name = "async_only_runner"
 description = "runner that must execute via spawn"
-provider = "Mock"
+provider = "mock"
 instructions = "run async-only smoke task"
 
 [runtime]
-spawn_policy = "Async"
+spawn_policy = "async"
 TOML
 
 cat >"$AGENTS_DIR/review_runner.agent.toml" <<'TOML'
 [core]
 name = "review_runner"
 description = "review runner for evidence artifact smoke"
-provider = "Mock"
+provider = "mock"
 instructions = "review code and output concise findings"
 tags = ["review", "correctness", "style"]
 
 [workflow]
 enabled = true
-stages = ["Review"]
+stages = ["review"]
 
 [workflow.require_plan_when]
 require_plan_if_touched_files_ge = 999
@@ -112,9 +112,38 @@ echo "fake codex stdout"
 exit 0
 SH
 chmod +x "$FAKE_CODEX_BIN"
-# Ensure provider probe (`codex --version`) resolves the fake binary in CI.
+
+FAKE_CLAUDE_BIN="$TMP_DIR/claude"
+cat >"$FAKE_CLAUDE_BIN" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  echo "claude-fake 0.9.0"
+  exit 0
+fi
+echo "claude-fake unsupported command" >&2
+exit 2
+SH
+chmod +x "$FAKE_CLAUDE_BIN"
+
+FAKE_GEMINI_BIN="$TMP_DIR/gemini"
+cat >"$FAKE_GEMINI_BIN" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  echo "gemini-fake 0.9.0"
+  exit 0
+fi
+echo "gemini-fake unsupported command" >&2
+exit 2
+SH
+chmod +x "$FAKE_GEMINI_BIN"
+
+# Ensure provider probes resolve deterministic fake binaries in CI/local smoke.
 export PATH="$TMP_DIR:$PATH"
 export MCP_SUBAGENT_CODEX_BIN="$FAKE_CODEX_BIN"
+export MCP_SUBAGENT_CLAUDE_BIN="$FAKE_CLAUDE_BIN"
+export MCP_SUBAGENT_GEMINI_BIN="$FAKE_GEMINI_BIN"
 
 run_cmd() {
   cargo run --quiet -- \
@@ -143,7 +172,7 @@ run_cmd list-agents --json >"$TMP_DIR/list_agents.json"
 
 echo "[smoke-v08] run mock"
 run_cmd run mock_runner --task "smoke mock run" --working-dir "$WORK_DIR" --json >"$TMP_DIR/run_mock.json"
-grep -Eq '"status"[[:space:]]*:[[:space:]]*"Succeeded"' "$TMP_DIR/run_mock.json"
+grep -Eq '"status"[[:space:]]*:[[:space:]]*"succeeded"' "$TMP_DIR/run_mock.json"
 
 echo "[smoke-v08] run async-only (must fail)"
 set +e
@@ -165,16 +194,16 @@ if [[ -z "$SPAWN_HANDLE" ]]; then
   exit 1
 fi
 run_cmd status "$SPAWN_HANDLE" --json >"$TMP_DIR/status_async.json"
-grep -Eq '"status"[[:space:]]*:[[:space:]]*"(Running|Succeeded|Failed|Cancelled|TimedOut)"' "$TMP_DIR/status_async.json"
+grep -Eq '"status"[[:space:]]*:[[:space:]]*"(running|succeeded|failed|cancelled|timed_out)"' "$TMP_DIR/status_async.json"
 
 echo "[smoke-v08] run review runner + read review evidence artifact"
 run_cmd run review_runner \
   --task "review parser behavior" \
-  --stage Review \
+  --stage review \
   --working-dir "$WORK_DIR" \
   --parent-summary "previous style review confirmed maintainability and style quality" \
   --json >"$TMP_DIR/run_review.json"
-grep -Eq '"status"[[:space:]]*:[[:space:]]*"Succeeded"' "$TMP_DIR/run_review.json"
+grep -Eq '"status"[[:space:]]*:[[:space:]]*"succeeded"' "$TMP_DIR/run_review.json"
 grep -Eq '"path"[[:space:]]*:[[:space:]]*"review/evidence.json"' "$TMP_DIR/run_review.json"
 REVIEW_HANDLE="$(extract_handle_id <"$TMP_DIR/run_review.json")"
 run_cmd artifact "$REVIEW_HANDLE" --path review/evidence.json >"$TMP_DIR/review_evidence.json"
@@ -182,7 +211,7 @@ grep -Eq '"dual_review_satisfied"[[:space:]]*:[[:space:]]*true' "$TMP_DIR/review
 
 echo "[smoke-v08] run codex via fake runner (must pass)"
 run_cmd run codex_runner --task "smoke codex fake run" --working-dir "$WORK_DIR" --json >"$TMP_DIR/run_codex.json"
-grep -Eq '"status"[[:space:]]*:[[:space:]]*"Succeeded"' "$TMP_DIR/run_codex.json"
+grep -Eq '"status"[[:space:]]*:[[:space:]]*"succeeded"' "$TMP_DIR/run_codex.json"
 
 echo "[smoke-v08] connect snippets"
 for host in claude codex gemini; do

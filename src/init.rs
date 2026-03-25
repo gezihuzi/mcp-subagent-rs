@@ -14,11 +14,12 @@ use crate::{
     spec::registry::load_agent_specs_from_dirs,
 };
 
-const PRESET_CATALOG_VERSION: &str = "v0.8.1";
+const PRESET_CATALOG_VERSION: &str = "v0.9.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitPreset {
     ClaudeOpusSupervisor,
+    ClaudeOpusSupervisorMinimal,
     CodexPrimaryBuilder,
     GeminiFrontendTeam,
     LocalOllamaFallback,
@@ -29,6 +30,7 @@ impl InitPreset {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ClaudeOpusSupervisor => "claude-opus-supervisor",
+            Self::ClaudeOpusSupervisorMinimal => "claude-opus-supervisor-minimal",
             Self::CodexPrimaryBuilder => "codex-primary-builder",
             Self::GeminiFrontendTeam => "gemini-frontend-team",
             Self::LocalOllamaFallback => "local-ollama-fallback",
@@ -137,7 +139,7 @@ fn init_with_preset(root: &Path, preset: InitPreset, force: bool) -> Result<Init
 
 fn preset_agent_templates(preset: InitPreset) -> Vec<(&'static str, &'static str)> {
     match preset {
-        InitPreset::ClaudeOpusSupervisor => vec![
+        InitPreset::ClaudeOpusSupervisor | InitPreset::ClaudeOpusSupervisorMinimal => vec![
             ("fast-researcher.agent.toml", FAST_RESEARCHER_AGENT),
             ("backend-coder.agent.toml", BACKEND_CODER_AGENT),
             ("frontend-builder.agent.toml", FRONTEND_BUILDER_AGENT),
@@ -260,6 +262,7 @@ Catalog version: `{}`
 
 Available presets:
 
+- `claude-opus-supervisor-minimal`
 - `claude-opus-supervisor`
 - `codex-primary-builder`
 - `gemini-frontend-team`
@@ -294,7 +297,15 @@ Gemini CLI:
 {}
 ```
 
-Regenerate connect snippets at any time:
+Apply integration directly at any time:
+
+```bash
+mcp-subagent connect --host claude
+mcp-subagent connect --host codex
+mcp-subagent connect --host gemini
+```
+
+Or print connect snippets only:
 
 ```bash
 mcp-subagent connect-snippet --host claude
@@ -313,228 +324,265 @@ mcp-subagent connect-snippet --host gemini
 const FAST_RESEARCHER_AGENT: &str = r#"[core]
 name = "fast-researcher"
 description = "Fast read-only investigator for dependency mapping and risk discovery."
-provider = "Gemini"
+provider = "gemini"
 model = "flash"
 instructions = "You are a read-only research specialist. Do not edit files. Return concise evidence-based summaries."
 tags = ["research", "read-only", "fast"]
 
 [runtime]
-context_mode = "ExpandedBrief"
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
-file_conflict_policy = "Serialize"
-sandbox = "ReadOnly"
-approval = "ProviderDefault"
+context_mode = "expanded_brief"
+delegation_context = "minimal"
+memory_sources = ["auto_project_memory"]
+native_discovery = "isolated"
+working_dir_policy = "auto"
+file_conflict_policy = "serialize"
+sandbox = "read_only"
+approval = "provider_default"
 timeout_secs = 600
-spawn_policy = "Sync"
+output_mode = "both"
+parse_policy = "best_effort"
+spawn_policy = "sync"
 
 [workflow]
 enabled = true
-stages = ["Research", "Plan"]
+stages = ["research", "plan"]
 max_runtime_depth = 1
 "#;
 
 const BACKEND_CODER_AGENT: &str = r#"[core]
 name = "backend-coder"
 description = "Implements backend and Rust changes from an approved plan."
-provider = "Codex"
+provider = "codex"
 model = "gpt-5.3-codex"
 instructions = "Implement scoped changes from PLAN.md. Keep diffs minimal and reference plan steps in summary."
 tags = ["build", "backend", "rust", "codex"]
 
 [runtime]
-context_mode = { SelectedFiles = ["src/**", "Cargo.toml", "PLAN.md"] }
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
-file_conflict_policy = "Serialize"
-sandbox = "WorkspaceWrite"
-approval = "DenyByDefault"
+context_mode = { selected_files = ["src/**", "Cargo.toml", "PLAN.md"] }
+delegation_context = "selected_files"
+memory_sources = ["auto_project_memory"]
+native_discovery = "minimal"
+working_dir_policy = "auto"
+file_conflict_policy = "serialize"
+sandbox = "workspace_write"
+approval = "deny_by_default"
 timeout_secs = 1200
-spawn_policy = "Async"
+output_mode = "both"
+parse_policy = "best_effort"
+spawn_policy = "async"
 
 [provider_overrides.codex]
 model_reasoning_effort = "medium"
 
 [workflow]
 enabled = true
-stages = ["Build", "Review"]
+stages = ["build", "review"]
 max_runtime_depth = 1
 "#;
 
 const FRONTEND_BUILDER_AGENT: &str = r#"[core]
 name = "frontend-builder"
 description = "Implements frontend and UI changes from an approved plan."
-provider = "Gemini"
+provider = "gemini"
 model = "pro"
 instructions = "Implement frontend changes from PLAN.md with usable, reviewable diffs."
 tags = ["build", "frontend", "ui", "gemini"]
 
 [runtime]
-context_mode = { SelectedFiles = ["web/**", "src/**", "package.json", "PLAN.md"] }
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
-file_conflict_policy = "Serialize"
-sandbox = "WorkspaceWrite"
-approval = "ProviderDefault"
+context_mode = { selected_files = ["web/**", "src/**", "package.json", "PLAN.md"] }
+delegation_context = "selected_files"
+memory_sources = ["auto_project_memory"]
+native_discovery = "isolated"
+working_dir_policy = "auto"
+file_conflict_policy = "serialize"
+sandbox = "workspace_write"
+approval = "provider_default"
 timeout_secs = 1200
-spawn_policy = "Async"
+output_mode = "both"
+parse_policy = "best_effort"
+spawn_policy = "async"
 
 [provider_overrides.gemini]
 experimental_subagents = true
 
 [workflow]
 enabled = true
-stages = ["Build", "Review"]
+stages = ["build", "review"]
 max_runtime_depth = 1
 "#;
 
 const CORRECTNESS_REVIEWER_AGENT: &str = r#"[core]
 name = "correctness-reviewer"
 description = "Reviews logic, regressions, edge cases, and verification claims."
-provider = "Codex"
+provider = "codex"
 model = "gpt-5.3-codex"
 instructions = "Audit logic, regression risk, verification gaps, and plan compliance with explicit evidence."
 tags = ["review", "correctness", "codex"]
 
 [runtime]
-context_mode = "SummaryOnly"
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
-file_conflict_policy = "Serialize"
-sandbox = "ReadOnly"
-approval = "DenyByDefault"
+context_mode = "summary_only"
+delegation_context = "plan_section"
+plan_section_selector = "Acceptance Criteria"
+memory_sources = ["auto_project_memory"]
+native_discovery = "minimal"
+working_dir_policy = "auto"
+file_conflict_policy = "serialize"
+sandbox = "read_only"
+approval = "deny_by_default"
 timeout_secs = 900
-spawn_policy = "Sync"
+output_mode = "both"
+parse_policy = "best_effort"
+spawn_policy = "sync"
 
 [provider_overrides.codex]
 model_reasoning_effort = "high"
 
 [workflow]
 enabled = true
-stages = ["Review"]
+stages = ["review"]
 max_runtime_depth = 1
 "#;
 
 const STYLE_REVIEWER_AGENT: &str = r#"[core]
 name = "style-reviewer"
 description = "Reviews maintainability, naming, readability, and consistency."
-provider = "Claude"
+provider = "claude"
 model = "sonnet"
 instructions = "Review maintainability and style. Do not claim certainty without evidence."
 tags = ["review", "style", "claude"]
 
 [runtime]
-context_mode = "SummaryOnly"
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
-file_conflict_policy = "Serialize"
-sandbox = "ReadOnly"
-approval = "DenyByDefault"
+context_mode = "summary_only"
+delegation_context = "selected_files"
+memory_sources = ["auto_project_memory"]
+native_discovery = "minimal"
+working_dir_policy = "auto"
+file_conflict_policy = "serialize"
+sandbox = "read_only"
+approval = "deny_by_default"
 timeout_secs = 900
-spawn_policy = "Sync"
+output_mode = "both"
+parse_policy = "best_effort"
+spawn_policy = "sync"
 
 [workflow]
 enabled = true
-stages = ["Review", "Archive"]
+stages = ["review", "archive"]
 max_runtime_depth = 1
 "#;
 
 const CODEX_STYLE_REVIEWER_AGENT: &str = r#"[core]
 name = "codex-style-reviewer"
 description = "Codex reviewer focused on style and maintainability."
-provider = "Codex"
+provider = "codex"
 model = "gpt-5.3-codex"
 instructions = "Review maintainability, naming, readability, and consistency with concrete evidence."
 tags = ["review", "style", "codex"]
 
 [runtime]
-context_mode = "SummaryOnly"
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
-file_conflict_policy = "Serialize"
-sandbox = "ReadOnly"
-approval = "DenyByDefault"
+context_mode = "summary_only"
+delegation_context = "selected_files"
+memory_sources = ["auto_project_memory"]
+native_discovery = "minimal"
+working_dir_policy = "auto"
+file_conflict_policy = "serialize"
+sandbox = "read_only"
+approval = "deny_by_default"
 timeout_secs = 900
-spawn_policy = "Sync"
+output_mode = "both"
+parse_policy = "best_effort"
+spawn_policy = "sync"
 
 [provider_overrides.codex]
 model_reasoning_effort = "high"
 
 [workflow]
 enabled = true
-stages = ["Review"]
+stages = ["review"]
 max_runtime_depth = 1
 "#;
 
 const GEMINI_STYLE_REVIEWER_AGENT: &str = r#"[core]
 name = "gemini-style-reviewer"
 description = "Gemini reviewer for frontend style and maintainability checks."
-provider = "Gemini"
+provider = "gemini"
 model = "pro"
 instructions = "Review style, readability, and maintainability with short actionable findings."
 tags = ["review", "style", "gemini"]
 
 [runtime]
-context_mode = "SummaryOnly"
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
-file_conflict_policy = "Serialize"
-sandbox = "ReadOnly"
-approval = "ProviderDefault"
+context_mode = "summary_only"
+delegation_context = "selected_files"
+memory_sources = ["auto_project_memory"]
+native_discovery = "isolated"
+working_dir_policy = "auto"
+file_conflict_policy = "serialize"
+sandbox = "read_only"
+approval = "provider_default"
 timeout_secs = 900
-spawn_policy = "Sync"
+output_mode = "both"
+parse_policy = "best_effort"
+spawn_policy = "sync"
 
 [workflow]
 enabled = true
-stages = ["Review"]
+stages = ["review"]
 max_runtime_depth = 1
 "#;
 
 const LOCAL_FALLBACK_CODER_AGENT: &str = r#"[core]
 name = "local-fallback-coder"
 description = "Optional local fallback coding agent backed by Ollama."
-provider = "Ollama"
+provider = "ollama"
 model = "qwen2.5-coder"
 instructions = "Implement small scoped changes. If uncertain, return open questions."
 tags = ["build", "local", "ollama", "fallback"]
 
 [runtime]
-context_mode = { SelectedFiles = ["src/**", "PLAN.md"] }
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
-file_conflict_policy = "Serialize"
-sandbox = "WorkspaceWrite"
-approval = "DenyByDefault"
+context_mode = { selected_files = ["src/**", "PLAN.md"] }
+delegation_context = "selected_files"
+memory_sources = ["auto_project_memory"]
+native_discovery = "minimal"
+working_dir_policy = "auto"
+file_conflict_policy = "serialize"
+sandbox = "workspace_write"
+approval = "deny_by_default"
 timeout_secs = 1200
-spawn_policy = "Async"
+output_mode = "both"
+parse_policy = "best_effort"
+spawn_policy = "async"
 
 [workflow]
 enabled = true
-stages = ["Build"]
+stages = ["build"]
 max_runtime_depth = 1
 "#;
 
 const SINGLE_PROVIDER_CODER_AGENT: &str = r#"[core]
 name = "single-provider-coder"
 description = "Minimal single-provider coder for small workflows."
-provider = "Codex"
+provider = "codex"
 model = "gpt-5.3-codex"
 instructions = "Implement scoped changes and return concise structured summary."
 tags = ["build", "codex", "minimal"]
 
 [runtime]
-context_mode = { SelectedFiles = ["src/**", "PLAN.md"] }
-memory_sources = ["AutoProjectMemory", "ActivePlan"]
-working_dir_policy = "Auto"
-file_conflict_policy = "Serialize"
-sandbox = "WorkspaceWrite"
-approval = "DenyByDefault"
+context_mode = { selected_files = ["src/**", "PLAN.md"] }
+delegation_context = "selected_files"
+memory_sources = ["auto_project_memory"]
+native_discovery = "minimal"
+working_dir_policy = "auto"
+file_conflict_policy = "serialize"
+sandbox = "workspace_write"
+approval = "deny_by_default"
 timeout_secs = 900
-spawn_policy = "Sync"
+output_mode = "both"
+parse_policy = "best_effort"
+spawn_policy = "sync"
 
 [workflow]
 enabled = true
-stages = ["Build", "Review"]
+stages = ["build", "review"]
 max_runtime_depth = 1
 "#;
 
@@ -555,7 +603,7 @@ mod tests {
             .expect("init succeeds");
 
         assert_eq!(report.generated_agent_count, 6);
-        assert_eq!(report.preset_catalog_version, "v0.8.1");
+        assert_eq!(report.preset_catalog_version, "v0.9.0");
         assert!(dir.path().join("agents").exists());
         assert!(dir.path().join("PLAN.md").exists());
         assert!(dir.path().join(".mcp-subagent/config.toml").exists());
@@ -566,6 +614,7 @@ mod tests {
     fn init_supports_all_presets_and_validates() {
         for preset in [
             InitPreset::ClaudeOpusSupervisor,
+            InitPreset::ClaudeOpusSupervisorMinimal,
             InitPreset::CodexPrimaryBuilder,
             InitPreset::GeminiFrontendTeam,
             InitPreset::LocalOllamaFallback,
@@ -578,7 +627,7 @@ mod tests {
                 "preset {} should generate at least one agent",
                 preset.as_str()
             );
-            assert_eq!(report.preset_catalog_version, "v0.8.1");
+            assert_eq!(report.preset_catalog_version, "v0.9.0");
             assert!(dir.path().join("README.mcp-subagent.md").exists());
         }
     }
@@ -614,7 +663,7 @@ mod tests {
             .expect("init with force");
         let content =
             fs::read_to_string(dir.path().join("agents/backend-coder.agent.toml")).expect("read");
-        assert!(content.contains("provider = \"Codex\""));
+        assert!(content.contains("provider = \"codex\""));
         assert!(report
             .overwritten_files
             .iter()

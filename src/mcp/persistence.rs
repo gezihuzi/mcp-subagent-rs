@@ -249,6 +249,8 @@ pub(crate) fn load_run_record_from_disk(
         memory_resolution: persisted.memory_resolution,
         workspace: persisted.workspace,
         compiled_context_markdown: persisted.compiled_context_markdown,
+        usage: persisted.usage,
+        retry_classification: persisted.retry_classification,
         execution_policy: persisted.execution_policy,
     }))
 }
@@ -347,6 +349,17 @@ fn build_run_events(record: &RunRecord) -> Vec<RunEventRecord> {
         });
     }
 
+    if let Some(retry) = &record.retry_classification {
+        events.push(RunEventRecord {
+            event: "retry_classification".to_string(),
+            timestamp: timestamp.clone(),
+            detail: json!({
+                "classification": retry.classification,
+                "reason": retry.reason,
+            }),
+        });
+    }
+
     if let Some(summary) = &record.summary {
         events.push(RunEventRecord {
             event: "parse".to_string(),
@@ -434,7 +447,7 @@ mod tests {
     use std::fs;
 
     use tempfile::tempdir;
-    use time::OffsetDateTime;
+    use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
     use crate::runtime::dispatcher::RunStatus;
 
@@ -448,10 +461,11 @@ mod tests {
         let run_dir = state_dir.join("runs").join(handle_id);
         fs::create_dir_all(&run_dir).expect("create run dir");
 
-        let updated_at =
-            serde_json::to_value(OffsetDateTime::now_utc()).expect("serialize timestamp");
+        let updated_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .expect("format timestamp");
         let legacy = serde_json::json!({
-            "status": "SUCCEEDED",
+            "status": "succeeded",
             "updated_at": updated_at,
             "summary": null,
             "artifact_index": [],

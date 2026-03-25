@@ -1,13 +1,18 @@
 use std::{
     fs,
+    io::IsTerminal,
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{Command, ExitCode, Stdio},
+    time::Instant,
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mcp_subagent::{
     config::{resolve_runtime_config, ConfigOverrides, RuntimeConfig},
-    connect::{build_connect_snippet, resolve_connect_snippet_paths, ConnectHost},
+    connect::{
+        build_connect_invocation, build_connect_snippet, build_host_launch_invocation,
+        resolve_connect_snippet_paths, ConnectHost, ConnectInvocation,
+    },
     doctor::{build_doctor_report, render_doctor_report},
     init::{init_workspace, InitPreset, InitReport},
     logging::{init_logging, LoggingGuard},
@@ -23,7 +28,8 @@ use mcp_subagent::{
     spec::registry::load_agent_specs_from_dirs,
 };
 use rmcp::handler::server::wrapper::Parameters;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use tracing::info;
 
 const DEFAULT_BOOTSTRAP_ROOT_RELATIVE: &str = ".mcp-subagent/bootstrap";
@@ -32,6 +38,7 @@ const PROJECT_GITIGNORE_RELATIVE: &str = ".gitignore";
 const BRIDGE_AGENTS_DIR_RELATIVE: &str = "./.mcp-subagent/bootstrap/agents";
 const BRIDGE_STATE_DIR_RELATIVE: &str = "./.mcp-subagent/bootstrap/.mcp-subagent/state";
 const GITIGNORE_RUNTIME_HEADER: &str = "# mcp-subagent runtime artifacts";
+const RESULT_CONTRACT_VERSION: &str = "mcp-subagent.result.v1";
 const GITIGNORE_RUNTIME_RULES: [&str; 3] = [
     ".mcp-subagent/state/",
     ".mcp-subagent/logs/",
@@ -71,7 +78,7 @@ enum Commands {
         agents_dir: Option<PathBuf>,
     },
     Init {
-        #[arg(long, value_enum, default_value_t = InitPresetArg::ClaudeOpusSupervisor)]
+        #[arg(long, value_enum, default_value_t = InitPresetArg::ClaudeOpusSupervisorMinimal)]
         preset: InitPresetArg,
         #[arg(long, value_name = "ROOT_DIR")]
         root_dir: Option<PathBuf>,
@@ -86,7 +93,68 @@ enum Commands {
         #[arg(long, value_enum)]
         host: ConnectHostArg,
     },
+    Connect {
+        #[arg(long, value_enum)]
+        host: ConnectHostArg,
+        #[arg(long)]
+        run_host: bool,
+    },
+    Clean {
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
     ListAgents {
+        #[arg(long)]
+        json: bool,
+    },
+    Ps {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    Show {
+        handle_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Result {
+        handle_id: String,
+        #[arg(long, conflicts_with_all = ["normalized", "summary"])]
+        raw: bool,
+        #[arg(long, conflicts_with_all = ["raw", "summary"])]
+        normalized: bool,
+        #[arg(long, conflicts_with_all = ["raw", "normalized"])]
+        summary: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Logs {
+        handle_id: String,
+        #[arg(long, conflicts_with = "stderr")]
+        stdout: bool,
+        #[arg(long, conflicts_with = "stdout")]
+        stderr: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Timeline {
+        handle_id: String,
+        #[arg(long)]
+        event: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    Watch {
+        handle_id: String,
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+        #[arg(long)]
+        timeout_secs: Option<u64>,
         #[arg(long)]
         json: bool,
     },
@@ -112,6 +180,27 @@ enum Commands {
         json: bool,
     },
     Spawn {
+        agent: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        task_brief: Option<String>,
+        #[arg(long)]
+        parent_summary: Option<String>,
+        #[arg(long)]
+        stage: Option<String>,
+        #[arg(long = "plan")]
+        plan_ref: Option<String>,
+        #[arg(long = "selected-file")]
+        selected_files: Vec<PathBuf>,
+        #[arg(long = "selected-file-inline")]
+        selected_files_inline: Vec<PathBuf>,
+        #[arg(long)]
+        working_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    Submit {
         agent: String,
         #[arg(long)]
         task: String,
@@ -164,6 +253,7 @@ enum ArtifactKindArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum InitPresetArg {
     ClaudeOpusSupervisor,
+    ClaudeOpusSupervisorMinimal,
     CodexPrimaryBuilder,
     GeminiFrontendTeam,
     LocalOllamaFallback,
@@ -181,6 +271,7 @@ impl From<InitPresetArg> for InitPreset {
     fn from(value: InitPresetArg) -> Self {
         match value {
             InitPresetArg::ClaudeOpusSupervisor => InitPreset::ClaudeOpusSupervisor,
+            InitPresetArg::ClaudeOpusSupervisorMinimal => InitPreset::ClaudeOpusSupervisorMinimal,
             InitPresetArg::CodexPrimaryBuilder => InitPreset::CodexPrimaryBuilder,
             InitPresetArg::GeminiFrontendTeam => InitPreset::GeminiFrontendTeam,
             InitPresetArg::LocalOllamaFallback => InitPreset::LocalOllamaFallback,
@@ -195,6 +286,16 @@ impl From<ConnectHostArg> for ConnectHost {
             ConnectHostArg::Claude => ConnectHost::Claude,
             ConnectHostArg::Codex => ConnectHost::Codex,
             ConnectHostArg::Gemini => ConnectHost::Gemini,
+        }
+    }
+}
+
+impl ConnectHostArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            ConnectHostArg::Claude => "claude",
+            ConnectHostArg::Codex => "codex",
+            ConnectHostArg::Gemini => "gemini",
         }
     }
 }
@@ -286,6 +387,40 @@ async fn main() -> ExitCode {
             info!("starting command: connect-snippet");
             connect_snippet_command(cfg, host)
         }
+        Commands::Connect { host, run_host } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: connect");
+            connect_command(cfg, host, run_host)
+        }
+        Commands::Clean { all, dry_run, json } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: clean");
+            clean_command(cfg, all, dry_run, json)
+        }
         Commands::ListAgents { json } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
                 config_path,
@@ -302,6 +437,128 @@ async fn main() -> ExitCode {
             };
             info!("starting command: list-agents");
             list_agents(cfg, json).await
+        }
+        Commands::Ps { limit, json } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: ps");
+            list_runs(cfg, limit, json)
+        }
+        Commands::Show { handle_id, json } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: show");
+            show_run(cfg, handle_id, json)
+        }
+        Commands::Result {
+            handle_id,
+            raw,
+            normalized,
+            summary,
+            json,
+        } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: result");
+            read_result(cfg, handle_id, raw, normalized, summary, json)
+        }
+        Commands::Logs {
+            handle_id,
+            stdout,
+            stderr,
+            json,
+        } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: logs");
+            read_logs(cfg, handle_id, stdout, stderr, json)
+        }
+        Commands::Timeline {
+            handle_id,
+            event,
+            json,
+        } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: timeline");
+            read_timeline(cfg, handle_id, event, json)
+        }
+        Commands::Watch {
+            handle_id,
+            interval_ms,
+            timeout_secs,
+            json,
+        } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: watch");
+            watch_run(cfg, handle_id, interval_ms, timeout_secs, json).await
         }
         Commands::Run {
             agent,
@@ -370,6 +627,47 @@ async fn main() -> ExitCode {
                 }
             };
             info!("starting command: spawn");
+            spawn_agent(
+                cfg,
+                agent,
+                task,
+                task_brief,
+                parent_summary,
+                stage,
+                plan_ref,
+                selected_files,
+                selected_files_inline,
+                working_dir,
+                json,
+            )
+            .await
+        }
+        Commands::Submit {
+            agent,
+            task,
+            task_brief,
+            parent_summary,
+            stage,
+            plan_ref,
+            selected_files,
+            selected_files_inline,
+            working_dir,
+            json,
+        } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: submit");
             spawn_agent(
                 cfg,
                 agent,
@@ -537,6 +835,945 @@ fn doctor(cfg: RuntimeConfig, json: bool) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CleanEntry {
+    path: PathBuf,
+    bytes: u64,
+    action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CleanReport {
+    state_dir: PathBuf,
+    mode: String,
+    dry_run: bool,
+    reclaimed_bytes: u64,
+    cleaned: Vec<CleanEntry>,
+    missing: Vec<PathBuf>,
+    errors: Vec<String>,
+}
+
+fn clean_command(cfg: RuntimeConfig, all: bool, dry_run: bool, json: bool) -> ExitCode {
+    let report = clean_state_dir(&cfg.state_dir, all, dry_run);
+    if json {
+        print_json(&report);
+    } else {
+        print_clean_report(&report);
+    }
+    if report.errors.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn clean_state_dir(state_dir: &Path, all: bool, dry_run: bool) -> CleanReport {
+    let mut report = CleanReport {
+        state_dir: state_dir.to_path_buf(),
+        mode: if all {
+            "all".to_string()
+        } else {
+            "runtime".to_string()
+        },
+        dry_run,
+        reclaimed_bytes: 0,
+        cleaned: Vec::new(),
+        missing: Vec::new(),
+        errors: Vec::new(),
+    };
+    let targets = if all {
+        vec![state_dir.to_path_buf()]
+    } else {
+        vec![
+            state_dir.join("runs"),
+            state_dir.join("server.log"),
+            state_dir.join("logs"),
+        ]
+    };
+
+    for path in targets {
+        if !path.exists() {
+            report.missing.push(path);
+            continue;
+        }
+
+        let bytes = match estimate_path_size(&path) {
+            Ok(value) => value,
+            Err(err) => {
+                report.errors.push(format!(
+                    "failed to calculate size for `{}`: {err}",
+                    path.display()
+                ));
+                0
+            }
+        };
+
+        if !dry_run {
+            let removal_result = if path.is_dir() {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+            if let Err(err) = removal_result {
+                report
+                    .errors
+                    .push(format!("failed to remove `{}`: {err}", path.display()));
+                continue;
+            }
+        }
+
+        report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(bytes);
+        report.cleaned.push(CleanEntry {
+            path,
+            bytes,
+            action: if dry_run {
+                "would_remove".to_string()
+            } else {
+                "removed".to_string()
+            },
+        });
+    }
+
+    report
+}
+
+fn estimate_path_size(path: &Path) -> std::result::Result<u64, std::io::Error> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_file() || metadata.file_type().is_symlink() {
+        return Ok(metadata.len());
+    }
+    if metadata.is_dir() {
+        let mut total = 0u64;
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            total = total.saturating_add(estimate_path_size(&entry.path())?);
+        }
+        return Ok(total);
+    }
+    Ok(0)
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct StoredStructuredSummary {
+    summary: String,
+    key_findings: Vec<String>,
+    open_questions: Vec<String>,
+    next_steps: Vec<String>,
+    exit_code: i32,
+    verification_status: String,
+    touched_files: Vec<String>,
+    plan_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct StoredSummaryEnvelope {
+    contract_version: String,
+    parse_status: String,
+    summary: StoredStructuredSummary,
+    raw_fallback_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct StoredRunSpecSnapshot {
+    name: String,
+    provider: String,
+    model: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct StoredExecutionPolicy {
+    attempts_used: Option<u32>,
+    retries_used: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct StoredNativeUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct StoredRetryClassification {
+    classification: String,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct StoredRunRecord {
+    status: String,
+    created_at: Option<String>,
+    updated_at: String,
+    status_history: Vec<String>,
+    summary: Option<StoredSummaryEnvelope>,
+    artifact_index: Vec<ArtifactOutput>,
+    error_message: Option<String>,
+    task: String,
+    spec_snapshot: Option<StoredRunSpecSnapshot>,
+    execution_policy: Option<StoredExecutionPolicy>,
+    compiled_context_markdown: Option<String>,
+    usage: Option<StoredNativeUsage>,
+    retry_classification: Option<StoredRetryClassification>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UsageStatsOutput {
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    duration_ms: Option<u64>,
+    provider: String,
+    model: Option<String>,
+    provider_exit_code: Option<i32>,
+    retries: u32,
+    token_source: String,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    estimated_prompt_bytes: Option<u64>,
+    estimated_output_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunListEntry {
+    handle_id: String,
+    status: String,
+    updated_at: String,
+    provider: Option<String>,
+    agent: Option<String>,
+    task: String,
+    duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunShowOutput {
+    handle_id: String,
+    status: String,
+    updated_at: String,
+    error_message: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    normalization_status: Option<String>,
+    summary: Option<String>,
+    provider_exit_code: Option<i32>,
+    retries: u32,
+    retry_classification: String,
+    classification_reason: Option<String>,
+    usage: UsageStatsOutput,
+    artifact_index: Vec<ArtifactOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunResultOutput {
+    contract_version: String,
+    handle_id: String,
+    status: String,
+    view: String,
+    normalization_status: String,
+    summary: Option<String>,
+    native_result: Option<String>,
+    normalized_result: Option<StoredSummaryEnvelope>,
+    provider_exit_code: Option<i32>,
+    retries: u32,
+    retry_classification: String,
+    classification_reason: Option<String>,
+    usage: UsageStatsOutput,
+    error_message: Option<String>,
+    artifact_index: Vec<ArtifactOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunLogsOutput {
+    handle_id: String,
+    stdout: Option<String>,
+    stderr: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+struct RunTimelineEvent {
+    event: String,
+    timestamp: String,
+    detail: serde_json::Value,
+}
+
+impl Default for RunTimelineEvent {
+    fn default() -> Self {
+        Self {
+            event: String::new(),
+            timestamp: String::new(),
+            detail: serde_json::Value::Null,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunTimelineOutput {
+    handle_id: String,
+    events: Vec<RunTimelineEvent>,
+}
+
+fn should_use_color_output() -> bool {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    if std::env::var("TERM")
+        .ok()
+        .is_some_and(|term| term.eq_ignore_ascii_case("dumb"))
+    {
+        return false;
+    }
+    std::io::stdout().is_terminal()
+}
+
+fn ansi(text: &str, code: &str, enabled: bool) -> String {
+    if enabled {
+        format!("\u{1b}[{code}m{text}\u{1b}[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+fn status_badge(status: &str, color: bool) -> String {
+    let label = status.to_ascii_uppercase();
+    let code = match status {
+        "succeeded" => "1;32",
+        "failed" => "1;31",
+        "running" => "1;33",
+        "timed_out" => "1;35",
+        "cancelled" => "1;36",
+        _ => "1;34",
+    };
+    ansi(&label, code, color)
+}
+
+fn render_show_run_text(view: &RunShowOutput, color: bool) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{}  {}",
+        status_badge(&view.status, color),
+        view.handle_id
+    ));
+    lines.push(format!(
+        "provider={} model={} normalization={}",
+        view.provider.as_deref().unwrap_or("unknown"),
+        view.model.as_deref().unwrap_or("unknown"),
+        view.normalization_status
+            .as_deref()
+            .unwrap_or("not_available")
+    ));
+    lines.push(format!(
+        "updated={} duration_ms={} exit_code={} retries={} retry_classification={}",
+        view.updated_at,
+        view.usage
+            .duration_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        view.provider_exit_code
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        view.retries,
+        view.retry_classification
+    ));
+    if let Some(reason) = view.classification_reason.as_deref() {
+        lines.push(format!("retry_reason: {reason}"));
+    }
+    if let Some(summary) = view.summary.as_deref() {
+        lines.push(format!("summary: {summary}"));
+    }
+    if let Some(error) = view.error_message.as_deref() {
+        lines.push(format!("error: {}", ansi(error, "31", color)));
+    }
+    lines.join("\n")
+}
+
+fn runs_root(state_dir: &Path) -> PathBuf {
+    state_dir.join("runs")
+}
+
+fn run_json_path(state_dir: &Path, handle_id: &str) -> PathBuf {
+    runs_root(state_dir).join(handle_id).join("run.json")
+}
+
+fn run_events_path(state_dir: &Path, handle_id: &str) -> PathBuf {
+    runs_root(state_dir).join(handle_id).join("events.ndjson")
+}
+
+fn run_artifacts_root(state_dir: &Path, handle_id: &str) -> PathBuf {
+    runs_root(state_dir).join(handle_id).join("artifacts")
+}
+
+fn load_run_record(
+    state_dir: &Path,
+    handle_id: &str,
+) -> std::result::Result<StoredRunRecord, String> {
+    let path = run_json_path(state_dir, handle_id);
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    serde_json::from_str::<StoredRunRecord>(&raw)
+        .map_err(|err| format!("failed to parse {}: {err}", path.display()))
+}
+
+fn list_run_records(
+    state_dir: &Path,
+) -> std::result::Result<Vec<(String, StoredRunRecord)>, String> {
+    let root = runs_root(state_dir);
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = fs::read_dir(&root)
+        .map_err(|err| format!("failed to read run directory {}: {err}", root.display()))?;
+    let mut runs = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("failed to read run entry: {err}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|err| format!("failed to read run entry type: {err}"))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let handle_id = entry.file_name().to_string_lossy().to_string();
+        let record = match load_run_record(state_dir, &handle_id) {
+            Ok(record) => record,
+            Err(_) => continue,
+        };
+        runs.push((handle_id, record));
+    }
+    runs.sort_by_key(|(_, record)| parse_rfc3339(record.updated_at.as_str()));
+    runs.reverse();
+    Ok(runs)
+}
+
+fn load_run_events(
+    state_dir: &Path,
+    handle_id: &str,
+) -> std::result::Result<Vec<RunTimelineEvent>, String> {
+    let path = run_events_path(state_dir, handle_id);
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let mut events = Vec::new();
+    for (line_no, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event = serde_json::from_str::<RunTimelineEvent>(line).map_err(|err| {
+            format!(
+                "failed to parse {} line {}: {err}",
+                path.display(),
+                line_no + 1
+            )
+        })?;
+        events.push(event);
+    }
+    Ok(events)
+}
+
+fn parse_rfc3339(value: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
+}
+
+fn compute_duration_ms(started_at: Option<&str>, finished_at: &str) -> Option<u64> {
+    let start = parse_rfc3339(started_at?)?;
+    let finish = parse_rfc3339(finished_at)?;
+    if finish < start {
+        return None;
+    }
+    let millis = (finish - start).whole_milliseconds();
+    if millis < 0 {
+        None
+    } else {
+        Some(millis as u64)
+    }
+}
+
+fn is_terminal_status(status: &str) -> bool {
+    matches!(status, "succeeded" | "failed" | "timed_out" | "cancelled")
+}
+
+fn sanitize_rel_path(path: &str) -> std::result::Result<PathBuf, String> {
+    let rel = PathBuf::from(path);
+    if rel.is_absolute() {
+        return Err(format!("artifact path must be relative: {path}"));
+    }
+    if rel
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(format!("artifact path traversal is not allowed: {path}"));
+    }
+    Ok(rel)
+}
+
+fn read_artifact_from_disk(
+    state_dir: &Path,
+    handle_id: &str,
+    path: &str,
+) -> std::result::Result<Option<String>, String> {
+    let rel = sanitize_rel_path(path)?;
+    let full = run_artifacts_root(state_dir, handle_id).join(rel);
+    if !full.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&full)
+        .map_err(|err| format!("failed to read {}: {err}", full.display()))?;
+    Ok(Some(content))
+}
+
+fn estimate_tokens(bytes: Option<u64>) -> Option<u64> {
+    bytes.map(|value| (value.saturating_add(3)) / 4)
+}
+
+fn infer_provider_exit_code(record: &StoredRunRecord) -> Option<i32> {
+    if let Some(summary) = &record.summary {
+        return Some(summary.summary.exit_code);
+    }
+    let message = record.error_message.as_deref()?;
+    let marker = "exited with code ";
+    let idx = message.find(marker)?;
+    let code_start = idx + marker.len();
+    let tail = &message[code_start..];
+    let digits = tail
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '-')
+        .collect::<String>();
+    digits.parse::<i32>().ok()
+}
+
+fn build_usage_output(
+    state_dir: &Path,
+    handle_id: &str,
+    record: &StoredRunRecord,
+) -> UsageStatsOutput {
+    let started_at = record.created_at.clone();
+    let finished_at = if is_terminal_status(record.status.as_str()) {
+        Some(record.updated_at.clone())
+    } else {
+        None
+    };
+    let estimated_prompt_bytes = record
+        .compiled_context_markdown
+        .as_ref()
+        .map(|value| value.len() as u64);
+    let stdout_bytes = read_artifact_from_disk(state_dir, handle_id, "stdout.txt")
+        .ok()
+        .flatten()
+        .map(|text| text.len() as u64);
+    let stderr_bytes = read_artifact_from_disk(state_dir, handle_id, "stderr.txt")
+        .ok()
+        .flatten()
+        .map(|text| text.len() as u64);
+    let estimated_output_bytes = match (stdout_bytes, stderr_bytes) {
+        (None, None) => None,
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+    };
+    let estimated_input_tokens = estimate_tokens(estimated_prompt_bytes);
+    let estimated_output_tokens = estimate_tokens(estimated_output_bytes);
+    let estimated_total_tokens = match (estimated_input_tokens, estimated_output_tokens) {
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+        _ => None,
+    };
+    let native_usage = record.usage.as_ref();
+    let mut used_native = false;
+    let mut used_estimated = false;
+    let input_tokens = if let Some(value) = native_usage.and_then(|usage| usage.input_tokens) {
+        used_native = true;
+        Some(value)
+    } else {
+        if estimated_input_tokens.is_some() {
+            used_estimated = true;
+        }
+        estimated_input_tokens
+    };
+    let output_tokens = if let Some(value) = native_usage.and_then(|usage| usage.output_tokens) {
+        used_native = true;
+        Some(value)
+    } else {
+        if estimated_output_tokens.is_some() {
+            used_estimated = true;
+        }
+        estimated_output_tokens
+    };
+    let total_tokens = if let Some(value) = native_usage.and_then(|usage| usage.total_tokens) {
+        used_native = true;
+        Some(value)
+    } else if let (Some(input), Some(output)) = (input_tokens, output_tokens) {
+        Some(input.saturating_add(output))
+    } else {
+        if estimated_total_tokens.is_some() {
+            used_estimated = true;
+        }
+        estimated_total_tokens
+    };
+    let token_source = match (used_native, used_estimated) {
+        (true, true) => "mixed",
+        (true, false) => "native",
+        (false, true) => "estimated",
+        (false, false) => "unknown",
+    };
+
+    UsageStatsOutput {
+        started_at: started_at.clone(),
+        finished_at,
+        duration_ms: compute_duration_ms(started_at.as_deref(), &record.updated_at),
+        provider: record
+            .spec_snapshot
+            .as_ref()
+            .map(|spec| spec.provider.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
+        model: record
+            .spec_snapshot
+            .as_ref()
+            .and_then(|spec| spec.model.clone()),
+        provider_exit_code: infer_provider_exit_code(record),
+        retries: record
+            .execution_policy
+            .as_ref()
+            .and_then(|policy| policy.retries_used)
+            .unwrap_or(0),
+        token_source: token_source.to_string(),
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        estimated_prompt_bytes,
+        estimated_output_bytes,
+    }
+}
+
+fn resolve_retry_classification(record: &StoredRunRecord) -> (String, Option<String>) {
+    match &record.retry_classification {
+        Some(value) => {
+            let normalized = match value.classification.as_str() {
+                "retryable" | "non_retryable" | "unknown" => value.classification.clone(),
+                _ => "unknown".to_string(),
+            };
+            (normalized, value.reason.clone())
+        }
+        None => ("unknown".to_string(), None),
+    }
+}
+
+fn list_runs(cfg: RuntimeConfig, limit: usize, json: bool) -> ExitCode {
+    let entries = match list_run_records(&cfg.state_dir) {
+        Ok(items) => items,
+        Err(err) => {
+            eprintln!("ps failed: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let rows = entries
+        .into_iter()
+        .take(limit)
+        .map(|(handle_id, record)| RunListEntry {
+            handle_id,
+            status: record.status.clone(),
+            updated_at: record.updated_at.clone(),
+            provider: record
+                .spec_snapshot
+                .as_ref()
+                .map(|spec| spec.provider.clone()),
+            agent: record.spec_snapshot.as_ref().map(|spec| spec.name.clone()),
+            task: record.task.clone(),
+            duration_ms: compute_duration_ms(record.created_at.as_deref(), &record.updated_at),
+        })
+        .collect::<Vec<_>>();
+
+    if json {
+        print_json(&rows);
+    } else {
+        if rows.is_empty() {
+            println!("no runs found");
+            return ExitCode::SUCCESS;
+        }
+        for row in rows {
+            println!(
+                "{} [{}] {} provider={} agent={} duration_ms={}",
+                row.handle_id,
+                row.status,
+                row.updated_at,
+                row.provider.as_deref().unwrap_or("unknown"),
+                row.agent.as_deref().unwrap_or("unknown"),
+                row.duration_ms
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            );
+            println!("task: {}", row.task);
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
+fn show_run(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
+    let record = match load_run_record(&cfg.state_dir, &handle_id) {
+        Ok(record) => record,
+        Err(err) => {
+            eprintln!("show failed: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let usage = build_usage_output(&cfg.state_dir, &handle_id, &record);
+    let (retry_classification, classification_reason) = resolve_retry_classification(&record);
+    let view = RunShowOutput {
+        handle_id: handle_id.clone(),
+        status: record.status.clone(),
+        updated_at: record.updated_at.clone(),
+        error_message: record.error_message.clone(),
+        provider: record
+            .spec_snapshot
+            .as_ref()
+            .map(|spec| spec.provider.clone()),
+        model: record
+            .spec_snapshot
+            .as_ref()
+            .and_then(|spec| spec.model.clone()),
+        normalization_status: record
+            .summary
+            .as_ref()
+            .map(|summary| summary.parse_status.clone()),
+        summary: record
+            .summary
+            .as_ref()
+            .map(|summary| summary.summary.summary.clone()),
+        provider_exit_code: infer_provider_exit_code(&record),
+        retries: usage.retries,
+        retry_classification,
+        classification_reason,
+        usage,
+        artifact_index: record.artifact_index.clone(),
+    };
+
+    if json {
+        print_json(&view);
+    } else {
+        println!("{}", render_show_run_text(&view, should_use_color_output()));
+    }
+    ExitCode::SUCCESS
+}
+
+fn read_result(
+    cfg: RuntimeConfig,
+    handle_id: String,
+    raw: bool,
+    normalized: bool,
+    summary: bool,
+    json: bool,
+) -> ExitCode {
+    let record = match load_run_record(&cfg.state_dir, &handle_id) {
+        Ok(record) => record,
+        Err(err) => {
+            eprintln!("result failed: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let native_result = read_artifact_from_disk(&cfg.state_dir, &handle_id, "stdout.txt")
+        .ok()
+        .flatten()
+        .or_else(|| {
+            record
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.raw_fallback_text.clone())
+        });
+    let normalized_result = record.summary.clone();
+    let usage = build_usage_output(&cfg.state_dir, &handle_id, &record);
+    let (retry_classification, classification_reason) = resolve_retry_classification(&record);
+    let view = if raw {
+        "raw"
+    } else if normalized {
+        "normalized"
+    } else if summary {
+        "summary"
+    } else {
+        "auto"
+    };
+    let output = RunResultOutput {
+        contract_version: RESULT_CONTRACT_VERSION.to_string(),
+        handle_id: handle_id.clone(),
+        status: record.status.clone(),
+        view: view.to_string(),
+        normalization_status: record
+            .summary
+            .as_ref()
+            .map(|summary| summary.parse_status.clone())
+            .unwrap_or_else(|| "NotAvailable".to_string()),
+        summary: record
+            .summary
+            .as_ref()
+            .map(|summary| summary.summary.summary.clone()),
+        native_result: native_result.clone(),
+        normalized_result: normalized_result.clone(),
+        provider_exit_code: usage.provider_exit_code,
+        retries: usage.retries,
+        retry_classification,
+        classification_reason,
+        usage,
+        error_message: record.error_message.clone(),
+        artifact_index: record.artifact_index.clone(),
+    };
+
+    if json {
+        print_json(&output);
+        return ExitCode::SUCCESS;
+    }
+
+    if raw {
+        println!("{}", native_result.unwrap_or_default());
+        return ExitCode::SUCCESS;
+    }
+    if normalized {
+        match normalized_result {
+            Some(value) => print_json(&value),
+            None => println!(),
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    if let Some(summary) = record.summary.as_ref() {
+        println!("{}", summary.summary.summary);
+    } else if let Some(raw_text) = native_result {
+        println!("{raw_text}");
+    }
+    ExitCode::SUCCESS
+}
+
+fn read_logs(
+    cfg: RuntimeConfig,
+    handle_id: String,
+    stdout_only: bool,
+    stderr_only: bool,
+    json: bool,
+) -> ExitCode {
+    let stdout = if stderr_only {
+        None
+    } else {
+        read_artifact_from_disk(&cfg.state_dir, &handle_id, "stdout.txt")
+            .ok()
+            .flatten()
+    };
+    let stderr = if stdout_only {
+        None
+    } else {
+        read_artifact_from_disk(&cfg.state_dir, &handle_id, "stderr.txt")
+            .ok()
+            .flatten()
+    };
+
+    if json {
+        print_json(&RunLogsOutput {
+            handle_id,
+            stdout,
+            stderr,
+        });
+        return ExitCode::SUCCESS;
+    }
+
+    if let Some(out) = stdout {
+        println!("{out}");
+    }
+    if let Some(err) = stderr {
+        if !stdout_only && !err.is_empty() {
+            println!("{err}");
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn filter_timeline_events(
+    mut events: Vec<RunTimelineEvent>,
+    event: Option<&str>,
+) -> Vec<RunTimelineEvent> {
+    if let Some(name) = event {
+        events.retain(|item| item.event == name);
+    }
+    events
+}
+
+fn read_timeline(
+    cfg: RuntimeConfig,
+    handle_id: String,
+    event: Option<String>,
+    json: bool,
+) -> ExitCode {
+    let events = match load_run_events(&cfg.state_dir, &handle_id) {
+        Ok(items) => items,
+        Err(err) => {
+            eprintln!("timeline failed: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let events = filter_timeline_events(events, event.as_deref());
+
+    if json {
+        print_json(&RunTimelineOutput { handle_id, events });
+        return ExitCode::SUCCESS;
+    }
+
+    if events.is_empty() {
+        println!("no events found");
+        return ExitCode::SUCCESS;
+    }
+
+    for item in events {
+        let detail = serde_json::to_string(&item.detail).unwrap_or_else(|_| "null".to_string());
+        println!("{} [{}] {}", item.timestamp, item.event, detail);
+    }
+    ExitCode::SUCCESS
+}
+
+async fn watch_run(
+    cfg: RuntimeConfig,
+    handle_id: String,
+    interval_ms: u64,
+    timeout_secs: Option<u64>,
+    json: bool,
+) -> ExitCode {
+    let started = Instant::now();
+    let mut last_status = String::new();
+    loop {
+        let record = match load_run_record(&cfg.state_dir, &handle_id) {
+            Ok(record) => record,
+            Err(err) => {
+                eprintln!("watch failed: {err}");
+                return ExitCode::from(1);
+            }
+        };
+
+        if !json && record.status != last_status {
+            println!("{} {}", record.status, record.updated_at);
+            last_status = record.status.clone();
+        }
+
+        if is_terminal_status(record.status.as_str()) {
+            if json {
+                return show_run(cfg, handle_id, true);
+            }
+            return ExitCode::SUCCESS;
+        }
+
+        if timeout_secs.is_some_and(|secs| started.elapsed().as_secs() >= secs) {
+            eprintln!(
+                "watch timed out after {}s for handle `{}`",
+                timeout_secs.unwrap_or_default(),
+                handle_id
+            );
+            return ExitCode::from(1);
+        }
+
+        let sleep_ms = interval_ms.max(50);
+        tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
     }
 }
 
@@ -755,30 +1992,114 @@ fn gitignore_rule_matches_target(rule: &str, target: &str) -> bool {
 }
 
 fn connect_snippet_command(cfg: RuntimeConfig, host: ConnectHostArg) -> ExitCode {
-    let Some(first_agents_dir) = cfg.agents_dirs.first().cloned() else {
-        eprintln!("connect-snippet failed: no agents directory configured");
+    let paths = match resolve_connect_paths(cfg, "connect-snippet") {
+        Ok(paths) => paths,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let snippet = build_connect_snippet(host.into(), &paths);
+    println!("{snippet}");
+    ExitCode::SUCCESS
+}
+
+fn connect_command(cfg: RuntimeConfig, host: ConnectHostArg, run_host: bool) -> ExitCode {
+    let connect_host = host.into();
+    let paths = match resolve_connect_paths(cfg, "connect") {
+        Ok(paths) => paths,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let invocation = build_connect_invocation(connect_host, &paths);
+    if let Err(err) = run_connect_invocation(&invocation) {
+        eprintln!("connect failed: {err}");
         return ExitCode::from(1);
+    }
+    println!(
+        "registered mcp-subagent for host `{}` (agents_dir={}, state_dir={})",
+        host.as_str(),
+        paths.agents_dir.display(),
+        paths.state_dir.display()
+    );
+    if run_host {
+        let launch = build_host_launch_invocation(connect_host);
+        if let Err(err) = run_host_invocation(&launch) {
+            eprintln!("connect failed: {err}");
+            return ExitCode::from(1);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn resolve_connect_paths(
+    cfg: RuntimeConfig,
+    command_label: &str,
+) -> std::result::Result<mcp_subagent::connect::ConnectSnippetPaths, String> {
+    let Some(first_agents_dir) = cfg.agents_dirs.first().cloned() else {
+        return Err(format!(
+            "{command_label} failed: no agents directory configured"
+        ));
     };
 
     let cwd = match std::env::current_dir() {
         Ok(path) => path,
         Err(err) => {
-            eprintln!("connect-snippet failed: unable to resolve current directory: {err}");
-            return ExitCode::from(1);
+            return Err(format!(
+                "{command_label} failed: unable to resolve current directory: {err}"
+            ));
         }
     };
     let binary = match std::env::current_exe() {
         Ok(path) => path,
         Err(err) => {
-            eprintln!("connect-snippet failed: unable to resolve current executable: {err}");
-            return ExitCode::from(1);
+            return Err(format!(
+                "{command_label} failed: unable to resolve current executable: {err}"
+            ));
         }
     };
+    Ok(resolve_connect_snippet_paths(
+        &cwd,
+        binary,
+        first_agents_dir,
+        cfg.state_dir,
+    ))
+}
 
-    let paths = resolve_connect_snippet_paths(&cwd, binary, first_agents_dir, cfg.state_dir);
-    let snippet = build_connect_snippet(host.into(), &paths);
-    println!("{snippet}");
-    ExitCode::SUCCESS
+fn run_connect_invocation(invocation: &ConnectInvocation) -> std::result::Result<(), String> {
+    run_invocation(invocation, false)
+}
+
+fn run_host_invocation(invocation: &ConnectInvocation) -> std::result::Result<(), String> {
+    run_invocation(invocation, true)
+}
+
+fn run_invocation(
+    invocation: &ConnectInvocation,
+    interactive: bool,
+) -> std::result::Result<(), String> {
+    let mut command = Command::new(&invocation.executable);
+    command.args(&invocation.args);
+    if interactive {
+        command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+    }
+
+    let status = command
+        .status()
+        .map_err(|err| format!("failed to execute `{}`: {err}", invocation.executable))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{}` exited with status {}",
+            invocation.executable, status
+        ))
+    }
 }
 
 async fn list_agents(cfg: RuntimeConfig, json: bool) -> ExitCode {
@@ -911,6 +2232,13 @@ async fn spawn_agent(
 
     match server.spawn_agent(Parameters(input)).await {
         Ok(result) => {
+            let handle_id = result.0.handle_id.clone();
+            // In CLI mode the process exits as soon as this function returns,
+            // which would kill any background tokio task before it can persist
+            // its results.  Wait for the task to finish before printing and
+            // exiting.  True fire-and-forget spawning is only available in the
+            // long-lived MCP server mode.
+            server.wait_for_run(&handle_id).await;
             if json {
                 print_json(&result.0);
             } else {
@@ -1144,6 +2472,37 @@ fn print_init_report(report: &InitReport) {
     }
 }
 
+fn print_clean_report(report: &CleanReport) {
+    println!("# mcp-subagent clean");
+    println!("state_dir: {}", report.state_dir.display());
+    println!("mode: {}", report.mode);
+    println!("dry_run: {}", report.dry_run);
+    if !report.cleaned.is_empty() {
+        println!("cleaned:");
+        for entry in &report.cleaned {
+            println!(
+                "- [{}] {} ({} bytes)",
+                entry.action,
+                entry.path.display(),
+                entry.bytes
+            );
+        }
+    }
+    if !report.missing.is_empty() {
+        println!("missing:");
+        for path in &report.missing {
+            println!("- {}", path.display());
+        }
+    }
+    println!("reclaimed_bytes: {}", report.reclaimed_bytes);
+    if !report.errors.is_empty() {
+        println!("errors:");
+        for err in &report.errors {
+            println!("- {err}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1155,10 +2514,11 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        bootstrap_bridge_config_template, build_selected_file_inputs,
+        bootstrap_bridge_config_template, build_selected_file_inputs, clean_state_dir,
         ensure_bootstrap_bridge_config, ensure_project_gitignore, resolve_init_root,
         ArtifactKindArg, Cli, Commands, ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput,
-        DEFAULT_BOOTSTRAP_ROOT_RELATIVE,
+        RunResultOutput, RunShowOutput, StoredNativeUsage, StoredRunRecord, StoredRunSpecSnapshot,
+        UsageStatsOutput, DEFAULT_BOOTSTRAP_ROOT_RELATIVE, RESULT_CONTRACT_VERSION,
     };
 
     #[test]
@@ -1252,6 +2612,17 @@ mod tests {
                 assert!(in_place);
                 assert!(force);
                 assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn init_defaults_to_minimal_supervisor_preset() {
+        let cli = Cli::parse_from(["mcp-subagent", "init"]);
+        match cli.command {
+            Commands::Init { preset, .. } => {
+                assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisorMinimal));
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1400,6 +2771,487 @@ target/
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_connect_host() {
+        let cli = Cli::parse_from(["mcp-subagent", "connect", "--host", "codex"]);
+        match cli.command {
+            Commands::Connect { host, run_host } => {
+                assert!(matches!(host, ConnectHostArg::Codex));
+                assert!(!run_host);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_connect_with_run_host_flag() {
+        let cli = Cli::parse_from(["mcp-subagent", "connect", "--host", "gemini", "--run-host"]);
+        match cli.command {
+            Commands::Connect { host, run_host } => {
+                assert!(matches!(host, ConnectHostArg::Gemini));
+                assert!(run_host);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_clean_command_flags() {
+        let cli = Cli::parse_from(["mcp-subagent", "clean", "--all", "--dry-run", "--json"]);
+        match cli.command {
+            Commands::Clean { all, dry_run, json } => {
+                assert!(all);
+                assert!(dry_run);
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ps_command_flags() {
+        let cli = Cli::parse_from(["mcp-subagent", "ps", "--limit", "5", "--json"]);
+        match cli.command {
+            Commands::Ps { limit, json } => {
+                assert_eq!(limit, 5);
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_show_command() {
+        let cli = Cli::parse_from(["mcp-subagent", "show", "handle-1", "--json"]);
+        match cli.command {
+            Commands::Show { handle_id, json } => {
+                assert_eq!(handle_id, "handle-1");
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn show_renderer_emits_color_badge_when_enabled() {
+        let view = RunShowOutput {
+            handle_id: "run-1".to_string(),
+            status: "succeeded".to_string(),
+            updated_at: "2026-03-25T00:00:00Z".to_string(),
+            error_message: None,
+            provider: Some("Codex".to_string()),
+            model: Some("gpt-5.3-codex".to_string()),
+            normalization_status: Some("Validated".to_string()),
+            summary: Some("all good".to_string()),
+            provider_exit_code: Some(0),
+            retries: 0,
+            retry_classification: "non_retryable".to_string(),
+            classification_reason: Some("runner succeeded".to_string()),
+            usage: UsageStatsOutput {
+                started_at: Some("2026-03-25T00:00:00Z".to_string()),
+                finished_at: Some("2026-03-25T00:00:01Z".to_string()),
+                duration_ms: Some(1000),
+                provider: "Codex".to_string(),
+                model: Some("gpt-5.3-codex".to_string()),
+                provider_exit_code: Some(0),
+                retries: 0,
+                token_source: "estimated".to_string(),
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                total_tokens: Some(30),
+                estimated_prompt_bytes: Some(40),
+                estimated_output_bytes: Some(80),
+            },
+            artifact_index: Vec::new(),
+        };
+
+        let rendered = super::render_show_run_text(&view, true);
+        assert!(
+            rendered.contains("\u{1b}[1;32mSUCCEEDED\u{1b}[0m"),
+            "expected green succeeded badge: {rendered}"
+        );
+    }
+
+    #[test]
+    fn show_renderer_is_plain_when_color_disabled() {
+        let view = RunShowOutput {
+            handle_id: "run-2".to_string(),
+            status: "failed".to_string(),
+            updated_at: "2026-03-25T00:00:00Z".to_string(),
+            error_message: Some("boom".to_string()),
+            provider: Some("Codex".to_string()),
+            model: None,
+            normalization_status: Some("Invalid".to_string()),
+            summary: None,
+            provider_exit_code: Some(1),
+            retries: 1,
+            retry_classification: "retryable".to_string(),
+            classification_reason: Some("matched retryable keyword `timeout`".to_string()),
+            usage: UsageStatsOutput {
+                started_at: Some("2026-03-25T00:00:00Z".to_string()),
+                finished_at: Some("2026-03-25T00:00:01Z".to_string()),
+                duration_ms: Some(1000),
+                provider: "Codex".to_string(),
+                model: None,
+                provider_exit_code: Some(1),
+                retries: 1,
+                token_source: "estimated".to_string(),
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                total_tokens: Some(30),
+                estimated_prompt_bytes: Some(40),
+                estimated_output_bytes: Some(80),
+            },
+            artifact_index: Vec::new(),
+        };
+
+        let rendered = super::render_show_run_text(&view, false);
+        assert!(rendered.starts_with("FAILED  run-2"), "{rendered}");
+        assert!(
+            !rendered.contains("\u{1b}["),
+            "plain output must not contain ansi escapes: {rendered}"
+        );
+        assert!(rendered.contains("error: boom"), "{rendered}");
+    }
+
+    #[test]
+    fn parses_result_command_raw_mode() {
+        let cli = Cli::parse_from(["mcp-subagent", "result", "handle-1", "--raw"]);
+        match cli.command {
+            Commands::Result {
+                handle_id,
+                raw,
+                normalized,
+                summary,
+                ..
+            } => {
+                assert_eq!(handle_id, "handle-1");
+                assert!(raw);
+                assert!(!normalized);
+                assert!(!summary);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn result_json_schema_contains_stable_fields() {
+        let output = RunResultOutput {
+            contract_version: RESULT_CONTRACT_VERSION.to_string(),
+            handle_id: "h-1".to_string(),
+            status: "succeeded".to_string(),
+            view: "summary".to_string(),
+            normalization_status: "Validated".to_string(),
+            summary: Some("done".to_string()),
+            native_result: Some("native".to_string()),
+            normalized_result: None,
+            provider_exit_code: Some(0),
+            retries: 0,
+            retry_classification: "non_retryable".to_string(),
+            classification_reason: Some("runner succeeded".to_string()),
+            usage: UsageStatsOutput {
+                started_at: Some("2026-03-25T00:00:00Z".to_string()),
+                finished_at: Some("2026-03-25T00:00:01Z".to_string()),
+                duration_ms: Some(1000),
+                provider: "Codex".to_string(),
+                model: Some("gpt-5.3-codex".to_string()),
+                provider_exit_code: Some(0),
+                retries: 0,
+                token_source: "estimated".to_string(),
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                total_tokens: Some(30),
+                estimated_prompt_bytes: Some(40),
+                estimated_output_bytes: Some(80),
+            },
+            error_message: None,
+            artifact_index: Vec::new(),
+        };
+        let value = serde_json::to_value(&output).expect("serialize output");
+
+        for key in [
+            "contract_version",
+            "handle_id",
+            "status",
+            "view",
+            "normalization_status",
+            "native_result",
+            "normalized_result",
+            "usage",
+            "provider_exit_code",
+            "retries",
+            "retry_classification",
+            "classification_reason",
+            "error_message",
+            "artifact_index",
+        ] {
+            assert!(
+                value.get(key).is_some(),
+                "missing key `{key}` in result json: {value}"
+            );
+        }
+        assert_eq!(
+            value
+                .get("contract_version")
+                .and_then(serde_json::Value::as_str),
+            Some(RESULT_CONTRACT_VERSION)
+        );
+    }
+
+    #[test]
+    fn build_usage_output_prefers_native_tokens() {
+        let dir = tempdir().expect("tempdir");
+        let record = StoredRunRecord {
+            status: "succeeded".to_string(),
+            created_at: Some("2026-03-25T00:00:00Z".to_string()),
+            updated_at: "2026-03-25T00:00:01Z".to_string(),
+            spec_snapshot: Some(StoredRunSpecSnapshot {
+                name: "backend-coder".to_string(),
+                provider: "Codex".to_string(),
+                model: Some("gpt-5.3-codex".to_string()),
+            }),
+            usage: Some(StoredNativeUsage {
+                input_tokens: Some(111),
+                output_tokens: Some(222),
+                total_tokens: Some(333),
+            }),
+            ..StoredRunRecord::default()
+        };
+
+        let usage = super::build_usage_output(dir.path(), "run-native", &record);
+        assert_eq!(usage.token_source, "native");
+        assert_eq!(usage.input_tokens, Some(111));
+        assert_eq!(usage.output_tokens, Some(222));
+        assert_eq!(usage.total_tokens, Some(333));
+    }
+
+    #[test]
+    fn build_usage_output_marks_mixed_when_partial_native_usage_exists() {
+        let dir = tempdir().expect("tempdir");
+        let run_artifacts = dir.path().join("runs").join("run-mixed").join("artifacts");
+        fs::create_dir_all(&run_artifacts).expect("mkdir artifacts");
+        fs::write(run_artifacts.join("stdout.txt"), "x".repeat(400)).expect("write stdout");
+
+        let record = StoredRunRecord {
+            status: "succeeded".to_string(),
+            created_at: Some("2026-03-25T00:00:00Z".to_string()),
+            updated_at: "2026-03-25T00:00:01Z".to_string(),
+            usage: Some(StoredNativeUsage {
+                input_tokens: Some(50),
+                output_tokens: None,
+                total_tokens: None,
+            }),
+            ..StoredRunRecord::default()
+        };
+
+        let usage = super::build_usage_output(dir.path(), "run-mixed", &record);
+        assert_eq!(usage.token_source, "mixed");
+        assert_eq!(usage.input_tokens, Some(50));
+        assert!(usage.output_tokens.is_some(), "expected estimated fallback");
+    }
+
+    #[test]
+    fn resolve_retry_classification_defaults_unknown_when_missing() {
+        let record = StoredRunRecord::default();
+        let (classification, reason) = super::resolve_retry_classification(&record);
+        assert_eq!(classification, "unknown");
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn resolve_retry_classification_reads_persisted_value() {
+        let record = StoredRunRecord {
+            retry_classification: Some(super::StoredRetryClassification {
+                classification: "retryable".to_string(),
+                reason: Some("matched retryable keyword `network`".to_string()),
+            }),
+            ..StoredRunRecord::default()
+        };
+        let (classification, reason) = super::resolve_retry_classification(&record);
+        assert_eq!(classification, "retryable");
+        assert_eq!(
+            reason.as_deref(),
+            Some("matched retryable keyword `network`")
+        );
+    }
+
+    #[test]
+    fn parses_logs_command_stderr_mode() {
+        let cli = Cli::parse_from(["mcp-subagent", "logs", "handle-1", "--stderr", "--json"]);
+        match cli.command {
+            Commands::Logs {
+                handle_id,
+                stdout,
+                stderr,
+                json,
+            } => {
+                assert_eq!(handle_id, "handle-1");
+                assert!(!stdout);
+                assert!(stderr);
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_timeline_command_flags() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "timeline",
+            "handle-1",
+            "--event",
+            "parse",
+            "--json",
+        ]);
+        match cli.command {
+            Commands::Timeline {
+                handle_id,
+                event,
+                json,
+            } => {
+                assert_eq!(handle_id, "handle-1");
+                assert_eq!(event.as_deref(), Some("parse"));
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_run_events_and_filter_by_event_name() {
+        let dir = tempdir().expect("tempdir");
+        let run_dir = dir.path().join("runs").join("handle-1");
+        fs::create_dir_all(&run_dir).expect("mkdir run");
+        let events_path = run_dir.join("events.ndjson");
+        fs::write(
+            &events_path,
+            concat!(
+                "{\"event\":\"probe\",\"timestamp\":\"2026-03-25T00:00:00Z\",\"detail\":{\"status\":\"ready\"}}\n",
+                "{\"event\":\"parse\",\"timestamp\":\"2026-03-25T00:00:01Z\",\"detail\":{\"parse_status\":\"Validated\"}}\n"
+            ),
+        )
+        .expect("write events");
+
+        let events = super::load_run_events(dir.path(), "handle-1").expect("load events");
+        assert_eq!(events.len(), 2);
+        let filtered = super::filter_timeline_events(events, Some("parse"));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].event, "parse");
+    }
+
+    #[test]
+    fn parses_watch_command_flags() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "watch",
+            "handle-1",
+            "--interval-ms",
+            "250",
+            "--timeout-secs",
+            "15",
+        ]);
+        match cli.command {
+            Commands::Watch {
+                handle_id,
+                interval_ms,
+                timeout_secs,
+                json,
+            } => {
+                assert_eq!(handle_id, "handle-1");
+                assert_eq!(interval_ms, 250);
+                assert_eq!(timeout_secs, Some(15));
+                assert!(!json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_submit_command_flags() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "submit",
+            "fast-researcher",
+            "--task",
+            "find docs",
+            "--json",
+        ]);
+        match cli.command {
+            Commands::Submit {
+                agent, task, json, ..
+            } => {
+                assert_eq!(agent, "fast-researcher");
+                assert_eq!(task, "find docs");
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clean_runtime_targets_removes_runs_and_logs() {
+        let dir = tempdir().expect("tempdir");
+        let state_dir = dir.path().join("state");
+        let runs_dir = state_dir.join("runs/handle-1");
+        let logs_dir = state_dir.join("logs");
+        let server_log = state_dir.join("server.log");
+        fs::create_dir_all(&runs_dir).expect("create runs");
+        fs::create_dir_all(&logs_dir).expect("create logs");
+        fs::write(runs_dir.join("stdout.log"), "out").expect("write run log");
+        fs::write(logs_dir.join("app.log"), "log").expect("write app log");
+        fs::write(&server_log, "server").expect("write server log");
+
+        let report = clean_state_dir(&state_dir, false, false);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert!(!state_dir.join("runs").exists());
+        assert!(!state_dir.join("logs").exists());
+        assert!(!server_log.exists());
+        assert!(!report.cleaned.is_empty());
+    }
+
+    #[test]
+    fn clean_dry_run_keeps_files() {
+        let dir = tempdir().expect("tempdir");
+        let state_dir = dir.path().join("state");
+        let runs_dir = state_dir.join("runs/handle-1");
+        fs::create_dir_all(&runs_dir).expect("create runs");
+        fs::write(runs_dir.join("stdout.log"), "out").expect("write run log");
+
+        let report = clean_state_dir(&state_dir, false, true);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert!(state_dir.join("runs").exists());
+        assert!(report
+            .cleaned
+            .iter()
+            .all(|entry| entry.action == "would_remove"));
+    }
+
+    #[test]
+    fn clean_all_removes_state_dir() {
+        let dir = tempdir().expect("tempdir");
+        let state_dir = dir.path().join("state");
+        fs::create_dir_all(state_dir.join("runs/handle-1")).expect("create runs");
+        fs::write(state_dir.join("server.log"), "server").expect("write server log");
+
+        let report = clean_state_dir(&state_dir, true, false);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert!(!state_dir.exists());
+        assert_eq!(report.mode, "all");
     }
 
     #[test]

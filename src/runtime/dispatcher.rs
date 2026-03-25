@@ -14,9 +14,10 @@ use crate::{
         context::ContextCompiler,
         runners::{AgentRunner, RunnerTerminalState},
         summary::{SummaryEnvelope, SummaryParseStatus},
+        usage::NativeUsage,
     },
     spec::{
-        runtime_policy::{ApprovalPolicy, SandboxPolicy, WorkingDirPolicy},
+        runtime_policy::{ApprovalPolicy, ParsePolicy, SandboxPolicy, WorkingDirPolicy},
         validate::validate_agent_spec,
         workflow::WorkflowStageKind,
         Provider,
@@ -25,7 +26,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     Received,
     Validating,
@@ -46,7 +47,44 @@ pub enum RunStatus {
 
 impl std::fmt::Display for RunStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        let s = match self {
+            Self::Received => "received",
+            Self::Validating => "validating",
+            Self::ProbingProvider => "probing_provider",
+            Self::PreparingWorkspace => "preparing_workspace",
+            Self::ResolvingMemory => "resolving_memory",
+            Self::CompilingContext => "compiling_context",
+            Self::Launching => "launching",
+            Self::Running => "running",
+            Self::Collecting => "collecting",
+            Self::ParsingSummary => "parsing_summary",
+            Self::Finalizing => "finalizing",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+        };
+        write!(f, "{s}")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryClassification {
+    Retryable,
+    NonRetryable,
+    #[default]
+    Unknown,
+}
+
+impl std::fmt::Display for RetryClassification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Retryable => "retryable",
+            Self::NonRetryable => "non_retryable",
+            Self::Unknown => "unknown",
+        };
+        write!(f, "{s}")
     }
 }
 
@@ -71,6 +109,10 @@ pub struct RunMetadata {
     pub max_attempts: u32,
     #[serde(default)]
     pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub retry_classification: RetryClassification,
+    #[serde(default)]
+    pub retry_classification_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +123,8 @@ pub struct DispatchResult {
     pub stdout: String,
     pub stderr: String,
     pub compiled_context_markdown: String,
+    #[serde(default)]
+    pub native_usage: Option<NativeUsage>,
 }
 
 #[derive(Debug)]
@@ -132,6 +176,8 @@ where
         let mut final_summary = None;
         let mut final_status = RunStatus::Failed;
         let mut final_error_message = Some("dispatcher terminated unexpectedly".to_string());
+        let mut final_retry_classification = RetryClassification::Unknown;
+        let mut final_retry_classification_reason = None;
 
         for attempt in 1..=attempt_budget {
             tracker.metadata.attempts_used = attempt;
@@ -144,7 +190,8 @@ where
             let summary_envelope = self
                 .compiler
                 .parse_summary(&execution.stdout, &execution.stderr)?;
-            let attempt_assessment = assess_attempt_outcome(&execution, &summary_envelope);
+            let attempt_assessment =
+                assess_attempt_outcome(&execution, &summary_envelope, &spec.runtime.parse_policy);
 
             let retry_exhausted = attempt >= attempt_budget;
             let can_retry = attempt_assessment.retryable && !retry_exhausted;
@@ -153,6 +200,8 @@ where
             final_summary = Some(summary_envelope);
             final_status = attempt_assessment.status;
             final_error_message = attempt_assessment.error_message;
+            final_retry_classification = attempt_assessment.retry_classification;
+            final_retry_classification_reason = attempt_assessment.retry_classification_reason;
 
             if can_retry {
                 if retry_policy.backoff_secs > 0 {
@@ -174,6 +223,10 @@ where
                     Some(message) => Some(format!("{message}; {exhausted_message}")),
                     None => Some(exhausted_message),
                 };
+                final_retry_classification_reason = Some(match final_retry_classification_reason {
+                    Some(reason) => format!("{reason}; retry budget exhausted"),
+                    None => "retry budget exhausted".to_string(),
+                });
             }
             break;
         }
@@ -190,8 +243,15 @@ where
         })?;
 
         tracker.metadata.retry_attempts = tracker.metadata.attempts_used.saturating_sub(1);
+        tracker.metadata.retry_classification = final_retry_classification;
+        tracker.metadata.retry_classification_reason = final_retry_classification_reason;
         tracker.transition(RunStatus::Finalizing);
         tracker.finish(final_status, final_error_message);
+        let native_usage = crate::runtime::usage::parse_native_usage(
+            &spec.core.provider,
+            &execution.stdout,
+            &execution.stderr,
+        );
 
         Ok(DispatchResult {
             metadata: tracker.metadata,
@@ -199,6 +259,7 @@ where
             stdout: execution.stdout,
             stderr: execution.stderr,
             compiled_context_markdown,
+            native_usage,
         })
     }
 }
@@ -208,11 +269,14 @@ struct AttemptAssessment {
     status: RunStatus,
     error_message: Option<String>,
     retryable: bool,
+    retry_classification: RetryClassification,
+    retry_classification_reason: Option<String>,
 }
 
 fn assess_attempt_outcome(
     execution: &crate::runtime::runners::RunnerExecution,
     summary_envelope: &SummaryEnvelope,
+    parse_policy: &ParsePolicy,
 ) -> AttemptAssessment {
     match &execution.terminal_state {
         RunnerTerminalState::Succeeded => {
@@ -221,42 +285,89 @@ fn assess_attempt_outcome(
                     status: RunStatus::Succeeded,
                     error_message: None,
                     retryable: false,
+                    retry_classification: RetryClassification::NonRetryable,
+                    retry_classification_reason: Some(
+                        "runner succeeded with validated structured summary".to_string(),
+                    ),
                 }
             } else {
                 AttemptAssessment {
-                    status: RunStatus::Failed,
-                    error_message: Some(format!(
-                        "structured summary parse status is {}",
-                        summary_envelope.parse_status
-                    )),
-                    retryable: matches!(
-                        summary_envelope.parse_status,
-                        SummaryParseStatus::Invalid | SummaryParseStatus::Degraded
+                    status: if matches!(parse_policy, ParsePolicy::BestEffort) {
+                        RunStatus::Succeeded
+                    } else {
+                        RunStatus::Failed
+                    },
+                    error_message: if matches!(parse_policy, ParsePolicy::BestEffort) {
+                        None
+                    } else {
+                        Some(format!(
+                            "structured summary parse status is {}",
+                            summary_envelope.parse_status
+                        ))
+                    },
+                    retryable: !matches!(parse_policy, ParsePolicy::BestEffort)
+                        && matches!(
+                            summary_envelope.parse_status,
+                            SummaryParseStatus::Invalid | SummaryParseStatus::Degraded
+                        ),
+                    retry_classification: if matches!(parse_policy, ParsePolicy::BestEffort) {
+                        RetryClassification::NonRetryable
+                    } else {
+                        RetryClassification::Retryable
+                    },
+                    retry_classification_reason: Some(
+                        if matches!(parse_policy, ParsePolicy::BestEffort) {
+                            format!(
+                                "parse_status={} accepted by best_effort policy",
+                                summary_envelope.parse_status
+                            )
+                        } else {
+                            format!(
+                                "parse_status={} requires retry under strict policy",
+                                summary_envelope.parse_status
+                            )
+                        },
                     ),
                 }
             }
         }
-        RunnerTerminalState::Failed { message } => AttemptAssessment {
-            status: RunStatus::Failed,
-            error_message: Some(message.clone()),
-            retryable: is_retryable_error_message(message),
-        },
+        RunnerTerminalState::Failed { message } => {
+            let classification = classify_error_message(message);
+            AttemptAssessment {
+                status: RunStatus::Failed,
+                error_message: Some(message.clone()),
+                retryable: classification.retryable,
+                retry_classification: classification.classification,
+                retry_classification_reason: Some(classification.reason),
+            }
+        }
         RunnerTerminalState::TimedOut => AttemptAssessment {
             status: RunStatus::TimedOut,
             error_message: Some("runner exceeded timeout".to_string()),
             retryable: true,
+            retry_classification: RetryClassification::Retryable,
+            retry_classification_reason: Some("runner execution timed out".to_string()),
         },
         RunnerTerminalState::Cancelled => AttemptAssessment {
             status: RunStatus::Cancelled,
             error_message: Some("runner cancelled by request".to_string()),
             retryable: false,
+            retry_classification: RetryClassification::NonRetryable,
+            retry_classification_reason: Some("runner cancelled by user request".to_string()),
         },
     }
 }
 
-fn is_retryable_error_message(message: &str) -> bool {
+#[derive(Debug)]
+struct RetryMessageClassification {
+    classification: RetryClassification,
+    retryable: bool,
+    reason: String,
+}
+
+fn classify_error_message(message: &str) -> RetryMessageClassification {
     let lowered = message.to_ascii_lowercase();
-    [
+    let retryable_keywords = [
         "timeout",
         "timed out",
         "temporary",
@@ -268,9 +379,44 @@ fn is_retryable_error_message(message: &str) -> bool {
         "unavailable",
         "econnreset",
         "broken pipe",
-    ]
-    .iter()
-    .any(|keyword| lowered.contains(keyword))
+    ];
+    if let Some(keyword) = retryable_keywords
+        .iter()
+        .find(|keyword| lowered.contains(**keyword))
+    {
+        return RetryMessageClassification {
+            classification: RetryClassification::Retryable,
+            retryable: true,
+            reason: format!("matched retryable keyword `{keyword}`"),
+        };
+    }
+
+    let non_retryable_keywords = [
+        "invalid_json_schema",
+        "invalid schema",
+        "invalid_request_error",
+        "permission denied",
+        "unauthorized",
+        "missing binary",
+        "spec validation",
+        "unsupported",
+    ];
+    if let Some(keyword) = non_retryable_keywords
+        .iter()
+        .find(|keyword| lowered.contains(**keyword))
+    {
+        return RetryMessageClassification {
+            classification: RetryClassification::NonRetryable,
+            retryable: false,
+            reason: format!("matched non-retryable keyword `{keyword}`"),
+        };
+    }
+
+    RetryMessageClassification {
+        classification: RetryClassification::Unknown,
+        retryable: false,
+        reason: "no retryable/non-retryable keyword matched".to_string(),
+    }
 }
 
 fn enforce_workflow_gate(spec: &crate::spec::AgentSpec, request: &RunRequest) -> Result<()> {
@@ -781,6 +927,8 @@ impl RunTracker {
             retry_attempts: 0,
             max_attempts: 1,
             max_turns: None,
+            retry_classification: RetryClassification::Unknown,
+            retry_classification_reason: None,
         };
         Self { metadata }
     }
@@ -826,7 +974,9 @@ mod tests {
         },
         spec::{
             core::{AgentSpecCore, Provider},
-            runtime_policy::{ApprovalPolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
+            runtime_policy::{
+                ApprovalPolicy, ParsePolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy,
+            },
             workflow::{WorkflowGatePolicy, WorkflowSpec, WorkflowStageKind},
             AgentSpec,
         },
@@ -1043,6 +1193,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_best_effort_succeeds_when_summary_is_degraded() {
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            SequenceRunner::new(vec![RunnerExecution {
+                terminal_state: RunnerTerminalState::Succeeded,
+                stdout: "plain text without summary envelope".to_string(),
+                stderr: String::new(),
+            }]),
+        );
+
+        let result = dispatcher
+            .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .await
+            .expect("dispatch run");
+
+        assert_eq!(result.metadata.status, RunStatus::Succeeded);
+        assert_eq!(result.summary.parse_status, SummaryParseStatus::Degraded);
+        assert_eq!(result.metadata.error_message, None);
+    }
+
+    #[tokio::test]
+    async fn dispatch_strict_fails_when_summary_is_degraded() {
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            SequenceRunner::new(vec![RunnerExecution {
+                terminal_state: RunnerTerminalState::Succeeded,
+                stdout: "plain text without summary envelope".to_string(),
+                stderr: String::new(),
+            }]),
+        );
+        let mut spec = sample_spec();
+        spec.runtime.parse_policy = ParsePolicy::Strict;
+
+        let result = dispatcher
+            .run(&spec, &sample_request(), ResolvedMemory::default())
+            .await
+            .expect("dispatch run");
+
+        assert_eq!(result.metadata.status, RunStatus::Failed);
+        assert_eq!(
+            result.metadata.retry_classification,
+            super::RetryClassification::Retryable
+        );
+        assert_eq!(result.summary.parse_status, SummaryParseStatus::Degraded);
+        assert!(result
+            .metadata
+            .error_message
+            .as_deref()
+            .is_some_and(|msg| msg.contains("structured summary parse status is Degraded")));
+    }
+
+    #[tokio::test]
     async fn dispatch_reaches_failed_and_keeps_summary() {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
@@ -1060,6 +1262,10 @@ mod tests {
 
         assert_eq!(result.metadata.status, RunStatus::Failed);
         assert_common_lifecycle(&result.metadata.status_history);
+        assert_eq!(
+            result.metadata.retry_classification,
+            super::RetryClassification::Unknown
+        );
         assert_eq!(result.summary.parse_status, SummaryParseStatus::Degraded);
         assert_eq!(
             result.summary.summary.verification_status,
@@ -1084,6 +1290,10 @@ mod tests {
             .expect("dispatch run");
 
         assert_eq!(result.metadata.status, RunStatus::TimedOut);
+        assert_eq!(
+            result.metadata.retry_classification,
+            super::RetryClassification::Retryable
+        );
         assert_common_lifecycle(&result.metadata.status_history);
     }
 
@@ -1100,6 +1310,10 @@ mod tests {
             .expect("dispatch run");
 
         assert_eq!(result.metadata.status, RunStatus::Cancelled);
+        assert_eq!(
+            result.metadata.retry_classification,
+            super::RetryClassification::NonRetryable
+        );
         assert_common_lifecycle(&result.metadata.status_history);
     }
 
@@ -1134,6 +1348,10 @@ mod tests {
         assert_eq!(result.metadata.retry_attempts, 1);
         assert_eq!(result.metadata.max_attempts, 2);
         assert_eq!(result.metadata.max_turns, Some(2));
+        assert_eq!(
+            result.metadata.retry_classification,
+            super::RetryClassification::NonRetryable
+        );
         assert_eq!(result.metadata.error_message, None);
     }
 
@@ -1168,6 +1386,10 @@ mod tests {
         assert_eq!(result.metadata.retry_attempts, 0);
         assert_eq!(result.metadata.max_attempts, 3);
         assert_eq!(result.metadata.max_turns, Some(1));
+        assert_eq!(
+            result.metadata.retry_classification,
+            super::RetryClassification::Retryable
+        );
         assert!(result
             .metadata
             .error_message
@@ -1185,7 +1407,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
         request.working_dir = temp.path().to_path_buf();
         request.selected_files = vec![SelectedFile {
             path: PathBuf::from("src/a.rs"),
@@ -1218,7 +1440,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
         request.working_dir = temp.path().to_path_buf();
         request.selected_files = vec![SelectedFile {
             path: PathBuf::from("src/a.rs"),
@@ -1247,7 +1469,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
         request.working_dir = temp.path().to_path_buf();
         request.selected_files = vec![
             SelectedFile {
@@ -1293,7 +1515,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
         request.working_dir = temp.path().to_path_buf();
         request.task = "add new public API endpoint for parser".to_string();
 
@@ -1328,7 +1550,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
         request.working_dir = temp.path().to_path_buf();
         request.task = "run database migration from v1 to v2".to_string();
 
@@ -1363,7 +1585,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
         request.working_dir = temp.path().to_path_buf();
 
         let gate = WorkflowGatePolicy {
@@ -1395,7 +1617,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Research".to_string());
+        request.stage = Some("research".to_string());
 
         let err = dispatcher
             .run(
@@ -1422,7 +1644,7 @@ mod tests {
         );
         let mut request = sample_request();
         request.parent_summary = Some("runtime_depth=1 previous nested run".to_string());
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
 
         let err = dispatcher
             .run(
@@ -1451,7 +1673,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Research".to_string());
+        request.stage = Some("research".to_string());
 
         let result = dispatcher
             .run(&spec, &request, ResolvedMemory::default())
@@ -1473,7 +1695,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Build".to_string());
+        request.stage = Some("build".to_string());
 
         let err = dispatcher
             .run(&spec, &request, ResolvedMemory::default())
@@ -1514,7 +1736,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Research".to_string());
+        request.stage = Some("research".to_string());
 
         let spec = sample_spec_for_stage_routing(
             "backend-coder",
@@ -1537,7 +1759,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Plan".to_string());
+        request.stage = Some("plan".to_string());
 
         let spec = sample_spec_for_stage_routing(
             "fast-researcher",
@@ -1560,7 +1782,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Review".to_string());
+        request.stage = Some("review".to_string());
 
         let spec = sample_spec_for_stage_routing(
             "frontend-builder",
@@ -1583,7 +1805,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Review".to_string());
+        request.stage = Some("review".to_string());
 
         let spec = sample_spec_for_stage_routing(
             "correctness-reviewer",
@@ -1627,7 +1849,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Review".to_string());
+        request.stage = Some("review".to_string());
         request.selected_files = vec![SelectedFile {
             path: PathBuf::from("src/a.rs"),
             rationale: None,
@@ -1671,7 +1893,7 @@ mod tests {
             }),
         );
         let mut request = sample_request();
-        request.stage = Some("Review".to_string());
+        request.stage = Some("review".to_string());
         request.selected_files = vec![SelectedFile {
             path: PathBuf::from("src/a.rs"),
             rationale: None,
@@ -1685,5 +1907,27 @@ mod tests {
             .await
             .expect("parent summary style evidence should satisfy dual review");
         assert_eq!(result.metadata.status, RunStatus::Succeeded);
+    }
+
+    #[test]
+    fn classify_error_message_marks_non_retryable_schema_errors() {
+        let classified = super::classify_error_message(
+            "codex exited with code 1: invalid_json_schema for response format",
+        );
+        assert_eq!(
+            classified.classification,
+            super::RetryClassification::NonRetryable
+        );
+        assert!(!classified.retryable);
+    }
+
+    #[test]
+    fn classify_error_message_marks_unknown_when_unmatched() {
+        let classified = super::classify_error_message("runner failed with unknown reason");
+        assert_eq!(
+            classified.classification,
+            super::RetryClassification::Unknown
+        );
+        assert!(!classified.retryable);
     }
 }
