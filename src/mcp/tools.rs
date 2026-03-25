@@ -335,6 +335,171 @@ fn latest_event(events: &[RunEventOutput]) -> Option<&RunEventOutput> {
     events.last()
 }
 
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn classify_block_reason_from_text(text: &str) -> Option<&'static str> {
+    let lowered = text.to_ascii_lowercase();
+    if contains_any(
+        &lowered,
+        &[
+            "trusted folder",
+            "trust this folder",
+            "waiting_for_trust",
+            "waiting for trust",
+            "trust required",
+        ],
+    ) {
+        return Some("trust_required");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "auth required",
+            "authentication",
+            "unauthorized",
+            "login required",
+            "credentials",
+            "api key",
+            "keychain",
+        ],
+    ) {
+        return Some("auth_required");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "tool approval",
+            "approval required",
+            "permission denied",
+            "consent required",
+            "approval mode",
+        ],
+    ) {
+        return Some("tool_approval_required");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "skill conflict",
+            "skills conflict",
+            "skill discovery",
+            "find-skills",
+            ".agents/skills",
+            ".gemini/skills",
+        ],
+    ) {
+        return Some("skill_discovery");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "workspace scan",
+            "scanning workspace",
+            "indexing workspace",
+            "workspace settings",
+        ],
+    ) {
+        return Some("workspace_scan");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "provider `",
+            "provider unavailable",
+            "missingbinary",
+            "binary `",
+            "not found in path",
+        ],
+    ) {
+        return Some("provider_unavailable");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "structured summary parse status is invalid",
+            "invalid summary json",
+            "sentinel",
+            "structured summary parsing failed",
+        ],
+    ) {
+        return Some("normalization_failed");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "tls handshake eof",
+            "stream disconnected before completion",
+            "connection refused",
+            "network error",
+        ],
+    ) {
+        return Some("network_error");
+    }
+    None
+}
+
+fn classify_block_reason_from_events(
+    events: &[RunEventOutput],
+    stalled: bool,
+) -> Option<&'static str> {
+    for event in events.iter().rev() {
+        match event.event.as_str() {
+            "provider.waiting_for_trust" => return Some("trust_required"),
+            "provider.waiting_for_auth" => return Some("auth_required"),
+            "provider.waiting_for_tool_approval" => return Some("tool_approval_required"),
+            "provider.waiting_for_consent" => return Some("consent_required"),
+            "run.queued" if stalled => return Some("queueing"),
+            "workspace.prepare.started" if stalled => return Some("workspace_prepare"),
+            "provider.probe.started" if stalled => return Some("provider_probe"),
+            "provider.boot.started" if stalled => return Some("provider_boot"),
+            _ => {}
+        }
+        if let Some(message) = event.message.as_deref() {
+            if let Some(reason) = classify_block_reason_from_text(message) {
+                return Some(reason);
+            }
+        }
+        if !event.detail.is_null() {
+            let detail_text = event.detail.to_string();
+            if let Some(reason) = classify_block_reason_from_text(&detail_text) {
+                return Some(reason);
+            }
+        }
+    }
+    None
+}
+
+fn classify_block_reason(
+    status: &RunStatus,
+    phase: Option<&str>,
+    stalled: bool,
+    events: &[RunEventOutput],
+    error_message: Option<&str>,
+) -> Option<String> {
+    if let Some(message) = error_message {
+        if let Some(reason) = classify_block_reason_from_text(message) {
+            return Some(reason.to_string());
+        }
+    }
+    if let Some(reason) = classify_block_reason_from_events(events, stalled) {
+        return Some(reason.to_string());
+    }
+    if !is_terminal_status(status) && stalled {
+        let fallback = match phase.unwrap_or_default() {
+            "queueing" => "queueing",
+            "workspace_prepare" => "workspace_prepare",
+            "provider_probe" => "provider_probe",
+            "provider_boot" => "provider_boot",
+            "running" => "provider_output_wait",
+            _ => "unknown_startup_wait",
+        };
+        return Some(fallback.to_string());
+    }
+    None
+}
+
 #[derive(Debug, Clone, Default)]
 struct EventRuntimeSnapshot {
     state: Option<String>,
@@ -342,12 +507,14 @@ struct EventRuntimeSnapshot {
     last_event_at: Option<String>,
     last_event_age_ms: Option<u64>,
     stalled: bool,
+    block_reason: Option<String>,
 }
 
 fn build_event_runtime_snapshot(
     status: &RunStatus,
     events: &[RunEventOutput],
     now: OffsetDateTime,
+    error_message: Option<&str>,
 ) -> EventRuntimeSnapshot {
     let latest = latest_event(events);
     let last_event_at = latest
@@ -361,12 +528,17 @@ fn build_event_runtime_snapshot(
         }
     });
     let stalled = !is_terminal_status(status) && last_event_age_ms.is_some_and(|ms| ms >= 8_000);
+    let state = latest.and_then(|event| event.state.clone());
+    let phase = latest.and_then(|event| event.phase.clone());
+    let block_reason =
+        classify_block_reason(status, phase.as_deref(), stalled, events, error_message);
     EventRuntimeSnapshot {
-        state: latest.and_then(|event| event.state.clone()),
-        phase: latest.and_then(|event| event.phase.clone()),
+        state,
+        phase,
         last_event_at,
         last_event_age_ms,
         stalled,
+        block_reason,
     }
 }
 
@@ -414,6 +586,13 @@ fn build_agent_stats_output(
     let phase = latest.and_then(|event| event.phase.clone());
     let stalled =
         !is_terminal_status(&record.status) && last_event_age_ms.is_some_and(|ms| ms >= 8_000);
+    let block_reason = classify_block_reason(
+        &record.status,
+        phase.as_deref(),
+        stalled,
+        events,
+        record.error_message.as_deref(),
+    );
 
     GetAgentStatsOutput {
         handle_id: handle_id.to_string(),
@@ -423,6 +602,7 @@ fn build_agent_stats_output(
         last_event_at,
         last_event_age_ms,
         stalled,
+        block_reason,
         queue_ms,
         provider_probe_ms,
         execution_ms,
@@ -534,7 +714,12 @@ impl McpSubagentServer {
             .take(limit)
             .map(|(handle_id, record)| {
                 let events = load_run_events(self.state_dir(), &handle_id).unwrap_or_default();
-                let runtime = build_event_runtime_snapshot(&record.status, &events, now);
+                let runtime = build_event_runtime_snapshot(
+                    &record.status,
+                    &events,
+                    now,
+                    record.error_message.as_deref(),
+                );
                 let duration_ms = compute_duration_ms(record.created_at, record.updated_at);
                 let elapsed_ms = if is_terminal_status(&record.status) {
                     duration_ms
@@ -551,6 +736,7 @@ impl McpSubagentServer {
                     last_event_age_ms: runtime.last_event_age_ms,
                     stalled: Some(runtime.stalled),
                     elapsed_ms,
+                    block_reason: runtime.block_reason,
                     provider: record
                         .spec_snapshot
                         .as_ref()
@@ -1151,8 +1337,12 @@ impl McpSubagentServer {
     ) -> std::result::Result<Json<AgentStatusOutput>, ErrorData> {
         let record = self.get_or_load_run_record(&input.handle_id).await?;
         let events = load_run_events(self.state_dir(), &input.handle_id)?;
-        let runtime =
-            build_event_runtime_snapshot(&record.status, &events, OffsetDateTime::now_utc());
+        let runtime = build_event_runtime_snapshot(
+            &record.status,
+            &events,
+            OffsetDateTime::now_utc(),
+            record.error_message.as_deref(),
+        );
         let structured_summary = record.summary.as_ref().map(map_summary_output);
 
         Ok(Json(AgentStatusOutput {
@@ -1164,6 +1354,7 @@ impl McpSubagentServer {
             last_event_at: runtime.last_event_at,
             last_event_age_ms: runtime.last_event_age_ms,
             stalled: Some(runtime.stalled),
+            block_reason: runtime.block_reason,
             error_message: record.error_message,
             structured_summary,
             artifact_index: record.artifact_index,

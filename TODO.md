@@ -2386,3 +2386,36 @@
 - 已通过回归：
   - `cargo fmt`
   - `cargo test -q`（`170 + 46 + 3` tests passed）。
+
+## T-091 V0.10-P1-BlockReasonAndLogsFollow (Completed 2026-03-25)
+
+任务：补齐运行期阻塞原因输出与 `logs --follow`，让“运行中卡在哪里”可解释且可持续观察。  
+验收标准：
+
+1. MCP `get_agent_status/list_runs/get_agent_stats` 输出包含 `block_reason`（可选字段，兼容旧调用）。
+2. CLI `status/ps/stats` 文本输出显示 `block_reason`。
+3. 新增 `logs --follow`（支持 `--interval-ms/--timeout-secs`），可持续输出 runtime events 与 stdout/stderr 增量。
+4. `logs --follow --json` 输出机器可读 JSON 行（event + stream 两类）。
+5. README 命令面与示例更新包含 `logs --follow` 与 `block_reason` 说明。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 MCP DTO：`AgentStatusOutput/RunListingOutput/GetAgentStatsOutput` 新增 `block_reason`。
+- 已在 `src/mcp/tools.rs` 落地 `block_reason` 归因：
+  - 错误文本与事件启发式识别（`trust/auth/tool approval/skill discovery/workspace scan/provider unavailable/normalization/network`）；
+  - stalled + phase 回退（`queueing/workspace_prepare/provider_probe/provider_boot/provider_output_wait`）。
+- 已在 CLI 落地阻塞原因输出：
+  - `status` 新增 `block_reason` 行；
+  - `ps` 行输出新增 `block_reason`；
+  - `stats` 新增 `block_reason` 字段与文本输出。
+- 已新增 `logs --follow`：
+  - 支持 `--follow --interval-ms --timeout-secs`；
+  - 文本模式合并输出 runtime events 与 `stdout/stderr` 增量；
+  - `--json` 模式输出 `kind=event|stream` 的 JSON 行。
+- 已补测试：
+  - `parses_logs_command_stderr_mode`（默认值校验）；
+  - `parses_logs_follow_flags`；
+  - `classify_block_reason_detects_provider_unavailable_from_error_text`；
+  - `classify_block_reason_uses_stalled_phase_fallback`；
+  - MCP roundtrip 新增 `block_reason` 字段存在性断言。
+- 已同步 README：命令面新增 `logs --follow` 参数与示例，`ps` 字段说明补 `block_reason`。

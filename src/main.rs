@@ -140,6 +140,12 @@ enum Commands {
         #[arg(long, conflicts_with = "stdout")]
         stderr: bool,
         #[arg(long)]
+        follow: bool,
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+        #[arg(long)]
         json: bool,
     },
     Timeline {
@@ -526,6 +532,9 @@ async fn main() -> ExitCode {
             handle_id,
             stdout,
             stderr,
+            follow,
+            interval_ms,
+            timeout_secs,
             json,
         } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -542,7 +551,17 @@ async fn main() -> ExitCode {
                 }
             };
             info!("starting command: logs");
-            read_logs(cfg, handle_id, stdout, stderr, json)
+            read_logs(
+                cfg,
+                handle_id,
+                stdout,
+                stderr,
+                follow,
+                interval_ms,
+                timeout_secs,
+                json,
+            )
+            .await
         }
         Commands::Timeline {
             handle_id,
@@ -1153,6 +1172,7 @@ struct RunListEntry {
     last_event_age_ms: Option<u64>,
     stalled: bool,
     elapsed_ms: Option<u64>,
+    block_reason: Option<String>,
     provider: Option<String>,
     agent: Option<String>,
     task: String,
@@ -1268,6 +1288,7 @@ struct RunStatsOutput {
     last_event_at: Option<String>,
     last_event_age_ms: Option<u64>,
     stalled: bool,
+    block_reason: Option<String>,
     queue_ms: Option<u64>,
     provider_probe_ms: Option<u64>,
     execution_ms: Option<u64>,
@@ -1469,6 +1490,171 @@ fn first_event_time(events: &[RunTimelineEvent], name: &str) -> Option<OffsetDat
 
 fn latest_event(events: &[RunTimelineEvent]) -> Option<&RunTimelineEvent> {
     events.last()
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn classify_block_reason_from_text(text: &str) -> Option<&'static str> {
+    let lowered = text.to_ascii_lowercase();
+    if contains_any(
+        &lowered,
+        &[
+            "trusted folder",
+            "trust this folder",
+            "waiting_for_trust",
+            "waiting for trust",
+            "trust required",
+        ],
+    ) {
+        return Some("trust_required");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "auth required",
+            "authentication",
+            "unauthorized",
+            "login required",
+            "credentials",
+            "api key",
+            "keychain",
+        ],
+    ) {
+        return Some("auth_required");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "tool approval",
+            "approval required",
+            "permission denied",
+            "consent required",
+            "approval mode",
+        ],
+    ) {
+        return Some("tool_approval_required");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "skill conflict",
+            "skills conflict",
+            "skill discovery",
+            "find-skills",
+            ".agents/skills",
+            ".gemini/skills",
+        ],
+    ) {
+        return Some("skill_discovery");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "workspace scan",
+            "scanning workspace",
+            "indexing workspace",
+            "workspace settings",
+        ],
+    ) {
+        return Some("workspace_scan");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "provider `",
+            "provider unavailable",
+            "missingbinary",
+            "binary `",
+            "not found in path",
+        ],
+    ) {
+        return Some("provider_unavailable");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "structured summary parse status is invalid",
+            "invalid summary json",
+            "sentinel",
+            "structured summary parsing failed",
+        ],
+    ) {
+        return Some("normalization_failed");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "tls handshake eof",
+            "stream disconnected before completion",
+            "connection refused",
+            "network error",
+        ],
+    ) {
+        return Some("network_error");
+    }
+    None
+}
+
+fn classify_block_reason_from_events(
+    events: &[RunTimelineEvent],
+    stalled: bool,
+) -> Option<&'static str> {
+    for event in events.iter().rev() {
+        match event.event.as_str() {
+            "provider.waiting_for_trust" => return Some("trust_required"),
+            "provider.waiting_for_auth" => return Some("auth_required"),
+            "provider.waiting_for_tool_approval" => return Some("tool_approval_required"),
+            "provider.waiting_for_consent" => return Some("consent_required"),
+            "run.queued" if stalled => return Some("queueing"),
+            "workspace.prepare.started" if stalled => return Some("workspace_prepare"),
+            "provider.probe.started" if stalled => return Some("provider_probe"),
+            "provider.boot.started" if stalled => return Some("provider_boot"),
+            _ => {}
+        }
+        if let Some(message) = event.message.as_deref() {
+            if let Some(reason) = classify_block_reason_from_text(message) {
+                return Some(reason);
+            }
+        }
+        if !event.detail.is_null() {
+            let detail_text = event.detail.to_string();
+            if let Some(reason) = classify_block_reason_from_text(&detail_text) {
+                return Some(reason);
+            }
+        }
+    }
+    None
+}
+
+fn classify_block_reason(
+    status: &str,
+    phase: Option<&str>,
+    stalled: bool,
+    events: &[RunTimelineEvent],
+    error_message: Option<&str>,
+) -> Option<String> {
+    if let Some(message) = error_message {
+        if let Some(reason) = classify_block_reason_from_text(message) {
+            return Some(reason.to_string());
+        }
+    }
+    if let Some(reason) = classify_block_reason_from_events(events, stalled) {
+        return Some(reason.to_string());
+    }
+    if !is_terminal_status(status) && stalled {
+        let fallback = match phase.unwrap_or_default() {
+            "queueing" => "queueing",
+            "workspace_prepare" => "workspace_prepare",
+            "provider_probe" => "provider_probe",
+            "provider_boot" => "provider_boot",
+            "running" => "provider_output_wait",
+            _ => "unknown_startup_wait",
+        };
+        return Some(fallback.to_string());
+    }
+    None
 }
 
 fn compute_duration_ms(started_at: Option<&str>, finished_at: &str) -> Option<u64> {
@@ -1701,17 +1887,26 @@ fn list_runs(cfg: RuntimeConfig, limit: usize, json: bool) -> ExitCode {
             };
             let stalled = !is_terminal_status(record.status.as_str())
                 && last_event_age_ms.is_some_and(|value| value >= 8_000);
+            let phase = latest.and_then(|event| event.phase.clone());
+            let block_reason = classify_block_reason(
+                record.status.as_str(),
+                phase.as_deref(),
+                stalled,
+                &events,
+                record.error_message.as_deref(),
+            );
 
             RunListEntry {
                 handle_id,
                 status: record.status.clone(),
                 updated_at: record.updated_at.clone(),
                 state: latest.and_then(|event| event.state.clone()),
-                phase: latest.and_then(|event| event.phase.clone()),
+                phase,
                 last_event_at,
                 last_event_age_ms,
                 stalled,
                 elapsed_ms,
+                block_reason,
                 provider: record
                     .spec_snapshot
                     .as_ref()
@@ -1732,13 +1927,14 @@ fn list_runs(cfg: RuntimeConfig, limit: usize, json: bool) -> ExitCode {
         }
         for row in rows {
             println!(
-                "{} [{}] phase={} elapsed={} last_event={} stalled={} provider={} agent={}",
+                "{} [{}] phase={} elapsed={} last_event={} stalled={} block_reason={} provider={} agent={}",
                 row.handle_id,
                 row.status,
                 row.phase.as_deref().unwrap_or("unknown"),
                 format_elapsed_short(row.elapsed_ms),
                 format_elapsed_short(row.last_event_age_ms),
                 if row.stalled { "yes" } else { "no" },
+                row.block_reason.as_deref().unwrap_or("-"),
                 row.provider.as_deref().unwrap_or("unknown"),
                 row.agent.as_deref().unwrap_or("unknown"),
             );
@@ -1883,13 +2079,187 @@ fn read_result(
     ExitCode::SUCCESS
 }
 
-fn read_logs(
+fn print_json_line(value: &serde_json::Value) -> std::result::Result<(), String> {
+    let line = serde_json::to_string(value)
+        .map_err(|err| format!("failed to serialize follow line: {err}"))?;
+    println!("{line}");
+    Ok(())
+}
+
+fn print_stream_delta_text(stream: &str, delta: &str) {
+    for line in delta.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        println!("[{stream}] {line}");
+    }
+}
+
+fn print_stream_delta_json(
+    handle_id: &str,
+    stream: &str,
+    delta: &str,
+) -> std::result::Result<(), String> {
+    if delta.is_empty() {
+        return Ok(());
+    }
+    print_json_line(&serde_json::json!({
+        "kind": "stream",
+        "handle_id": handle_id,
+        "stream": stream,
+        "text": delta,
+    }))
+}
+
+fn print_event_follow_line(
+    handle_id: &str,
+    event: &RunTimelineEvent,
+    json: bool,
+) -> std::result::Result<(), String> {
+    if json {
+        return print_json_line(&serde_json::json!({
+            "kind": "event",
+            "handle_id": handle_id,
+            "seq": event.seq,
+            "event": event.event,
+            "timestamp": event.display_timestamp(),
+            "state": event.state,
+            "phase": event.phase,
+            "source": event.source,
+            "message": event.message,
+            "detail": event.detail,
+        }));
+    }
+    let detail = serde_json::to_string(&event.detail).unwrap_or_else(|_| "null".to_string());
+    let message = event.message.as_deref().unwrap_or("");
+    if message.is_empty() {
+        println!("{} [{}] {}", event.display_timestamp(), event.event, detail);
+    } else {
+        println!(
+            "{} [{}] {} {}",
+            event.display_timestamp(),
+            event.event,
+            message,
+            detail
+        );
+    }
+    Ok(())
+}
+
+async fn read_logs(
     cfg: RuntimeConfig,
     handle_id: String,
     stdout_only: bool,
     stderr_only: bool,
+    follow: bool,
+    interval_ms: u64,
+    timeout_secs: Option<u64>,
     json: bool,
 ) -> ExitCode {
+    let stdout_enabled = !stderr_only;
+    let stderr_enabled = !stdout_only;
+    if follow {
+        let started = Instant::now();
+        let sleep_ms = interval_ms.max(50);
+        let mut seen_event_count = 0usize;
+        let mut seen_stdout_bytes = 0usize;
+        let mut seen_stderr_bytes = 0usize;
+        loop {
+            let record = match load_run_record(&cfg.state_dir, &handle_id) {
+                Ok(record) => record,
+                Err(err) => {
+                    eprintln!("logs failed: {err}");
+                    return ExitCode::from(1);
+                }
+            };
+
+            let events = if run_events_path(&cfg.state_dir, &handle_id).exists()
+                || run_events_legacy_path(&cfg.state_dir, &handle_id).exists()
+            {
+                match load_run_events(&cfg.state_dir, &handle_id) {
+                    Ok(events) => events,
+                    Err(err) => {
+                        eprintln!("logs failed: {err}");
+                        return ExitCode::from(1);
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            if seen_event_count > events.len() {
+                seen_event_count = events.len();
+            }
+            for event in events.iter().skip(seen_event_count) {
+                if let Err(err) = print_event_follow_line(&handle_id, event, json) {
+                    eprintln!("logs failed: {err}");
+                    return ExitCode::from(1);
+                }
+            }
+            seen_event_count = events.len();
+
+            if stdout_enabled {
+                if let Some(stdout) =
+                    read_artifact_from_disk(&cfg.state_dir, &handle_id, "stdout.txt")
+                        .ok()
+                        .flatten()
+                {
+                    if seen_stdout_bytes > stdout.len() {
+                        seen_stdout_bytes = 0;
+                    }
+                    let delta = &stdout[seen_stdout_bytes..];
+                    if !delta.is_empty() {
+                        if json {
+                            if let Err(err) = print_stream_delta_json(&handle_id, "stdout", delta) {
+                                eprintln!("logs failed: {err}");
+                                return ExitCode::from(1);
+                            }
+                        } else {
+                            print_stream_delta_text("stdout", delta);
+                        }
+                        seen_stdout_bytes = stdout.len();
+                    }
+                }
+            }
+
+            if stderr_enabled {
+                if let Some(stderr) =
+                    read_artifact_from_disk(&cfg.state_dir, &handle_id, "stderr.txt")
+                        .ok()
+                        .flatten()
+                {
+                    if seen_stderr_bytes > stderr.len() {
+                        seen_stderr_bytes = 0;
+                    }
+                    let delta = &stderr[seen_stderr_bytes..];
+                    if !delta.is_empty() {
+                        if json {
+                            if let Err(err) = print_stream_delta_json(&handle_id, "stderr", delta) {
+                                eprintln!("logs failed: {err}");
+                                return ExitCode::from(1);
+                            }
+                        } else {
+                            print_stream_delta_text("stderr", delta);
+                        }
+                        seen_stderr_bytes = stderr.len();
+                    }
+                }
+            }
+
+            if is_terminal_status(record.status.as_str()) {
+                return ExitCode::SUCCESS;
+            }
+            if timeout_secs.is_some_and(|secs| started.elapsed().as_secs() >= secs) {
+                eprintln!(
+                    "logs follow timed out after {}s for handle `{}`",
+                    timeout_secs.unwrap_or_default(),
+                    handle_id
+                );
+                return ExitCode::from(1);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
+        }
+    }
+
     let stdout = if stderr_only {
         None
     } else {
@@ -2179,6 +2549,10 @@ fn read_stats(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
         );
         println!("stalled: {}", output.stalled);
         println!(
+            "block_reason: {}",
+            output.block_reason.as_deref().unwrap_or("-")
+        );
+        println!(
             "tokens: input={:?} output={:?} total={:?} source={}",
             output.usage.input_tokens,
             output.usage.output_tokens,
@@ -2236,6 +2610,13 @@ fn build_run_stats_output(
     let phase = latest.and_then(|event| event.phase.clone());
     let stalled = !is_terminal_status(record.status.as_str())
         && last_event_age_ms.is_some_and(|value| value >= 8_000);
+    let block_reason = classify_block_reason(
+        record.status.as_str(),
+        phase.as_deref(),
+        stalled,
+        &events,
+        record.error_message.as_deref(),
+    );
 
     RunStatsOutput {
         handle_id: handle_id.to_string(),
@@ -2245,6 +2626,7 @@ fn build_run_stats_output(
         last_event_at,
         last_event_age_ms,
         stalled,
+        block_reason,
         queue_ms,
         provider_probe_ms,
         execution_ms,
@@ -2834,6 +3216,10 @@ async fn get_status(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCo
                         .stalled
                         .map(|value| if value { "yes" } else { "no" })
                         .unwrap_or("unknown")
+                );
+                println!(
+                    "block_reason: {}",
+                    result.0.block_reason.as_deref().unwrap_or("-")
                 );
                 if let Some(err) = result.0.error_message {
                     println!("error: {err}");
@@ -3653,12 +4039,53 @@ target/
                 handle_id,
                 stdout,
                 stderr,
+                follow,
+                interval_ms,
+                timeout_secs,
                 json,
             } => {
                 assert_eq!(handle_id, "handle-1");
                 assert!(!stdout);
                 assert!(stderr);
+                assert!(!follow);
+                assert_eq!(interval_ms, 1000);
+                assert_eq!(timeout_secs, None);
                 assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_logs_follow_flags() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "logs",
+            "handle-1",
+            "--follow",
+            "--interval-ms",
+            "250",
+            "--timeout-secs",
+            "12",
+            "--stdout",
+        ]);
+        match cli.command {
+            Commands::Logs {
+                handle_id,
+                stdout,
+                stderr,
+                follow,
+                interval_ms,
+                timeout_secs,
+                json,
+            } => {
+                assert_eq!(handle_id, "handle-1");
+                assert!(stdout);
+                assert!(!stderr);
+                assert!(follow);
+                assert_eq!(interval_ms, 250);
+                assert_eq!(timeout_secs, Some(12));
+                assert!(!json);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -3799,6 +4226,25 @@ target/
         assert_eq!(stats.state.as_deref(), Some("succeeded"));
         assert_eq!(stats.phase.as_deref(), Some("completed"));
         assert!(!stats.stalled);
+    }
+
+    #[test]
+    fn classify_block_reason_detects_provider_unavailable_from_error_text() {
+        let reason = super::classify_block_reason(
+            "failed",
+            Some("provider_probe"),
+            false,
+            &[],
+            Some("provider `Codex` is unavailable (status=MissingBinary; binary `codex` not found in PATH)"),
+        );
+        assert_eq!(reason.as_deref(), Some("provider_unavailable"));
+    }
+
+    #[test]
+    fn classify_block_reason_uses_stalled_phase_fallback() {
+        let reason =
+            super::classify_block_reason("running", Some("workspace_prepare"), true, &[], None);
+        assert_eq!(reason.as_deref(), Some("workspace_prepare"));
     }
 
     #[test]

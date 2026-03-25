@@ -109,6 +109,8 @@ pub struct AgentStatusOutput {
     pub last_event_age_ms: Option<u64>,
     #[serde(default)]
     pub stalled: Option<bool>,
+    #[serde(default)]
+    pub block_reason: Option<String>,
     pub error_message: Option<String>,
     pub structured_summary: Option<SummaryOutput>,
     pub artifact_index: Vec<ArtifactOutput>,
@@ -167,6 +169,8 @@ pub struct RunListingOutput {
     pub stalled: Option<bool>,
     #[serde(default)]
     pub elapsed_ms: Option<u64>,
+    #[serde(default)]
+    pub block_reason: Option<String>,
     pub provider: Option<String>,
     pub agent: Option<String>,
     pub task: String,
@@ -292,6 +296,8 @@ pub struct GetAgentStatsOutput {
     #[serde(default)]
     pub last_event_age_ms: Option<u64>,
     pub stalled: bool,
+    #[serde(default)]
+    pub block_reason: Option<String>,
     #[serde(default)]
     pub queue_ms: Option<u64>,
     #[serde(default)]

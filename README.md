@@ -27,7 +27,7 @@ mcp-subagent list-agents [--json]
 mcp-subagent ps [--limit ...] [--json]
 mcp-subagent show <handle-id> [--json]
 mcp-subagent result <handle-id> [--raw | --normalized | --summary] [--json]
-mcp-subagent logs <handle-id> [--stdout | --stderr] [--json]
+mcp-subagent logs <handle-id> [--stdout | --stderr] [--follow] [--interval-ms ...] [--timeout-secs ...] [--json]
 mcp-subagent timeline <handle-id> [--event ...] [--json]
 mcp-subagent events <handle-id> [--event ...] [--follow] [--interval-ms ...] [--timeout-secs ...] [--json]
 mcp-subagent watch <handle-id> [--interval-ms ...] [--timeout-secs ...] [--json]
@@ -167,7 +167,7 @@ mcp-subagent ps --limit 20
 mcp-subagent watch <handle-id>
 ```
 
-`ps` now includes observability fields for running jobs: `phase`, `elapsed`, `last_event`, `stalled`.
+`ps` now includes observability fields for running jobs: `phase`, `elapsed`, `last_event`, `stalled`, `block_reason`.
 
 Inspect one run end-to-end:
 
@@ -176,6 +176,7 @@ mcp-subagent show <handle-id>
 mcp-subagent stats <handle-id>
 mcp-subagent result <handle-id> --json
 mcp-subagent logs <handle-id> --stderr
+mcp-subagent logs <handle-id> --follow
 mcp-subagent events <handle-id> --json
 mcp-subagent events <handle-id> --event provider.heartbeat --follow
 ```

@@ -1057,6 +1057,7 @@ sandbox = "read_only"
             .expect("status after done structured");
         assert!(status_after_done_json.get("phase").is_some());
         assert!(status_after_done_json.get("stalled").is_some());
+        assert!(status_after_done_json.get("block_reason").is_some());
 
         let artifact_res = client
             .call_tool(
@@ -1103,6 +1104,7 @@ sandbox = "read_only"
             .expect("listed run row");
         assert!(listed.get("phase").is_some());
         assert!(listed.get("last_event_age_ms").is_some());
+        assert!(listed.get("block_reason").is_some());
 
         let result_res = client
             .call_tool(
@@ -1190,6 +1192,7 @@ sandbox = "read_only"
         assert_eq!(structured_field(&stats_json, "status"), "succeeded");
         assert!(stats_json.get("usage").is_some());
         assert!(stats_json.get("wall_ms").is_some());
+        assert!(stats_json.get("block_reason").is_some());
 
         let events_res = client
             .call_tool(
