@@ -7,17 +7,18 @@ use crate::{
     mcp::dto::ArtifactOutput,
     runtime::summary::{ArtifactKind, SummaryEnvelope},
     spec::AgentSpec,
-    types::RunRequest,
+    types::{TaskSpec, WorkflowHints},
 };
 
 pub(crate) fn apply_review_evidence_hook(
     spec: &AgentSpec,
-    request: &RunRequest,
+    task_spec: &TaskSpec,
+    hints: &WorkflowHints,
     summary: &SummaryEnvelope,
     artifact_index: &mut Vec<ArtifactOutput>,
     artifacts: &mut HashMap<String, String>,
 ) {
-    if !request
+    if !hints
         .stage
         .as_deref()
         .is_some_and(|stage| stage.eq_ignore_ascii_case("review"))
@@ -31,7 +32,7 @@ pub(crate) fn apply_review_evidence_hook(
         return;
     }
 
-    let high_risk = is_high_risk_review(spec, request);
+    let high_risk = is_high_risk_review(spec, task_spec, hints);
     let mut required_tracks = Vec::new();
     if workflow.review_policy.require_correctness_review {
         required_tracks.push("correctness".to_string());
@@ -41,7 +42,7 @@ pub(crate) fn apply_review_evidence_hook(
     }
 
     let current_tracks = detect_review_tracks(&agent_profile(spec));
-    let parent_tracks = request
+    let parent_tracks = hints
         .parent_summary
         .as_deref()
         .map(|text| detect_review_tracks(&text.to_lowercase()))
@@ -60,7 +61,7 @@ pub(crate) fn apply_review_evidence_hook(
 
     let content = serde_json::to_string_pretty(&json!({
         "agent": spec.core.name,
-        "stage": request.stage,
+        "stage": hints.stage,
         "high_risk": high_risk,
         "required_tracks": required_tracks,
         "current_agent_tracks": tracks_to_vec(current_tracks),
@@ -157,19 +158,19 @@ fn agent_profile(spec: &AgentSpec) -> String {
     profile.to_lowercase()
 }
 
-fn is_high_risk_review(spec: &AgentSpec, request: &RunRequest) -> bool {
+fn is_high_risk_review(spec: &AgentSpec, task_spec: &TaskSpec, hints: &WorkflowHints) -> bool {
     let Some(workflow) = spec.workflow.as_ref() else {
         return false;
     };
     let gate = &workflow.require_plan_when;
     if gate
         .require_plan_if_touched_files_ge
-        .is_some_and(|threshold| request.selected_files.len() as u32 >= threshold)
+        .is_some_and(|threshold| task_spec.selected_files.len() as u32 >= threshold)
     {
         return true;
     }
     if gate.require_plan_if_parallel_agents
-        && matches!(request.run_mode, crate::types::RunMode::Async)
+        && matches!(hints.run_mode, crate::types::RunMode::Async)
     {
         return true;
     }
@@ -182,8 +183,8 @@ fn is_high_risk_review(spec: &AgentSpec, request: &RunRequest) -> bool {
 
     let lowered = format!(
         "{}\n{}",
-        request.task,
-        request.task_brief.clone().unwrap_or_default()
+        task_spec.task,
+        task_spec.task_brief.clone().unwrap_or_default()
     )
     .to_lowercase();
     (gate.require_plan_if_cross_module
@@ -262,7 +263,7 @@ mod tests {
             workflow::WorkflowSpec,
             AgentSpec,
         },
-        types::{RunMode, RunRequest},
+        types::{RunMode, TaskSpec, WorkflowHints},
     };
 
     fn sample_spec() -> AgentSpec {
@@ -285,17 +286,21 @@ mod tests {
         }
     }
 
-    fn sample_request() -> RunRequest {
-        RunRequest {
+    fn sample_task_spec() -> TaskSpec {
+        TaskSpec {
             task: "review parser behavior changes".to_string(),
             task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: Some("review".to_string()),
-            plan_ref: None,
-            working_dir: ".".into(),
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir: ".".into(),
+        }
+    }
+
+    fn sample_hints() -> WorkflowHints {
+        WorkflowHints {
+            stage: Some("review".to_string()),
+            run_mode: RunMode::Sync,
+            ..WorkflowHints::default()
         }
     }
 
@@ -321,12 +326,20 @@ mod tests {
     #[test]
     fn review_stage_emits_review_evidence_artifact() {
         let spec = sample_spec();
-        let request = sample_request();
+        let task_spec = sample_task_spec();
+        let hints = sample_hints();
         let summary = sample_summary();
         let mut index: Vec<ArtifactOutput> = Vec::new();
         let mut artifacts = HashMap::new();
 
-        apply_review_evidence_hook(&spec, &request, &summary, &mut index, &mut artifacts);
+        apply_review_evidence_hook(
+            &spec,
+            &task_spec,
+            &hints,
+            &summary,
+            &mut index,
+            &mut artifacts,
+        );
 
         assert!(index.iter().any(|item| item.path == "review/evidence.json"));
         assert!(artifacts

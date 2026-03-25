@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use crate::{
     error::Result,
     spec::AgentSpec,
-    types::{CompiledContext, RunRequest, TaskSpec, WorkflowHints},
+    types::{CompiledContext, TaskSpec, WorkflowHints},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,33 +40,13 @@ pub struct RunnerExecution {
 
 #[async_trait]
 pub trait AgentRunner: Send + Sync {
-    async fn execute(
-        &self,
-        spec: &AgentSpec,
-        request: &RunRequest,
-        compiled: &CompiledContext,
-    ) -> Result<RunnerExecution>;
-
     async fn execute_task(
         &self,
         spec: &AgentSpec,
         task_spec: &TaskSpec,
         hints: &WorkflowHints,
         compiled: &CompiledContext,
-    ) -> Result<RunnerExecution> {
-        let request = RunRequest::from_parts(task_spec, hints);
-        self.execute(spec, &request, compiled).await
-    }
-
-    async fn execute_with_observer(
-        &self,
-        spec: &AgentSpec,
-        request: &RunRequest,
-        compiled: &CompiledContext,
-        _observer: &mut dyn RunnerOutputObserver,
-    ) -> Result<RunnerExecution> {
-        self.execute(spec, request, compiled).await
-    }
+    ) -> Result<RunnerExecution>;
 
     async fn execute_task_with_observer(
         &self,
@@ -74,11 +54,9 @@ pub trait AgentRunner: Send + Sync {
         task_spec: &TaskSpec,
         hints: &WorkflowHints,
         compiled: &CompiledContext,
-        observer: &mut dyn RunnerOutputObserver,
+        _observer: &mut dyn RunnerOutputObserver,
     ) -> Result<RunnerExecution> {
-        let request = RunRequest::from_parts(task_spec, hints);
-        self.execute_with_observer(spec, &request, compiled, observer)
-            .await
+        self.execute_task(spec, task_spec, hints, compiled).await
     }
 }
 
@@ -87,15 +65,6 @@ impl<T> AgentRunner for Box<T>
 where
     T: AgentRunner + ?Sized,
 {
-    async fn execute(
-        &self,
-        spec: &AgentSpec,
-        request: &RunRequest,
-        compiled: &CompiledContext,
-    ) -> Result<RunnerExecution> {
-        (**self).execute(spec, request, compiled).await
-    }
-
     async fn execute_task(
         &self,
         spec: &AgentSpec,
@@ -105,18 +74,6 @@ where
     ) -> Result<RunnerExecution> {
         (**self)
             .execute_task(spec, task_spec, hints, compiled)
-            .await
-    }
-
-    async fn execute_with_observer(
-        &self,
-        spec: &AgentSpec,
-        request: &RunRequest,
-        compiled: &CompiledContext,
-        observer: &mut dyn RunnerOutputObserver,
-    ) -> Result<RunnerExecution> {
-        (**self)
-            .execute_with_observer(spec, request, compiled, observer)
             .await
     }
 

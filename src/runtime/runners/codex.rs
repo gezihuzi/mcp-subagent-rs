@@ -20,7 +20,7 @@ use crate::{
         runtime_policy::{ApprovalPolicy, SandboxPolicy},
         AgentSpec,
     },
-    types::{CompiledContext, RunRequest, TaskSpec, WorkflowHints},
+    types::{CompiledContext, TaskSpec, WorkflowHints},
 };
 
 #[derive(Debug, Clone)]
@@ -44,7 +44,7 @@ impl CodexRunner {
     async fn execute_internal(
         &self,
         spec: &AgentSpec,
-        request: &RunRequest,
+        task_spec: &TaskSpec,
         compiled: &CompiledContext,
         observer: Option<&mut dyn RunnerOutputObserver>,
     ) -> Result<RunnerExecution> {
@@ -69,7 +69,7 @@ impl CodexRunner {
             .arg("--sandbox")
             .arg(resolve_sandbox(spec))
             .arg("--cd")
-            .arg(&request.working_dir)
+            .arg(&task_spec.working_dir)
             .arg("--output-last-message")
             .arg(&output_file)
             .arg("--output-schema")
@@ -183,38 +183,25 @@ impl CodexRunner {
         })
     }
 
-    pub async fn execute(
-        &self,
-        spec: &AgentSpec,
-        request: &RunRequest,
-        compiled: &CompiledContext,
-    ) -> Result<RunnerExecution> {
-        let task_spec = request.to_task_spec();
-        let hints = request.to_workflow_hints();
-        CodexRunner::execute_task(self, spec, &task_spec, &hints, compiled).await
-    }
-
     pub async fn execute_task(
         &self,
         spec: &AgentSpec,
         task_spec: &TaskSpec,
-        hints: &WorkflowHints,
+        _hints: &WorkflowHints,
         compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
-        let request = RunRequest::from_parts(task_spec, hints);
-        self.execute_internal(spec, &request, compiled, None).await
+        self.execute_internal(spec, task_spec, compiled, None).await
     }
 
     pub async fn execute_task_with_observer(
         &self,
         spec: &AgentSpec,
         task_spec: &TaskSpec,
-        hints: &WorkflowHints,
+        _hints: &WorkflowHints,
         compiled: &CompiledContext,
         observer: &mut dyn RunnerOutputObserver,
     ) -> Result<RunnerExecution> {
-        let request = RunRequest::from_parts(task_spec, hints);
-        self.execute_internal(spec, &request, compiled, Some(observer))
+        self.execute_internal(spec, task_spec, compiled, Some(observer))
             .await
     }
 }
@@ -229,28 +216,6 @@ impl AgentRunner for CodexRunner {
         compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
         CodexRunner::execute_task(self, spec, task_spec, hints, compiled).await
-    }
-
-    async fn execute(
-        &self,
-        spec: &AgentSpec,
-        request: &RunRequest,
-        compiled: &CompiledContext,
-    ) -> Result<RunnerExecution> {
-        CodexRunner::execute(self, spec, request, compiled).await
-    }
-
-    async fn execute_with_observer(
-        &self,
-        spec: &AgentSpec,
-        request: &RunRequest,
-        compiled: &CompiledContext,
-        observer: &mut dyn RunnerOutputObserver,
-    ) -> Result<RunnerExecution> {
-        let task_spec = request.to_task_spec();
-        let hints = request.to_workflow_hints();
-        CodexRunner::execute_task_with_observer(self, spec, &task_spec, &hints, compiled, observer)
-            .await
     }
 
     async fn execute_task_with_observer(
@@ -402,7 +367,7 @@ mod tests {
             runtime_policy::{ApprovalPolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
             AgentSpec,
         },
-        types::{CompiledContext, RunMode, RunRequest},
+        types::{CompiledContext, RunMode, TaskSpec, WorkflowHints},
     };
 
     fn sample_spec() -> AgentSpec {
@@ -430,17 +395,20 @@ mod tests {
         }
     }
 
-    fn sample_request(working_dir: PathBuf) -> RunRequest {
-        RunRequest {
+    fn sample_task_spec(working_dir: PathBuf) -> TaskSpec {
+        TaskSpec {
             task: "review parser".to_string(),
             task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir,
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir,
+        }
+    }
+
+    fn sample_hints() -> WorkflowHints {
+        WorkflowHints {
+            run_mode: RunMode::Sync,
+            ..WorkflowHints::default()
         }
     }
 
@@ -498,9 +466,10 @@ exit 0
 
         let runner = CodexRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -564,9 +533,10 @@ exit 0
 
         let runner = CodexRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -595,9 +565,10 @@ exit 7
 
         let runner = CodexRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -665,10 +636,11 @@ exit 0
 
         let runner = CodexRunner::new(script_path);
         let mut observer = CollectingObserver::default();
-        let execution = <CodexRunner as AgentRunner>::execute_with_observer(
+        let execution = <CodexRunner as AgentRunner>::execute_task_with_observer(
             &runner,
             &sample_spec(),
-            &sample_request(dir.path().to_path_buf()),
+            &sample_task_spec(dir.path().to_path_buf()),
+            &sample_hints(),
             &CompiledContext {
                 system_prefix: "sys".to_string(),
                 injected_prompt: "prompt".to_string(),
@@ -704,9 +676,10 @@ exit 0
         let runner = CodexRunner::new(PathBuf::from("codex"));
 
         let err = runner
-            .execute(
+            .execute_task(
                 &spec,
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),

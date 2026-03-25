@@ -40,11 +40,13 @@ use crate::{
         service::run_dispatch,
         state::{
             append_status_if_terminal, apply_execution_policy_outcome, build_probe_result_snapshot,
-            build_run_request_snapshot, build_run_spec_snapshot, RetryClassificationRecord,
-            RunRecord,
+            build_run_spec_snapshot, RetryClassificationRecord, RunRecord,
         },
     },
-    runtime::{dispatcher::RunStatus, outcome::RetryClassification},
+    runtime::{
+        dispatcher::RunStatus,
+        outcome::{FailureOutcome, RetryClassification, RetryInfo, RunOutcome, UsageStats},
+    },
     types::RunMode,
 };
 
@@ -78,8 +80,11 @@ fn estimate_tokens(bytes: Option<u64>) -> Option<u64> {
 }
 
 fn infer_provider_exit_code(record: &RunRecord) -> Option<i32> {
-    if let Some(summary) = &record.summary {
-        return Some(summary.summary.exit_code);
+    if let Some(outcome) = &record.outcome {
+        let usage = outcome.usage();
+        if usage.provider_exit_code.is_some() {
+            return usage.provider_exit_code;
+        }
     }
 
     let message = record.error_message.as_deref()?;
@@ -214,43 +219,42 @@ fn resolve_retry_classification(record: &RunRecord) -> (String, Option<String>) 
 }
 
 fn map_record_outcome(record: &RunRecord, usage: RunUsageOutput) -> Option<OutcomeView> {
-    match record.status {
-        RunStatus::Succeeded => record
-            .summary
-            .as_ref()
-            .map(|summary| OutcomeView::Succeeded {
-                summary: summary.summary.summary.clone(),
-                key_findings: summary.summary.key_findings.clone(),
-                touched_files: summary.summary.touched_files.clone(),
-                artifacts: record.artifact_index.clone(),
-                usage,
-            }),
-        RunStatus::Failed => {
+    match &record.outcome {
+        Some(RunOutcome::Succeeded(success)) => Some(OutcomeView::Succeeded {
+            summary: success.summary.clone(),
+            key_findings: success.key_findings.clone(),
+            touched_files: success.touched_files.clone(),
+            artifacts: record.artifact_index.clone(),
+            usage,
+        }),
+        Some(RunOutcome::Failed(_failure)) => {
             let (retry_classification, _) = resolve_retry_classification(record);
             Some(OutcomeView::Failed {
                 error: record
                     .error_message
                     .clone()
+                    .or_else(|| {
+                        record
+                            .outcome
+                            .as_ref()
+                            .and_then(|outcome| outcome.error_message().map(str::to_string))
+                    })
                     .unwrap_or_else(|| "run failed".to_string()),
                 retry_classification,
                 partial_summary: record
-                    .summary
+                    .outcome
                     .as_ref()
-                    .map(|summary| summary.summary.summary.clone()),
+                    .and_then(|outcome| outcome.summary_text().map(str::to_string)),
                 usage,
             })
         }
-        RunStatus::Cancelled => Some(OutcomeView::Cancelled {
-            reason: record
-                .error_message
-                .clone()
-                .unwrap_or_else(|| "cancelled".to_string()),
+        Some(RunOutcome::Cancelled { reason }) => Some(OutcomeView::Cancelled {
+            reason: reason.clone(),
         }),
-        RunStatus::TimedOut => Some(OutcomeView::TimedOut {
-            elapsed_secs: compute_duration_ms(record.created_at, record.updated_at).unwrap_or(0)
-                / 1000,
+        Some(RunOutcome::TimedOut { elapsed_secs }) => Some(OutcomeView::TimedOut {
+            elapsed_secs: *elapsed_secs,
         }),
-        _ => None,
+        None => None,
     }
 }
 
@@ -270,10 +274,7 @@ fn build_run_view(
             .as_ref()
             .map(|spec| spec.name.clone())
             .unwrap_or_else(|| "unknown".to_string()),
-        task_brief: record
-            .request_snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.task_brief.clone()),
+        task_brief: record.task_spec.task_brief.clone(),
         phase,
         terminal: is_terminal_status(&record.status),
         outcome: map_record_outcome(record, usage),
@@ -1299,18 +1300,19 @@ impl McpSubagentServer {
         &self,
         Parameters(input): Parameters<RunAgentInput>,
     ) -> std::result::Result<Json<RunView>, ErrorData> {
-        let (loaded, request, execution_policy) = self.prepare_run(input, RunMode::Sync)?;
+        let (loaded, task_spec, hints, execution_policy) =
+            self.prepare_run(input, RunMode::Sync)?;
         let probe_result = self.ensure_provider_ready(&loaded.spec.core.provider)?;
-        let request_snapshot = build_run_request_snapshot(&request);
         let spec_snapshot = build_run_spec_snapshot(&loaded.spec);
         let probe_snapshot = build_probe_result_snapshot(&probe_result);
         let run_created_at = OffsetDateTime::now_utc();
         let handle_id = Uuid::now_v7().to_string();
-        let lock_keys = self.conflict_lock_keys(&loaded.spec, &request)?;
+        let lock_keys = self.conflict_lock_keys(&loaded.spec, &task_spec)?;
         let _serialize_guards = self.acquire_serialize_locks(lock_keys.clone()).await;
         let dispatch = run_dispatch(
             &loaded.spec,
-            &request,
+            &task_spec,
+            &hints,
             &handle_id,
             self.state_dir(),
             lock_keys.clone(),
@@ -1339,18 +1341,22 @@ impl McpSubagentServer {
         let mut artifacts = artifacts;
         apply_review_evidence_hook(
             &loaded.spec,
-            &request,
+            &task_spec,
+            &hints,
             &result.summary,
             &mut artifact_index,
             &mut artifacts,
         );
         apply_archive_hook(
-            &loaded.spec,
-            &request,
-            &result.status,
-            &handle_id,
-            &workspace,
-            &result.summary,
+            crate::mcp::archive::ArchiveHookInput {
+                spec: &loaded.spec,
+                task_spec: &task_spec,
+                hints: &hints,
+                run_status: &result.status,
+                handle_id: &handle_id,
+                workspace: &workspace,
+                summary: &result.summary,
+            },
             &mut crate::mcp::archive::ArtifactCollector {
                 index: &mut artifact_index,
                 data: &mut artifacts,
@@ -1367,12 +1373,12 @@ impl McpSubagentServer {
             created_at: run_created_at,
             updated_at: OffsetDateTime::now_utc(),
             status_history: result.status_history,
-            summary: Some(result.summary),
+            outcome: Some(result.outcome),
             artifact_index,
             artifacts,
             error_message: result.error_message,
-            task: request.task,
-            request_snapshot: Some(request_snapshot),
+            task_spec,
+            hints,
             spec_snapshot: Some(spec_snapshot),
             probe_result: Some(probe_snapshot),
             memory_resolution: Some(memory_resolution),
@@ -1394,19 +1400,20 @@ impl McpSubagentServer {
         &self,
         Parameters(input): Parameters<RunAgentInput>,
     ) -> std::result::Result<Json<RunView>, ErrorData> {
-        let (loaded, request, execution_policy) = self.prepare_run(input, RunMode::Async)?;
+        let (loaded, task_spec, hints, execution_policy) =
+            self.prepare_run(input, RunMode::Async)?;
         let accepted_agent_name = loaded.spec.core.name.clone();
-        let accepted_task_brief = request.task_brief.clone();
+        let accepted_task_brief = task_spec.task_brief.clone();
         let handle_id = Uuid::now_v7().to_string();
         let queued_at = format_time(OffsetDateTime::now_utc());
         let running_record = RunRecord::running(
-            request.task.clone(),
-            Some(build_run_request_snapshot(&request)),
+            task_spec.clone(),
+            hints.clone(),
             Some(build_run_spec_snapshot(&loaded.spec)),
             None,
             Some(execution_policy),
         );
-        let lock_keys = self.conflict_lock_keys(&loaded.spec, &request)?;
+        let lock_keys = self.conflict_lock_keys(&loaded.spec, &task_spec)?;
         let provider_prober = self.provider_prober();
 
         self.upsert_and_persist_run(&handle_id, running_record)
@@ -1488,6 +1495,16 @@ impl McpSubagentServer {
                     provider_unavailable_message(&loaded.spec.core.provider, &probe_details);
                 let summary = failed_summary(error_message.clone());
                 let (artifact_index, artifacts) = build_runtime_artifacts(&summary, "", "", None);
+                let failure_outcome = RunOutcome::Failed(FailureOutcome {
+                    error: error_message.clone(),
+                    retry: RetryInfo {
+                        classification: RetryClassification::Unknown,
+                        reason: Some("provider unavailable during probe".to_string()),
+                        attempts_used: 0,
+                    },
+                    partial_summary: Some(summary.summary.summary.clone()),
+                    usage: UsageStats::ZERO,
+                });
 
                 let mut guard = state.lock().await;
                 guard.tasks.remove(&task_handle_id);
@@ -1501,7 +1518,7 @@ impl McpSubagentServer {
                 record.updated_at = OffsetDateTime::now_utc();
                 append_status_if_terminal(&mut record.status_history, RunStatus::Failed);
                 record.error_message = Some(error_message);
-                record.summary = Some(summary);
+                record.outcome = Some(failure_outcome);
                 record.artifact_index = artifact_index;
                 record.artifacts = artifacts;
                 record.probe_result = Some(probe_snapshot);
@@ -1549,7 +1566,8 @@ impl McpSubagentServer {
             let mut first_output_seen = false;
             let mut dispatch_future = Box::pin(run_dispatch(
                 &loaded.spec,
-                &request,
+                &task_spec,
+                &hints,
                 &task_handle_id,
                 &state_dir,
                 lock_keys.clone(),
@@ -1723,18 +1741,22 @@ impl McpSubagentServer {
                     );
                     apply_review_evidence_hook(
                         &loaded.spec,
-                        &request,
+                        &task_spec,
+                        &hints,
                         &dispatch_result.summary,
                         &mut artifact_index,
                         &mut artifacts,
                     );
                     apply_archive_hook(
-                        &loaded.spec,
-                        &request,
-                        &dispatch_result.status,
-                        &task_handle_id,
-                        &workspace,
-                        &dispatch_result.summary,
+                        crate::mcp::archive::ArchiveHookInput {
+                            spec: &loaded.spec,
+                            task_spec: &task_spec,
+                            hints: &hints,
+                            run_status: &dispatch_result.status,
+                            handle_id: &task_handle_id,
+                            workspace: &workspace,
+                            summary: &dispatch_result.summary,
+                        },
                         &mut crate::mcp::archive::ArtifactCollector {
                             index: &mut artifact_index,
                             data: &mut artifacts,
@@ -1748,7 +1770,7 @@ impl McpSubagentServer {
                     record.updated_at = OffsetDateTime::now_utc();
                     record.status_history = dispatch_result.status_history;
                     record.error_message = dispatch_result.error_message;
-                    record.summary = Some(dispatch_result.summary);
+                    record.outcome = Some(dispatch_result.outcome);
                     record.artifact_index = artifact_index;
                     record.artifacts = artifacts;
                     record.probe_result = Some(probe_snapshot.clone());
@@ -1777,7 +1799,10 @@ impl McpSubagentServer {
                             message: "run finished",
                             detail: json!({
                                 "status": final_status.clone(),
-                                "verification_status": format!("{}", record.summary.as_ref().map(|v| v.summary.verification_status.clone()).unwrap_or(crate::runtime::summary::VerificationStatus::NotRun)),
+                                "verification_status": match &record.outcome {
+                                    Some(RunOutcome::Succeeded(success)) => format!("{}", success.verification),
+                                    _ => format!("{}", crate::runtime::summary::VerificationStatus::NotRun),
+                                },
                             }),
                         },
                     );
@@ -1804,11 +1829,21 @@ impl McpSubagentServer {
                     let summary = failed_summary(err.message.clone().into_owned());
                     let (artifact_index, artifacts) =
                         build_runtime_artifacts(&summary, "", "", None);
+                    let failure_outcome = RunOutcome::Failed(FailureOutcome {
+                        error: err_text.clone(),
+                        retry: RetryInfo {
+                            classification: RetryClassification::Unknown,
+                            reason: Some("dispatch execution failed".to_string()),
+                            attempts_used: 0,
+                        },
+                        partial_summary: Some(summary.summary.summary.clone()),
+                        usage: UsageStats::ZERO,
+                    });
                     record.status = RunStatus::Failed;
                     record.updated_at = OffsetDateTime::now_utc();
                     append_status_if_terminal(&mut record.status_history, RunStatus::Failed);
                     record.error_message = Some(err_text);
-                    record.summary = Some(summary);
+                    record.outcome = Some(failure_outcome);
                     record.artifact_index = artifact_index;
                     record.artifacts = artifacts;
                     record.probe_result = Some(probe_snapshot);
@@ -1916,10 +1951,11 @@ impl McpSubagentServer {
             record.updated_at = OffsetDateTime::now_utc();
             append_status_if_terminal(&mut record.status_history, RunStatus::Cancelled);
             record.error_message = Some("cancelled by user request".to_string());
-            if record.summary.is_none() {
-                let summary = cancelled_summary(record.task.clone());
+            if record.outcome.is_none() {
+                let reason = "cancelled by user request".to_string();
+                let summary = cancelled_summary(record.task_spec.task.clone());
                 let (artifact_index, artifacts) = build_runtime_artifacts(&summary, "", "", None);
-                record.summary = Some(summary);
+                record.outcome = Some(RunOutcome::Cancelled { reason });
                 record.artifact_index = artifact_index;
                 record.artifacts = artifacts;
             }

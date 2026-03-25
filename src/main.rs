@@ -25,7 +25,9 @@ use mcp_subagent::{
         server::McpSubagentServer,
     },
     probe::SystemProviderProber,
-    runtime::context::validate_default_summary_contract_template,
+    runtime::{
+        context::validate_default_summary_contract_template, summary::SUMMARY_CONTRACT_VERSION,
+    },
     spec::registry::load_agent_specs_from_dirs,
 };
 use rmcp::handler::server::wrapper::Parameters;
@@ -1154,6 +1156,18 @@ struct StoredRunSpecSnapshot {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
 struct StoredExecutionPolicy {
+    requested_run_mode: Option<String>,
+    effective_run_mode: Option<String>,
+    effective_run_mode_source: Option<String>,
+    spawn_policy: Option<String>,
+    spawn_policy_source: Option<String>,
+    background_preference: Option<String>,
+    background_preference_source: Option<String>,
+    max_turns: Option<u32>,
+    max_turns_source: Option<String>,
+    retry_max_attempts: Option<u32>,
+    retry_backoff_secs: Option<u64>,
+    retry_policy_source: Option<String>,
     attempts_used: Option<u32>,
     retries_used: Option<u32>,
 }
@@ -1175,20 +1189,157 @@ struct StoredRetryClassification {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
-struct StoredRunRecord {
+struct StoredRetryInfo {
+    classification: String,
+    reason: Option<String>,
+    attempts_used: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct StoredOutcomeUsage {
+    duration_ms: u64,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    provider_exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct StoredSuccessOutcome {
+    summary: String,
+    key_findings: Vec<String>,
+    touched_files: Vec<String>,
+    next_steps: Vec<String>,
+    open_questions: Vec<String>,
+    verification: String,
+    usage: StoredOutcomeUsage,
+    parse_status: String,
+    plan_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct StoredFailureOutcome {
+    error: String,
+    retry: StoredRetryInfo,
+    partial_summary: Option<String>,
+    usage: StoredOutcomeUsage,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum StoredRunOutcome {
+    Succeeded(StoredSuccessOutcome),
+    Failed(StoredFailureOutcome),
+    Cancelled { reason: String },
+    TimedOut { elapsed_secs: u64 },
+}
+
+impl StoredRunOutcome {
+    fn usage(&self) -> Option<&StoredOutcomeUsage> {
+        match self {
+            Self::Succeeded(success) => Some(&success.usage),
+            Self::Failed(failure) => Some(&failure.usage),
+            Self::Cancelled { .. } | Self::TimedOut { .. } => None,
+        }
+    }
+
+    fn summary_text(&self) -> Option<&str> {
+        match self {
+            Self::Succeeded(success) => Some(success.summary.as_str()),
+            Self::Failed(failure) => failure.partial_summary.as_deref(),
+            Self::Cancelled { .. } | Self::TimedOut { .. } => None,
+        }
+    }
+
+    fn error_message(&self) -> Option<&str> {
+        match self {
+            Self::Failed(failure) => Some(failure.error.as_str()),
+            Self::Cancelled { reason } => Some(reason.as_str()),
+            Self::Succeeded(_) | Self::TimedOut { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct StoredTaskSpec {
+    task: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct StoredRunState {
     status: String,
     created_at: Option<String>,
     updated_at: String,
     status_history: Vec<String>,
-    summary: Option<StoredSummaryEnvelope>,
-    artifact_index: Vec<ArtifactOutput>,
     error_message: Option<String>,
-    task: String,
-    spec_snapshot: Option<StoredRunSpecSnapshot>,
     execution_policy: Option<StoredExecutionPolicy>,
     compiled_context_markdown: Option<String>,
     usage: Option<StoredNativeUsage>,
     retry_classification: Option<StoredRetryClassification>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+struct StoredRunRecord {
+    task_spec: StoredTaskSpec,
+    state: StoredRunState,
+    outcome: Option<StoredRunOutcome>,
+    artifact_index: Vec<ArtifactOutput>,
+    spec_snapshot: Option<StoredRunSpecSnapshot>,
+}
+
+impl StoredRunRecord {
+    fn status(&self) -> &str {
+        self.state.status.as_str()
+    }
+
+    fn created_at(&self) -> Option<&str> {
+        self.state.created_at.as_deref()
+    }
+
+    fn updated_at(&self) -> &str {
+        self.state.updated_at.as_str()
+    }
+
+    fn error_message(&self) -> Option<&str> {
+        self.state.error_message.as_deref().or_else(|| {
+            self.outcome
+                .as_ref()
+                .and_then(StoredRunOutcome::error_message)
+        })
+    }
+
+    fn task(&self) -> &str {
+        self.task_spec.task.as_str()
+    }
+
+    fn normalized_summary(&self) -> Option<StoredSummaryEnvelope> {
+        match self.outcome.as_ref()? {
+            StoredRunOutcome::Succeeded(success) => Some(StoredSummaryEnvelope {
+                contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
+                parse_status: success.parse_status.clone(),
+                summary: StoredStructuredSummary {
+                    summary: success.summary.clone(),
+                    key_findings: success.key_findings.clone(),
+                    open_questions: success.open_questions.clone(),
+                    next_steps: success.next_steps.clone(),
+                    exit_code: success.usage.provider_exit_code.unwrap_or_default(),
+                    verification_status: success.verification.clone(),
+                    touched_files: success.touched_files.clone(),
+                    plan_refs: success.plan_refs.clone(),
+                },
+                raw_fallback_text: None,
+            }),
+            StoredRunOutcome::Failed(_)
+            | StoredRunOutcome::Cancelled { .. }
+            | StoredRunOutcome::TimedOut { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1509,7 +1660,7 @@ fn list_run_records(
         };
         runs.push((handle_id, record));
     }
-    runs.sort_by_key(|(_, record)| parse_rfc3339(record.updated_at.as_str()));
+    runs.sort_by_key(|(_, record)| parse_rfc3339(record.updated_at()));
     runs.reverse();
     Ok(runs)
 }
@@ -2065,10 +2216,12 @@ fn estimate_tokens(bytes: Option<u64>) -> Option<u64> {
 }
 
 fn infer_provider_exit_code(record: &StoredRunRecord) -> Option<i32> {
-    if let Some(summary) = &record.summary {
-        return Some(summary.summary.exit_code);
+    if let Some(usage) = record.outcome.as_ref().and_then(StoredRunOutcome::usage) {
+        if usage.provider_exit_code.is_some() {
+            return usage.provider_exit_code;
+        }
     }
-    let message = record.error_message.as_deref()?;
+    let message = record.error_message()?;
     let marker = "exited with code ";
     let idx = message.find(marker)?;
     let code_start = idx + marker.len();
@@ -2085,13 +2238,14 @@ fn build_usage_output(
     handle_id: &str,
     record: &StoredRunRecord,
 ) -> UsageStatsOutput {
-    let started_at = record.created_at.clone();
-    let finished_at = if is_terminal_status(record.status.as_str()) {
-        Some(record.updated_at.clone())
+    let started_at = record.created_at().map(str::to_string);
+    let finished_at = if is_terminal_status(record.status()) {
+        Some(record.updated_at().to_string())
     } else {
         None
     };
     let estimated_prompt_bytes = record
+        .state
         .compiled_context_markdown
         .as_ref()
         .map(|value| value.len() as u64);
@@ -2115,10 +2269,14 @@ fn build_usage_output(
         (Some(a), Some(b)) => Some(a.saturating_add(b)),
         _ => None,
     };
-    let native_usage = record.usage.as_ref();
+    let state_usage = record.state.usage.as_ref();
+    let outcome_usage = record.outcome.as_ref().and_then(StoredRunOutcome::usage);
     let mut used_native = false;
     let mut used_estimated = false;
-    let input_tokens = if let Some(value) = native_usage.and_then(|usage| usage.input_tokens) {
+    let input_tokens = if let Some(value) = outcome_usage
+        .and_then(|usage| usage.input_tokens)
+        .or_else(|| state_usage.and_then(|usage| usage.input_tokens))
+    {
         used_native = true;
         Some(value)
     } else {
@@ -2127,7 +2285,10 @@ fn build_usage_output(
         }
         estimated_input_tokens
     };
-    let output_tokens = if let Some(value) = native_usage.and_then(|usage| usage.output_tokens) {
+    let output_tokens = if let Some(value) = outcome_usage
+        .and_then(|usage| usage.output_tokens)
+        .or_else(|| state_usage.and_then(|usage| usage.output_tokens))
+    {
         used_native = true;
         Some(value)
     } else {
@@ -2136,7 +2297,10 @@ fn build_usage_output(
         }
         estimated_output_tokens
     };
-    let total_tokens = if let Some(value) = native_usage.and_then(|usage| usage.total_tokens) {
+    let total_tokens = if let Some(value) = outcome_usage
+        .and_then(|usage| usage.total_tokens)
+        .or_else(|| state_usage.and_then(|usage| usage.total_tokens))
+    {
         used_native = true;
         Some(value)
     } else if let (Some(input), Some(output)) = (input_tokens, output_tokens) {
@@ -2157,7 +2321,9 @@ fn build_usage_output(
     UsageStatsOutput {
         started_at: started_at.clone(),
         finished_at,
-        duration_ms: compute_duration_ms(started_at.as_deref(), &record.updated_at),
+        duration_ms: outcome_usage
+            .and_then(|usage| (usage.duration_ms > 0).then_some(usage.duration_ms))
+            .or_else(|| compute_duration_ms(started_at.as_deref(), record.updated_at())),
         provider: record
             .spec_snapshot
             .as_ref()
@@ -2169,9 +2335,20 @@ fn build_usage_output(
             .and_then(|spec| spec.model.clone()),
         provider_exit_code: infer_provider_exit_code(record),
         retries: record
+            .state
             .execution_policy
             .as_ref()
             .and_then(|policy| policy.retries_used)
+            .or_else(|| {
+                record.outcome.as_ref().and_then(|outcome| match outcome {
+                    StoredRunOutcome::Failed(failure) => {
+                        Some(failure.retry.attempts_used.saturating_sub(1))
+                    }
+                    StoredRunOutcome::Succeeded(_)
+                    | StoredRunOutcome::Cancelled { .. }
+                    | StoredRunOutcome::TimedOut { .. } => None,
+                })
+            })
             .unwrap_or(0),
         token_source: token_source.to_string(),
         input_tokens,
@@ -2183,7 +2360,14 @@ fn build_usage_output(
 }
 
 fn resolve_retry_classification(record: &StoredRunRecord) -> (String, Option<String>) {
-    match &record.retry_classification {
+    if let Some(StoredRunOutcome::Failed(failure)) = record.outcome.as_ref() {
+        let normalized = match failure.retry.classification.as_str() {
+            "retryable" | "non_retryable" | "unknown" => failure.retry.classification.clone(),
+            _ => "unknown".to_string(),
+        };
+        return (normalized, failure.retry.reason.clone());
+    }
+    match &record.state.retry_classification {
         Some(value) => {
             let normalized = match value.classification.as_str() {
                 "retryable" | "non_retryable" | "unknown" => value.classification.clone(),
@@ -2221,28 +2405,28 @@ fn list_runs(cfg: RuntimeConfig, limit: usize, json: bool) -> ExitCode {
                     Some((now - ts).whole_milliseconds().max(0) as u64)
                 }
             });
-            let duration_ms = compute_duration_ms(record.created_at.as_deref(), &record.updated_at);
-            let elapsed_ms = if is_terminal_status(record.status.as_str()) {
+            let duration_ms = compute_duration_ms(record.created_at(), record.updated_at());
+            let elapsed_ms = if is_terminal_status(record.status()) {
                 duration_ms
             } else {
-                let started = record.created_at.as_deref().and_then(parse_rfc3339);
+                let started = record.created_at().and_then(parse_rfc3339);
                 duration_between(started, Some(now))
             };
-            let stalled = !is_terminal_status(record.status.as_str())
+            let stalled = !is_terminal_status(record.status())
                 && last_event_age_ms.is_some_and(|value| value >= 8_000);
             let phase = latest.and_then(|event| event.phase.clone());
             let block_reason = classify_block_reason(
-                record.status.as_str(),
+                record.status(),
                 phase.as_deref(),
                 stalled,
                 &events,
-                record.error_message.as_deref(),
+                record.error_message(),
             );
 
             RunListEntry {
                 handle_id,
-                status: record.status.clone(),
-                updated_at: record.updated_at.clone(),
+                status: record.status().to_string(),
+                updated_at: record.updated_at().to_string(),
                 state: latest.and_then(|event| event.state.clone()),
                 phase,
                 last_event_at,
@@ -2255,7 +2439,7 @@ fn list_runs(cfg: RuntimeConfig, limit: usize, json: bool) -> ExitCode {
                     .as_ref()
                     .map(|spec| spec.provider.clone()),
                 agent: record.spec_snapshot.as_ref().map(|spec| spec.name.clone()),
-                task: record.task.clone(),
+                task: record.task().to_string(),
                 duration_ms,
             }
         })
@@ -2298,11 +2482,12 @@ fn show_run(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
     };
     let usage = build_usage_output(&cfg.state_dir, &handle_id, &record);
     let (retry_classification, classification_reason) = resolve_retry_classification(&record);
+    let normalized_summary = record.normalized_summary();
     let view = RunShowOutput {
         handle_id: handle_id.clone(),
-        status: record.status.clone(),
-        updated_at: record.updated_at.clone(),
-        error_message: record.error_message.clone(),
+        status: record.status().to_string(),
+        updated_at: record.updated_at().to_string(),
+        error_message: record.error_message().map(str::to_string),
         provider: record
             .spec_snapshot
             .as_ref()
@@ -2311,12 +2496,10 @@ fn show_run(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
             .spec_snapshot
             .as_ref()
             .and_then(|spec| spec.model.clone()),
-        normalization_status: record
-            .summary
+        normalization_status: normalized_summary
             .as_ref()
             .map(|summary| summary.parse_status.clone()),
-        summary: record
-            .summary
+        summary: normalized_summary
             .as_ref()
             .map(|summary| summary.summary.summary.clone()),
         provider_exit_code: infer_provider_exit_code(&record),
@@ -2356,11 +2539,12 @@ fn read_result(
         .flatten()
         .or_else(|| {
             record
-                .summary
+                .outcome
                 .as_ref()
-                .and_then(|summary| summary.raw_fallback_text.clone())
+                .and_then(StoredRunOutcome::summary_text)
+                .map(str::to_string)
         });
-    let normalized_result = record.summary.clone();
+    let normalized_result = record.normalized_summary();
     let usage = build_usage_output(&cfg.state_dir, &handle_id, &record);
     let (retry_classification, classification_reason) = resolve_retry_classification(&record);
     let view = if raw {
@@ -2375,15 +2559,13 @@ fn read_result(
     let output = RunResultOutput {
         contract_version: RESULT_CONTRACT_VERSION.to_string(),
         handle_id: handle_id.clone(),
-        status: record.status.clone(),
+        status: record.status().to_string(),
         view: view.to_string(),
-        normalization_status: record
-            .summary
+        normalization_status: normalized_result
             .as_ref()
             .map(|summary| summary.parse_status.clone())
             .unwrap_or_else(|| "NotAvailable".to_string()),
-        summary: record
-            .summary
+        summary: normalized_result
             .as_ref()
             .map(|summary| summary.summary.summary.clone()),
         native_result: native_result.clone(),
@@ -2393,7 +2575,7 @@ fn read_result(
         retry_classification,
         classification_reason,
         usage,
-        error_message: record.error_message.clone(),
+        error_message: record.error_message().map(str::to_string),
         artifact_index: record.artifact_index.clone(),
     };
 
@@ -2414,7 +2596,7 @@ fn read_result(
         return ExitCode::SUCCESS;
     }
 
-    if let Some(summary) = record.summary.as_ref() {
+    if let Some(summary) = normalized_result.as_ref() {
         println!("{}", summary.summary.summary);
     } else if let Some(raw_text) = native_result {
         println!("{raw_text}");
@@ -2565,7 +2747,7 @@ async fn read_logs(cfg: RuntimeConfig, handle_id: String, options: ReadLogsOptio
             if !json {
                 if let Some(line) = build_phase_progress_line(
                     &events,
-                    is_terminal_status(record.status.as_str()),
+                    is_terminal_status(record.status()),
                     OffsetDateTime::now_utc(),
                     phase.as_deref(),
                 ) {
@@ -2624,7 +2806,7 @@ async fn read_logs(cfg: RuntimeConfig, handle_id: String, options: ReadLogsOptio
                 }
             }
 
-            if is_terminal_status(record.status.as_str()) {
+            if is_terminal_status(record.status()) {
                 return ExitCode::SUCCESS;
             }
             if phase_timeout_secs
@@ -2811,9 +2993,9 @@ async fn read_events_all(cfg: RuntimeConfig, options: ReadEventsAllOptions) -> E
         let now = OffsetDateTime::now_utc();
 
         for (handle_id, record) in entries {
-            active_handles.insert(handle_id.clone(), record.status.clone());
+            active_handles.insert(handle_id.clone(), record.status().to_string());
             let state = follow_states.entry(handle_id.clone()).or_default();
-            state.status = Some(record.status.clone());
+            state.status = Some(record.status().to_string());
 
             let new_events =
                 match load_run_events_incremental(&cfg.state_dir, &handle_id, &mut state.cursor) {
@@ -2889,7 +3071,7 @@ async fn read_events_all(cfg: RuntimeConfig, options: ReadEventsAllOptions) -> E
             if !json {
                 if let Some(line) = build_phase_progress_line(
                     &filtered_events,
-                    is_terminal_status(record.status.as_str()),
+                    is_terminal_status(record.status()),
                     now,
                     phase.as_deref(),
                 ) {
@@ -3093,7 +3275,7 @@ async fn read_events(cfg: RuntimeConfig, options: ReadEventsOptions) -> ExitCode
         if !json {
             if let Some(line) = build_phase_progress_line(
                 &all_events,
-                is_terminal_status(record.status.as_str()),
+                is_terminal_status(record.status()),
                 OffsetDateTime::now_utc(),
                 phase.as_deref(),
             ) {
@@ -3104,7 +3286,7 @@ async fn read_events(cfg: RuntimeConfig, options: ReadEventsOptions) -> ExitCode
             }
         }
 
-        if is_terminal_status(record.status.as_str()) {
+        if is_terminal_status(record.status()) {
             return ExitCode::SUCCESS;
         }
         if phase_timeout_secs
@@ -3157,20 +3339,20 @@ async fn wait_run(
             }
         };
 
-        if is_terminal_status(record.status.as_str()) {
+        if is_terminal_status(record.status()) {
             if json {
                 print_json(&WaitRunOutput {
                     handle_id,
-                    status: record.status.clone(),
-                    updated_at: record.updated_at,
-                    error_message: record.error_message,
+                    status: record.status().to_string(),
+                    updated_at: record.updated_at().to_string(),
+                    error_message: record.error_message().map(str::to_string),
                 });
-            } else if let Some(error) = record.error_message.as_deref() {
-                println!("{} {} ({})", record.status, record.updated_at, error);
+            } else if let Some(error) = record.error_message() {
+                println!("{} {} ({})", record.status(), record.updated_at(), error);
             } else {
-                println!("{} {}", record.status, record.updated_at);
+                println!("{} {}", record.status(), record.updated_at());
             }
-            return wait_exit_code(record.status.as_str());
+            return wait_exit_code(record.status());
         }
 
         if timeout_secs.is_some_and(|secs| started.elapsed().as_secs() >= secs) {
@@ -3315,7 +3497,7 @@ fn build_run_stats_output(
     let usage = build_usage_output(state_dir, handle_id, record);
     let events = load_run_events(state_dir, handle_id).unwrap_or_default();
 
-    let created_at = record.created_at.as_deref().and_then(parse_rfc3339);
+    let created_at = record.created_at().and_then(parse_rfc3339);
     let accepted_at = first_event_time(&events, "run.accepted").or(created_at);
     let probe_started = first_event_time(&events, "provider.probe.started");
     let probe_completed = first_event_time(&events, "provider.probe.completed");
@@ -3324,8 +3506,8 @@ fn build_run_stats_output(
     let first_output = first_event_time(&events, "provider.first_output");
     let first_output_warning_at = first_event_timestamp(&events, "provider.first_output.warning");
     let first_output_warned = first_output_warning_at.is_some();
-    let terminal_at = if is_terminal_status(record.status.as_str()) {
-        parse_rfc3339(&record.updated_at)
+    let terminal_at = if is_terminal_status(record.status()) {
+        parse_rfc3339(record.updated_at())
     } else {
         None
     };
@@ -3359,20 +3541,20 @@ fn build_run_stats_output(
     });
     let state = latest.and_then(|event| event.state.clone());
     let phase = latest.and_then(|event| event.phase.clone());
-    let stalled = !is_terminal_status(record.status.as_str())
+    let stalled = !is_terminal_status(record.status())
         && last_event_age_ms.is_some_and(|value| value >= 8_000);
     let block_reason = classify_block_reason(
-        record.status.as_str(),
+        record.status(),
         phase.as_deref(),
         stalled,
         &events,
-        record.error_message.as_deref(),
+        record.error_message(),
     );
     let (wait_reasons, current_wait_reason) = collect_wait_reasons(&events);
 
     RunStatsOutput {
         handle_id: handle_id.to_string(),
-        status: record.status.clone(),
+        status: record.status().to_string(),
         state,
         phase,
         last_event_at,
@@ -3454,7 +3636,7 @@ async fn watch_run(
                 }
                 if let Some(line) = build_phase_progress_line(
                     &all_events,
-                    is_terminal_status(record.status.as_str()),
+                    is_terminal_status(record.status()),
                     OffsetDateTime::now_utc(),
                     phase.as_deref(),
                 ) {
@@ -3464,13 +3646,13 @@ async fn watch_run(
                     }
                 }
             }
-            if record.status != last_status {
-                println!("{} {}", record.status, record.updated_at);
-                last_status = record.status.clone();
+            if record.status() != last_status {
+                println!("{} {}", record.status(), record.updated_at());
+                last_status = record.status().to_string();
             }
         }
 
-        if is_terminal_status(record.status.as_str()) {
+        if is_terminal_status(record.status()) {
             if json {
                 return show_run(cfg, handle_id, true);
             }
@@ -4781,18 +4963,21 @@ target/
     fn build_usage_output_prefers_native_tokens() {
         let dir = tempdir().expect("tempdir");
         let record = StoredRunRecord {
-            status: "succeeded".to_string(),
-            created_at: Some("2026-03-25T00:00:00Z".to_string()),
-            updated_at: "2026-03-25T00:00:01Z".to_string(),
+            state: super::StoredRunState {
+                status: "succeeded".to_string(),
+                created_at: Some("2026-03-25T00:00:00Z".to_string()),
+                updated_at: "2026-03-25T00:00:01Z".to_string(),
+                usage: Some(StoredNativeUsage {
+                    input_tokens: Some(111),
+                    output_tokens: Some(222),
+                    total_tokens: Some(333),
+                }),
+                ..super::StoredRunState::default()
+            },
             spec_snapshot: Some(StoredRunSpecSnapshot {
                 name: "backend-coder".to_string(),
                 provider: "Codex".to_string(),
                 model: Some("gpt-5.3-codex".to_string()),
-            }),
-            usage: Some(StoredNativeUsage {
-                input_tokens: Some(111),
-                output_tokens: Some(222),
-                total_tokens: Some(333),
             }),
             ..StoredRunRecord::default()
         };
@@ -4812,14 +4997,17 @@ target/
         fs::write(run_artifacts.join("stdout.txt"), "x".repeat(400)).expect("write stdout");
 
         let record = StoredRunRecord {
-            status: "succeeded".to_string(),
-            created_at: Some("2026-03-25T00:00:00Z".to_string()),
-            updated_at: "2026-03-25T00:00:01Z".to_string(),
-            usage: Some(StoredNativeUsage {
-                input_tokens: Some(50),
-                output_tokens: None,
-                total_tokens: None,
-            }),
+            state: super::StoredRunState {
+                status: "succeeded".to_string(),
+                created_at: Some("2026-03-25T00:00:00Z".to_string()),
+                updated_at: "2026-03-25T00:00:01Z".to_string(),
+                usage: Some(StoredNativeUsage {
+                    input_tokens: Some(50),
+                    output_tokens: None,
+                    total_tokens: None,
+                }),
+                ..super::StoredRunState::default()
+            },
             ..StoredRunRecord::default()
         };
 
@@ -4840,10 +5028,13 @@ target/
     #[test]
     fn resolve_retry_classification_reads_persisted_value() {
         let record = StoredRunRecord {
-            retry_classification: Some(super::StoredRetryClassification {
-                classification: "retryable".to_string(),
-                reason: Some("matched retryable keyword `network`".to_string()),
-            }),
+            state: super::StoredRunState {
+                retry_classification: Some(super::StoredRetryClassification {
+                    classification: "retryable".to_string(),
+                    reason: Some("matched retryable keyword `network`".to_string()),
+                }),
+                ..super::StoredRunState::default()
+            },
             ..StoredRunRecord::default()
         };
         let (classification, reason) = super::resolve_retry_classification(&record);
@@ -5290,9 +5481,12 @@ target/
         .expect("write events");
 
         let record = StoredRunRecord {
-            status: "succeeded".to_string(),
-            created_at: Some("2026-03-25T00:00:00Z".to_string()),
-            updated_at: "2026-03-25T00:00:08Z".to_string(),
+            state: super::StoredRunState {
+                status: "succeeded".to_string(),
+                created_at: Some("2026-03-25T00:00:00Z".to_string()),
+                updated_at: "2026-03-25T00:00:08Z".to_string(),
+                ..super::StoredRunState::default()
+            },
             ..StoredRunRecord::default()
         };
         let now = super::parse_rfc3339("2026-03-25T00:00:08Z").expect("parse now");

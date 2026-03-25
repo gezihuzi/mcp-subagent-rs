@@ -12,7 +12,7 @@ use crate::{
     },
     types::{
         CompiledContext, ContextSourceRef, InjectionMode, MemorySnippet, ResolvedMemory, RunMode,
-        RunRequest, TaskSpec, WorkflowHints,
+        TaskSpec, WorkflowHints,
     },
 };
 
@@ -35,17 +35,6 @@ pub trait ContextCompiler: Send + Sync {
         hints: &WorkflowHints,
         memory: ResolvedMemory,
     ) -> Result<CompiledContext>;
-
-    fn compile(
-        &self,
-        spec: &AgentSpec,
-        request: &RunRequest,
-        memory: ResolvedMemory,
-    ) -> Result<CompiledContext> {
-        let task_spec = request.to_task_spec();
-        let hints = request.to_workflow_hints();
-        self.compile_task(spec, &task_spec, &hints, memory)
-    }
 
     fn parse_summary(&self, raw_stdout: &str, raw_stderr: &str) -> Result<SummaryEnvelope>;
 }
@@ -234,23 +223,20 @@ pub fn validate_default_summary_contract_template() -> Result<()> {
         provider_overrides: Default::default(),
         workflow: None,
     };
-    let sample_request = RunRequest {
+    let task_spec = TaskSpec {
         task: "Validate context compiler output contract".to_string(),
         task_brief: Some("Validate summary contract".to_string()),
-        parent_summary: None,
-        selected_files: Vec::new(),
-        stage: None,
-        plan_ref: None,
-        working_dir: ".".into(),
-        run_mode: RunMode::Sync,
         acceptance_criteria: vec![
             "Keep fixed sections in compiled template".to_string(),
             "Keep sentinel-wrapped SummaryEnvelope JSON contract".to_string(),
         ],
+        selected_files: Vec::new(),
+        working_dir: ".".into(),
     };
-
-    let task_spec = sample_request.to_task_spec();
-    let hints = sample_request.to_workflow_hints();
+    let hints = WorkflowHints {
+        run_mode: RunMode::Sync,
+        ..WorkflowHints::default()
+    };
     let compiled =
         compiler.compile_task(&sample_spec, &task_spec, &hints, ResolvedMemory::default())?;
     validate_compiled_prompt_template(&compiled.injected_prompt)
@@ -412,7 +398,7 @@ mod tests {
             runtime_policy::{ContextMode, RuntimePolicy},
             AgentSpec,
         },
-        types::{MemorySnippet, ResolvedMemory, RunMode, RunRequest, SelectedFile},
+        types::{MemorySnippet, ResolvedMemory, RunMode, SelectedFile, TaskSpec, WorkflowHints},
     };
 
     fn sample_spec(mode: ContextMode) -> AgentSpec {
@@ -445,20 +431,21 @@ mod tests {
         let spec = sample_spec(ContextMode::SelectedFiles(
             vec!["src/parser.rs".to_string()],
         ));
-        let req = RunRequest {
+        let task_spec = TaskSpec {
             task: "Review parser changes".to_string(),
             task_brief: Some("Review parser module".to_string()),
-            parent_summary: Some("parent summary".to_string()),
+            acceptance_criteria: vec!["Provide key findings".to_string()],
             selected_files: vec![SelectedFile {
                 path: PathBuf::from("src/parser.rs"),
                 rationale: Some("target file".to_string()),
                 content: Some("fn parse() {}".to_string()),
             }],
-            stage: None,
-            plan_ref: None,
             working_dir: PathBuf::from("."),
+        };
+        let hints = WorkflowHints {
+            parent_summary: Some("parent summary".to_string()),
             run_mode: RunMode::Sync,
-            acceptance_criteria: vec!["Provide key findings".to_string()],
+            ..WorkflowHints::default()
         };
         let memory = ResolvedMemory {
             project_memories: vec![MemorySnippet {
@@ -470,7 +457,9 @@ mod tests {
             native_passthrough_paths: vec![PathBuf::from("AGENTS.md")],
         };
 
-        let compiled = compiler.compile(&spec, &req, memory).expect("compile");
+        let compiled = compiler
+            .compile_task(&spec, &task_spec, &hints, memory)
+            .expect("compile");
         for section in [
             "ROLE",
             "TASK",
@@ -493,24 +482,25 @@ mod tests {
     fn isolated_mode_excludes_parent_summary_and_selected_files() {
         let compiler = DefaultContextCompiler;
         let spec = sample_spec(ContextMode::Isolated);
-        let req = RunRequest {
+        let task_spec = TaskSpec {
             task: "task".to_string(),
             task_brief: None,
-            parent_summary: Some("parent summary should be hidden".to_string()),
+            acceptance_criteria: Vec::new(),
             selected_files: vec![SelectedFile {
                 path: PathBuf::from("src/a.rs"),
                 rationale: None,
                 content: Some("fn a() {}".to_string()),
             }],
-            stage: None,
-            plan_ref: None,
             working_dir: PathBuf::from("."),
+        };
+        let hints = WorkflowHints {
+            parent_summary: Some("parent summary should be hidden".to_string()),
             run_mode: RunMode::Sync,
-            acceptance_criteria: Vec::new(),
+            ..WorkflowHints::default()
         };
 
         let compiled = compiler
-            .compile(&spec, &req, ResolvedMemory::default())
+            .compile_task(&spec, &task_spec, &hints, ResolvedMemory::default())
             .expect("compile");
         assert!(!compiled.injected_prompt.contains("parent_summary:"));
         assert!(!compiled.injected_prompt.contains("selected_file: src/a.rs"));
@@ -520,24 +510,25 @@ mod tests {
     fn summary_only_mode_includes_parent_summary_but_excludes_selected_files() {
         let compiler = DefaultContextCompiler;
         let spec = sample_spec(ContextMode::SummaryOnly);
-        let req = RunRequest {
+        let task_spec = TaskSpec {
             task: "task".to_string(),
             task_brief: None,
-            parent_summary: Some("this is parent summary".to_string()),
+            acceptance_criteria: Vec::new(),
             selected_files: vec![SelectedFile {
                 path: PathBuf::from("src/a.rs"),
                 rationale: None,
                 content: Some("fn a() {}".to_string()),
             }],
-            stage: None,
-            plan_ref: None,
             working_dir: PathBuf::from("."),
+        };
+        let hints = WorkflowHints {
+            parent_summary: Some("this is parent summary".to_string()),
             run_mode: RunMode::Sync,
-            acceptance_criteria: Vec::new(),
+            ..WorkflowHints::default()
         };
 
         let compiled = compiler
-            .compile(&spec, &req, ResolvedMemory::default())
+            .compile_task(&spec, &task_spec, &hints, ResolvedMemory::default())
             .expect("compile");
         assert!(compiled.injected_prompt.contains("parent_summary:"));
         assert!(!compiled.injected_prompt.contains("selected_file: src/a.rs"));
@@ -547,10 +538,10 @@ mod tests {
     fn selected_files_mode_only_includes_allowlisted_files() {
         let compiler = DefaultContextCompiler;
         let spec = sample_spec(ContextMode::SelectedFiles(vec!["src/keep.rs".to_string()]));
-        let req = RunRequest {
+        let task_spec = TaskSpec {
             task: "task".to_string(),
             task_brief: None,
-            parent_summary: Some("ignored".to_string()),
+            acceptance_criteria: Vec::new(),
             selected_files: vec![
                 SelectedFile {
                     path: PathBuf::from("src/keep.rs"),
@@ -563,15 +554,16 @@ mod tests {
                     content: Some("fn drop() {}".to_string()),
                 },
             ],
-            stage: None,
-            plan_ref: None,
             working_dir: PathBuf::from("."),
+        };
+        let hints = WorkflowHints {
+            parent_summary: Some("ignored".to_string()),
             run_mode: RunMode::Sync,
-            acceptance_criteria: Vec::new(),
+            ..WorkflowHints::default()
         };
 
         let compiled = compiler
-            .compile(&spec, &req, ResolvedMemory::default())
+            .compile_task(&spec, &task_spec, &hints, ResolvedMemory::default())
             .expect("compile");
         assert!(compiled
             .injected_prompt
@@ -586,24 +578,25 @@ mod tests {
     fn expanded_brief_mode_uses_parent_summary_digest() {
         let compiler = DefaultContextCompiler;
         let spec = sample_spec(ContextMode::ExpandedBrief);
-        let req = RunRequest {
+        let task_spec = TaskSpec {
             task: "task".to_string(),
             task_brief: None,
-            parent_summary: Some("word ".repeat(120)),
+            acceptance_criteria: Vec::new(),
             selected_files: vec![SelectedFile {
                 path: PathBuf::from("src/ignored.rs"),
                 rationale: None,
                 content: Some("fn ignored() {}".to_string()),
             }],
-            stage: None,
-            plan_ref: None,
             working_dir: PathBuf::from("."),
+        };
+        let hints = WorkflowHints {
+            parent_summary: Some("word ".repeat(120)),
             run_mode: RunMode::Sync,
-            acceptance_criteria: Vec::new(),
+            ..WorkflowHints::default()
         };
 
         let compiled = compiler
-            .compile(&spec, &req, ResolvedMemory::default())
+            .compile_task(&spec, &task_spec, &hints, ResolvedMemory::default())
             .expect("compile");
         assert!(compiled.injected_prompt.contains("parent_summary_digest:"));
         assert!(!compiled
@@ -615,20 +608,21 @@ mod tests {
     fn summary_only_blocks_raw_transcript_like_parent_summary() {
         let compiler = DefaultContextCompiler;
         let spec = sample_spec(ContextMode::SummaryOnly);
-        let req = RunRequest {
+        let task_spec = TaskSpec {
             task: "task".to_string(),
             task_brief: None,
-            parent_summary: Some("User: hi\nAssistant: hello".to_string()),
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir: PathBuf::from("."),
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir: PathBuf::from("."),
+        };
+        let hints = WorkflowHints {
+            parent_summary: Some("User: hi\nAssistant: hello".to_string()),
+            run_mode: RunMode::Sync,
+            ..WorkflowHints::default()
         };
 
         let compiled = compiler
-            .compile(&spec, &req, ResolvedMemory::default())
+            .compile_task(&spec, &task_spec, &hints, ResolvedMemory::default())
             .expect("compile");
         assert!(compiled
             .injected_prompt
@@ -657,20 +651,21 @@ mod tests {
     fn includes_stage_role_priority_when_stage_present() {
         let compiler = DefaultContextCompiler;
         let spec = sample_spec(ContextMode::Isolated);
-        let req = RunRequest {
+        let task_spec = TaskSpec {
             task: "task".to_string(),
             task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: Some("build".to_string()),
-            plan_ref: None,
-            working_dir: PathBuf::from("."),
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir: PathBuf::from("."),
+        };
+        let hints = WorkflowHints {
+            stage: Some("build".to_string()),
+            run_mode: RunMode::Sync,
+            ..WorkflowHints::default()
         };
 
         let compiled = compiler
-            .compile(&spec, &req, ResolvedMemory::default())
+            .compile_task(&spec, &task_spec, &hints, ResolvedMemory::default())
             .expect("compile");
         assert!(compiled.injected_prompt.contains("WorkflowStage: build"));
         assert!(compiled

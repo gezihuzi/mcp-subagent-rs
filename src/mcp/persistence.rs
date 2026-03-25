@@ -209,33 +209,33 @@ pub(crate) fn load_run_record_from_disk(
         artifacts.insert(artifact.path.clone(), content);
     }
 
-    let status = persisted.status.clone();
-    let updated_at = persisted.updated_at;
-    let status_history = if persisted.status_history.is_empty() {
+    let status = persisted.state.status.clone();
+    let updated_at = persisted.state.updated_at;
+    let status_history = if persisted.state.status_history.is_empty() {
         vec![status.clone()]
     } else {
-        persisted.status_history
+        persisted.state.status_history
     };
 
     Ok(Some(RunRecord {
         status,
-        created_at: persisted.created_at.unwrap_or(updated_at),
+        created_at: persisted.state.created_at.unwrap_or(updated_at),
         updated_at,
         status_history,
-        summary: persisted.summary,
+        outcome: persisted.outcome,
         artifact_index: persisted.artifact_index,
         artifacts,
-        error_message: persisted.error_message,
-        task: persisted.task,
-        request_snapshot: persisted.request_snapshot,
+        error_message: persisted.state.error_message,
+        task_spec: persisted.task_spec,
+        hints: persisted.hints,
         spec_snapshot: persisted.spec_snapshot,
-        probe_result: persisted.probe_result,
-        memory_resolution: persisted.memory_resolution,
-        workspace: persisted.workspace,
-        compiled_context_markdown: persisted.compiled_context_markdown,
-        usage: persisted.usage,
-        retry_classification: persisted.retry_classification,
-        execution_policy: persisted.execution_policy,
+        probe_result: persisted.state.probe_result,
+        memory_resolution: persisted.state.memory_resolution,
+        workspace: persisted.state.workspace,
+        compiled_context_markdown: persisted.state.compiled_context_markdown,
+        usage: persisted.state.usage,
+        retry_classification: persisted.state.retry_classification,
+        execution_policy: persisted.state.execution_policy,
     }))
 }
 
@@ -302,17 +302,15 @@ fn build_run_events(record: &RunRecord) -> Vec<RunEventRecord> {
         ));
     }
 
-    if let Some(request) = &record.request_snapshot {
-        events.push(RunEventRecord::legacy(
-            "gate".to_string(),
-            timestamp.clone(),
-            json!({
-                "stage": request.stage,
-                "plan_ref": request.plan_ref,
-                "run_mode": request.run_mode,
-            }),
-        ));
-    }
+    events.push(RunEventRecord::legacy(
+        "gate".to_string(),
+        timestamp.clone(),
+        json!({
+            "stage": record.hints.stage,
+            "plan_ref": record.hints.plan_ref,
+            "run_mode": record.hints.run_mode,
+        }),
+    ));
 
     if let Some(workspace) = &record.workspace {
         events.push(RunEventRecord::legacy(
@@ -375,14 +373,14 @@ fn build_run_events(record: &RunRecord) -> Vec<RunEventRecord> {
         ));
     }
 
-    if let Some(summary) = &record.summary {
+    if let Some(crate::runtime::outcome::RunOutcome::Succeeded(success)) = &record.outcome {
         events.push(RunEventRecord::legacy(
             "parse".to_string(),
             timestamp.clone(),
             json!({
-                "parse_status": format!("{}", summary.parse_status),
-                "verification_status": format!("{}", summary.summary.verification_status),
-                "exit_code": summary.summary.exit_code,
+                "parse_status": format!("{}", success.parse_status),
+                "verification_status": format!("{}", success.verification),
+                "exit_code": success.usage.provider_exit_code.unwrap_or(0),
             }),
         ));
     }
@@ -512,23 +510,36 @@ mod tests {
         let created_at = OffsetDateTime::now_utc();
         let updated_at = created_at + time::Duration::seconds(1);
         let current = serde_json::json!({
-            "status": "succeeded",
-            "created_at": created_at.format(&Rfc3339).expect("created_at"),
-            "updated_at": updated_at.format(&Rfc3339).expect("updated_at"),
-            "status_history": ["received", "running", "succeeded"],
-            "summary": null,
+            "task_spec": {
+                "task": "legacy task",
+                "task_brief": null,
+                "acceptance_criteria": [],
+                "selected_files": [],
+                "working_dir": "."
+            },
+            "hints": {
+                "stage": null,
+                "plan_ref": null,
+                "parent_summary": null,
+                "run_mode": "sync"
+            },
+            "state": {
+                "status": "succeeded",
+                "created_at": created_at.format(&Rfc3339).expect("created_at"),
+                "updated_at": updated_at.format(&Rfc3339).expect("updated_at"),
+                "status_history": ["received", "running", "succeeded"],
+                "error_message": null,
+                "probe_result": null,
+                "memory_resolution": null,
+                "workspace": null,
+                "compiled_context_markdown": null,
+                "usage": null,
+                "retry_classification": null,
+                "execution_policy": null
+            },
+            "outcome": null,
             "artifact_index": [],
-            "request_snapshot": null,
             "spec_snapshot": null,
-            "probe_result": null,
-            "memory_resolution": null,
-            "workspace": null,
-            "compiled_context_markdown": null,
-            "usage": null,
-            "retry_classification": null,
-            "execution_policy": null,
-            "error_message": null,
-            "task": "legacy task"
         });
         fs::write(
             run_dir.join("run.json"),
@@ -549,7 +560,7 @@ mod tests {
                 RunStatus::Succeeded
             ]
         );
-        assert_eq!(loaded.task, "legacy task");
+        assert_eq!(loaded.task_spec.task, "legacy task");
         assert!(loaded.memory_resolution.is_none());
         assert!(loaded.compiled_context_markdown.is_none());
     }

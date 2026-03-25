@@ -23,7 +23,7 @@ use crate::{
         runtime_policy::{FileConflictPolicy, SandboxPolicy},
         Provider,
     },
-    types::{RunMode, RunRequest, SelectedFile},
+    types::{RunMode, SelectedFile, TaskSpec, WorkflowHints},
 };
 
 pub use crate::mcp::dto::{
@@ -100,7 +100,15 @@ impl McpSubagentServer {
         &self,
         input: RunAgentInput,
         requested_run_mode: RunMode,
-    ) -> std::result::Result<(LoadedAgentSpec, RunRequest, ExecutionPolicyRecord), ErrorData> {
+    ) -> std::result::Result<
+        (
+            LoadedAgentSpec,
+            TaskSpec,
+            WorkflowHints,
+            ExecutionPolicyRecord,
+        ),
+        ErrorData,
+    > {
         let specs = self.load_specs()?;
         let loaded = specs
             .into_iter()
@@ -140,10 +148,13 @@ impl McpSubagentServer {
             ));
         }
 
-        let request = RunRequest {
+        let task_spec = TaskSpec {
             task: input.task,
             task_brief: input.task_brief,
-            parent_summary: input.parent_summary,
+            acceptance_criteria: vec![
+                "Return sentinel-wrapped SummaryEnvelope JSON.".to_string(),
+                "Keep findings concise and actionable.".to_string(),
+            ],
             selected_files: input
                 .selected_files
                 .into_iter()
@@ -153,20 +164,19 @@ impl McpSubagentServer {
                     content: file.content,
                 })
                 .collect(),
-            stage: input.stage,
-            plan_ref: input.plan_ref,
             working_dir: input
                 .working_dir
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(".")),
+        };
+        let hints = WorkflowHints {
+            stage: input.stage,
+            plan_ref: input.plan_ref,
+            parent_summary: input.parent_summary,
             run_mode: effective_run_mode,
-            acceptance_criteria: vec![
-                "Return sentinel-wrapped SummaryEnvelope JSON.".to_string(),
-                "Keep findings concise and actionable.".to_string(),
-            ],
         };
 
-        Ok((loaded, request, execution_policy))
+        Ok((loaded, task_spec, hints, execution_policy))
     }
 
     pub(crate) fn probe_provider(&self, provider: &Provider) -> ProviderProbe {
@@ -247,7 +257,7 @@ impl McpSubagentServer {
     pub(crate) fn conflict_lock_keys(
         &self,
         spec: &crate::spec::AgentSpec,
-        request: &RunRequest,
+        task_spec: &TaskSpec,
     ) -> std::result::Result<Vec<String>, ErrorData> {
         if !matches!(
             spec.runtime.file_conflict_policy,
@@ -256,14 +266,14 @@ impl McpSubagentServer {
         {
             return Ok(Vec::new());
         }
-        let source = resolve_source_path(&request.working_dir)
+        let source = resolve_source_path(&task_spec.working_dir)
             .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
         let source_key = source.display().to_string();
-        if request.selected_files.is_empty() {
+        if task_spec.selected_files.is_empty() {
             return Ok(vec![format!("{source_key}::__workspace__")]);
         }
 
-        let mut keys = request
+        let mut keys = task_spec
             .selected_files
             .iter()
             .map(|selected| {
@@ -1777,46 +1787,58 @@ sandbox = "workspace_write"
                 .expect("read run json");
         let run_obj: serde_json::Value = serde_json::from_str(&run_json).expect("parse run json");
         let run_dir = state_dir.join("runs").join(&out.handle_id);
-        assert!(!run_obj["created_at"].is_null());
-        assert!(!run_obj["updated_at"].is_null());
-        assert!(run_obj["status_history"].is_array());
-        assert_eq!(run_obj["request_snapshot"]["task"], "copy workspace");
+        assert!(!run_obj["state"]["created_at"].is_null());
+        assert!(!run_obj["state"]["updated_at"].is_null());
+        assert!(run_obj["state"]["status_history"].is_array());
+        assert_eq!(run_obj["task_spec"]["task"], "copy workspace");
         assert_eq!(
-            run_obj["request_snapshot"]["working_dir"],
+            run_obj["task_spec"]["working_dir"],
             project_dir.display().to_string()
         );
         assert_eq!(run_obj["spec_snapshot"]["name"], "writer");
         assert_eq!(run_obj["spec_snapshot"]["working_dir_policy"], "temp_copy");
-        assert_eq!(run_obj["probe_result"]["provider"], "mock");
-        assert!(!run_obj["memory_resolution"].is_null());
-        assert_eq!(run_obj["workspace"]["mode"], "temp_copy");
-        assert!(!run_obj["execution_policy"].is_null());
-        assert_eq!(run_obj["execution_policy"]["requested_run_mode"], "sync");
-        assert_eq!(run_obj["execution_policy"]["effective_run_mode"], "sync");
+        assert_eq!(run_obj["state"]["probe_result"]["provider"], "mock");
+        assert!(!run_obj["state"]["memory_resolution"].is_null());
+        assert_eq!(run_obj["state"]["workspace"]["mode"], "temp_copy");
+        assert!(!run_obj["state"]["execution_policy"].is_null());
         assert_eq!(
-            run_obj["execution_policy"]["effective_run_mode_source"],
+            run_obj["state"]["execution_policy"]["requested_run_mode"],
+            "sync"
+        );
+        assert_eq!(
+            run_obj["state"]["execution_policy"]["effective_run_mode"],
+            "sync"
+        );
+        assert_eq!(
+            run_obj["state"]["execution_policy"]["effective_run_mode_source"],
             "spec"
         );
-        assert_eq!(run_obj["execution_policy"]["retry_max_attempts"], 1);
-        assert_eq!(run_obj["execution_policy"]["retry_backoff_secs"], 1);
-        assert_eq!(run_obj["execution_policy"]["attempts_used"], 1);
-        assert_eq!(run_obj["execution_policy"]["retries_used"], 0);
-        let workspace_path = run_obj["workspace"]["workspace_path"]
+        assert_eq!(
+            run_obj["state"]["execution_policy"]["retry_max_attempts"],
+            1
+        );
+        assert_eq!(
+            run_obj["state"]["execution_policy"]["retry_backoff_secs"],
+            1
+        );
+        assert_eq!(run_obj["state"]["execution_policy"]["attempts_used"], 1);
+        assert_eq!(run_obj["state"]["execution_policy"]["retries_used"], 0);
+        let workspace_path = run_obj["state"]["workspace"]["workspace_path"]
             .as_str()
             .expect("workspace path");
         assert!(
             !Path::new(workspace_path).exists(),
             "workspace should be cleaned after run completion"
         );
-        assert!(run_obj["workspace"]["lock_key"]
+        assert!(run_obj["state"]["workspace"]["lock_key"]
             .as_str()
             .expect("lock key")
             .contains("project"));
-        assert!(run_obj["workspace"]["lock_keys"].is_array());
-        assert!(run_obj["workspace"]["lock_keys"]
+        assert!(run_obj["state"]["workspace"]["lock_keys"].is_array());
+        assert!(run_obj["state"]["workspace"]["lock_keys"]
             .as_array()
             .is_some_and(|keys| !keys.is_empty()));
-        assert!(run_obj["compiled_context_markdown"]
+        assert!(run_obj["state"]["compiled_context_markdown"]
             .as_str()
             .unwrap_or_default()
             .contains("ROLE"));

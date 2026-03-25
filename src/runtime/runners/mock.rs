@@ -3,7 +3,7 @@ use crate::{
     runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
     runtime::summary::{StructuredSummary, SUMMARY_END_SENTINEL, SUMMARY_START_SENTINEL},
     spec::AgentSpec,
-    types::{CompiledContext, RunRequest, TaskSpec, WorkflowHints},
+    types::{CompiledContext, TaskSpec, WorkflowHints},
 };
 
 #[derive(Debug, Clone)]
@@ -90,17 +90,6 @@ impl AgentRunner for MockRunner {
         };
         Ok(execution)
     }
-
-    async fn execute(
-        &self,
-        spec: &AgentSpec,
-        request: &RunRequest,
-        compiled: &CompiledContext,
-    ) -> Result<RunnerExecution> {
-        let task_spec = request.to_task_spec();
-        let hints = request.to_workflow_hints();
-        self.execute_task(spec, &task_spec, &hints, compiled).await
-    }
 }
 
 fn build_mock_summary_from_task_spec(spec: &AgentSpec, task_spec: &TaskSpec) -> StructuredSummary {
@@ -143,7 +132,7 @@ mod tests {
             runtime_policy::{RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
             AgentSpec,
         },
-        types::{CompiledContext, RunMode, RunRequest},
+        types::{CompiledContext, RunMode, TaskSpec, WorkflowHints},
     };
 
     fn sample_spec() -> AgentSpec {
@@ -170,17 +159,13 @@ mod tests {
         }
     }
 
-    fn sample_request() -> RunRequest {
-        RunRequest {
+    fn sample_task_spec() -> TaskSpec {
+        TaskSpec {
             task: "review".to_string(),
             task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir: PathBuf::from("."),
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir: PathBuf::from("."),
         }
     }
 
@@ -201,9 +186,13 @@ mod tests {
         });
 
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(),
-                &sample_request(),
+                &sample_task_spec(),
+                &WorkflowHints {
+                    run_mode: RunMode::Sync,
+                    ..WorkflowHints::default()
+                },
                 &CompiledContext {
                     system_prefix: String::new(),
                     injected_prompt: String::new(),

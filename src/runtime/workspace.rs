@@ -13,7 +13,7 @@ use crate::{
         runtime_policy::{DelegationContextPolicy, SandboxPolicy, WorkingDirPolicy},
         AgentSpec, Provider,
     },
-    types::RunRequest,
+    types::{TaskSpec, WorkflowHints},
 };
 
 const GEMINI_RESEARCH_SCRATCH_ENV: &str = "MCP_SUBAGENT_GEMINI_RESEARCH_SCRATCH_DIR";
@@ -39,14 +39,15 @@ pub struct PreparedWorkspace {
 
 pub fn prepare_workspace(
     spec: &AgentSpec,
-    request: &RunRequest,
+    task_spec: &TaskSpec,
+    hints: &WorkflowHints,
     state_dir: &Path,
     handle_id: &str,
 ) -> Result<PreparedWorkspace> {
-    let source_path = resolve_source_path(&request.working_dir)?;
+    let source_path = resolve_source_path(&task_spec.working_dir)?;
     match spec.runtime.working_dir_policy {
         WorkingDirPolicy::Auto => {
-            prepare_auto_workspace(spec, request, source_path, state_dir, handle_id)
+            prepare_auto_workspace(spec, task_spec, hints, source_path, state_dir, handle_id)
         }
         WorkingDirPolicy::InPlace => Ok(PreparedWorkspace {
             source_path: source_path.clone(),
@@ -65,14 +66,16 @@ pub fn prepare_workspace(
 
 fn prepare_auto_workspace(
     spec: &AgentSpec,
-    request: &RunRequest,
+    task_spec: &TaskSpec,
+    hints: &WorkflowHints,
     source_path: PathBuf,
     state_dir: &Path,
     handle_id: &str,
 ) -> Result<PreparedWorkspace> {
     prepare_auto_workspace_with_scratch_override(
         spec,
-        request,
+        task_spec,
+        hints,
         source_path,
         state_dir,
         handle_id,
@@ -82,13 +85,14 @@ fn prepare_auto_workspace(
 
 fn prepare_auto_workspace_with_scratch_override(
     spec: &AgentSpec,
-    request: &RunRequest,
+    task_spec: &TaskSpec,
+    hints: &WorkflowHints,
     source_path: PathBuf,
     state_dir: &Path,
     handle_id: &str,
     scratch_override: Option<&Path>,
 ) -> Result<PreparedWorkspace> {
-    let stage = request
+    let stage = hints
         .stage
         .as_deref()
         .unwrap_or_default()
@@ -98,7 +102,8 @@ fn prepare_auto_workspace_with_scratch_override(
 
     if let Some(prepared) = maybe_prepare_gemini_research_scratch_workspace(
         spec,
-        request,
+        task_spec,
+        hints,
         &source_path,
         &stage,
         read_only,
@@ -115,7 +120,7 @@ fn prepare_auto_workspace_with_scratch_override(
         if read_stage {
             notes.push(format!(
                 "auto policy selected in-place workspace for stage `{}`",
-                request.stage.as_deref().unwrap_or_default()
+                hints.stage.as_deref().unwrap_or_default()
             ));
         }
         return Ok(PreparedWorkspace {
@@ -131,13 +136,14 @@ fn prepare_auto_workspace_with_scratch_override(
 
 fn maybe_prepare_gemini_research_scratch_workspace(
     spec: &AgentSpec,
-    request: &RunRequest,
+    task_spec: &TaskSpec,
+    hints: &WorkflowHints,
     source_path: &Path,
     stage: &str,
     read_only: bool,
     scratch_override: Option<&Path>,
 ) -> Result<Option<PreparedWorkspace>> {
-    if !should_use_gemini_research_scratch(spec, request, stage, read_only) {
+    if !should_use_gemini_research_scratch(spec, task_spec, hints, stage, read_only) {
         return Ok(None);
     }
 
@@ -160,7 +166,8 @@ fn maybe_prepare_gemini_research_scratch_workspace(
 
 fn should_use_gemini_research_scratch(
     spec: &AgentSpec,
-    request: &RunRequest,
+    task_spec: &TaskSpec,
+    hints: &WorkflowHints,
     stage: &str,
     read_only: bool,
 ) -> bool {
@@ -176,7 +183,7 @@ fn should_use_gemini_research_scratch(
     ) {
         return false;
     }
-    if !request.selected_files.is_empty() || request.plan_ref.is_some() {
+    if !task_spec.selected_files.is_empty() || hints.plan_ref.is_some() {
         return false;
     }
 
@@ -409,7 +416,7 @@ mod tests {
             },
             AgentSpec,
         },
-        types::{RunMode, RunRequest},
+        types::{RunMode, TaskSpec, WorkflowHints},
     };
 
     fn sample_spec(policy: WorkingDirPolicy) -> AgentSpec {
@@ -449,24 +456,34 @@ mod tests {
         }
     }
 
+    fn sample_task_spec(working_dir: std::path::PathBuf) -> TaskSpec {
+        TaskSpec {
+            task: "task".to_string(),
+            task_brief: None,
+            acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir,
+        }
+    }
+
+    fn sample_hints(stage: Option<&str>) -> WorkflowHints {
+        WorkflowHints {
+            stage: stage.map(str::to_string),
+            run_mode: RunMode::Sync,
+            ..WorkflowHints::default()
+        }
+    }
+
     #[test]
     fn in_place_uses_source_directory() {
         let temp = tempdir().expect("tempdir");
-        let request = RunRequest {
-            task: "task".to_string(),
-            task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir: temp.path().to_path_buf(),
-            run_mode: RunMode::Sync,
-            acceptance_criteria: Vec::new(),
-        };
+        let task_spec = sample_task_spec(temp.path().to_path_buf());
+        let hints = sample_hints(None);
 
         let prepared = prepare_workspace(
             &sample_spec(WorkingDirPolicy::InPlace),
-            &request,
+            &task_spec,
+            &hints,
             temp.path(),
             "h1",
         )
@@ -484,21 +501,13 @@ mod tests {
         let source = temp.path().join("source");
         std::fs::create_dir_all(&source).expect("create source");
         std::fs::write(source.join("a.txt"), "hello").expect("write source");
-        let request = RunRequest {
-            task: "task".to_string(),
-            task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir: source.clone(),
-            run_mode: RunMode::Sync,
-            acceptance_criteria: Vec::new(),
-        };
+        let task_spec = sample_task_spec(source.clone());
+        let hints = sample_hints(None);
 
         let prepared = prepare_workspace(
             &sample_spec(WorkingDirPolicy::TempCopy),
-            &request,
+            &task_spec,
+            &hints,
             temp.path(),
             "h2",
         )
@@ -512,21 +521,13 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let source = temp.path().join("source");
         std::fs::create_dir_all(&source).expect("create source");
-        let request = RunRequest {
-            task: "task".to_string(),
-            task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir: source,
-            run_mode: RunMode::Sync,
-            acceptance_criteria: Vec::new(),
-        };
+        let task_spec = sample_task_spec(source);
+        let hints = sample_hints(None);
 
         let prepared = prepare_workspace(
             &sample_spec(WorkingDirPolicy::GitWorktree),
-            &request,
+            &task_spec,
+            &hints,
             temp.path(),
             "h3",
         )
@@ -538,21 +539,13 @@ mod tests {
     #[test]
     fn auto_policy_uses_in_place_for_read_only_task() {
         let temp = tempdir().expect("tempdir");
-        let request = RunRequest {
-            task: "task".to_string(),
-            task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: Some("research".to_string()),
-            plan_ref: None,
-            working_dir: temp.path().to_path_buf(),
-            run_mode: RunMode::Sync,
-            acceptance_criteria: Vec::new(),
-        };
+        let task_spec = sample_task_spec(temp.path().to_path_buf());
+        let hints = sample_hints(Some("research"));
 
         let prepared = prepare_workspace(
             &sample_spec_with_sandbox(WorkingDirPolicy::Auto, SandboxPolicy::ReadOnly),
-            &request,
+            &task_spec,
+            &hints,
             temp.path(),
             "h4",
         )
@@ -570,21 +563,13 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let source = temp.path().join("source");
         std::fs::create_dir_all(&source).expect("create source");
-        let request = RunRequest {
-            task: "task".to_string(),
-            task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: Some("build".to_string()),
-            plan_ref: None,
-            working_dir: source,
-            run_mode: RunMode::Sync,
-            acceptance_criteria: Vec::new(),
-        };
+        let task_spec = sample_task_spec(source);
+        let hints = sample_hints(Some("build"));
 
         let prepared = prepare_workspace(
             &sample_spec_with_sandbox(WorkingDirPolicy::Auto, SandboxPolicy::WorkspaceWrite),
-            &request,
+            &task_spec,
+            &hints,
             temp.path(),
             "h5",
         )
@@ -603,17 +588,9 @@ mod tests {
         let scratch = temp.path().join("scratch").join("gemini-research");
         std::fs::create_dir_all(&source).expect("create source");
 
-        let request = RunRequest {
-            task: "Search official website".to_string(),
-            task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: Some("research".to_string()),
-            plan_ref: None,
-            working_dir: source.clone(),
-            run_mode: RunMode::Sync,
-            acceptance_criteria: Vec::new(),
-        };
+        let mut task_spec = sample_task_spec(source.clone());
+        task_spec.task = "Search official website".to_string();
+        let hints = sample_hints(Some("research"));
 
         let mut spec = sample_spec_with_provider(
             WorkingDirPolicy::Auto,
@@ -625,7 +602,8 @@ mod tests {
 
         let prepared = prepare_auto_workspace_with_scratch_override(
             &spec,
-            &request,
+            &task_spec,
+            &hints,
             source.canonicalize().expect("source canonicalized"),
             temp.path(),
             "h6",
@@ -655,21 +633,14 @@ mod tests {
         let scratch = temp.path().join("scratch").join("gemini-research");
         std::fs::create_dir_all(&source).expect("create source");
 
-        let request = RunRequest {
-            task: "Inspect src/lib.rs".to_string(),
-            task_brief: None,
-            parent_summary: None,
-            selected_files: vec![crate::types::SelectedFile {
-                path: std::path::PathBuf::from("src/lib.rs"),
-                rationale: None,
-                content: None,
-            }],
-            stage: Some("research".to_string()),
-            plan_ref: None,
-            working_dir: source.clone(),
-            run_mode: RunMode::Sync,
-            acceptance_criteria: Vec::new(),
-        };
+        let mut task_spec = sample_task_spec(source.clone());
+        task_spec.task = "Inspect src/lib.rs".to_string();
+        task_spec.selected_files = vec![crate::types::SelectedFile {
+            path: std::path::PathBuf::from("src/lib.rs"),
+            rationale: None,
+            content: None,
+        }];
+        let hints = sample_hints(Some("research"));
 
         let mut spec = sample_spec_with_provider(
             WorkingDirPolicy::Auto,
@@ -681,7 +652,8 @@ mod tests {
 
         let prepared = prepare_auto_workspace_with_scratch_override(
             &spec,
-            &request,
+            &task_spec,
+            &hints,
             source.canonicalize().expect("source canonicalized"),
             temp.path(),
             "h7",

@@ -22,7 +22,7 @@ use crate::{
     spec::runtime_policy::{DelegationContextPolicy, NativeDiscoveryPolicy},
     spec::AgentSpec,
     spec::Provider,
-    types::RunRequest,
+    types::{TaskSpec, WorkflowHints},
 };
 use serde_json::json;
 
@@ -36,12 +36,13 @@ pub(crate) struct DispatchEnvelope {
 
 pub(crate) async fn run_dispatch(
     spec: &crate::spec::AgentSpec,
-    request: &RunRequest,
+    task_spec: &TaskSpec,
+    hints: &WorkflowHints,
     handle_id: &str,
     state_dir: &Path,
     lock_keys: Vec<String>,
 ) -> std::result::Result<DispatchEnvelope, ErrorData> {
-    let mut prepared_workspace = prepare_workspace(spec, request, state_dir, handle_id)
+    let mut prepared_workspace = prepare_workspace(spec, task_spec, hints, state_dir, handle_id)
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     let _ = append_run_event(
         state_dir,
@@ -59,14 +60,15 @@ pub(crate) async fn run_dispatch(
     let workspace_cleanup = WorkspaceCleanupGuard::for_workspace(&prepared_workspace);
     let workspace_record = to_workspace_record(&prepared_workspace, lock_keys);
 
-    let mut effective_request = request.clone();
-    effective_request.working_dir = prepared_workspace.workspace_path;
-    let task_spec = effective_request.to_task_spec();
-    let resolved_memory = resolve_memory_for_task(&effective_spec, &task_spec)
+    let mut effective_task_spec = task_spec.clone();
+    effective_task_spec.working_dir = prepared_workspace.workspace_path;
+    let effective_hints = hints.clone();
+    let resolved_memory = resolve_memory_for_task(&effective_spec, &effective_task_spec)
         .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
     attach_plan_section_acceptance_criteria(
         &effective_spec,
-        &mut effective_request,
+        &mut effective_task_spec,
+        &effective_hints,
         &resolved_memory,
     );
     let memory_resolution = build_memory_resolution_snapshot(&resolved_memory);
@@ -77,7 +79,8 @@ pub(crate) async fn run_dispatch(
     let mut result = dispatcher
         .run_with_observers(
             &effective_spec,
-            &effective_request,
+            &effective_task_spec,
+            &effective_hints,
             resolved_memory,
             |prev, current| {
                 if matches!(
@@ -177,7 +180,7 @@ pub(crate) async fn run_dispatch(
         )
         .await
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
-    result.workspace_path = effective_request.working_dir.clone();
+    result.workspace_path = effective_task_spec.working_dir.clone();
 
     Ok(DispatchEnvelope {
         result,
@@ -300,10 +303,11 @@ fn to_workspace_record(prepared: &PreparedWorkspace, lock_keys: Vec<String>) -> 
 
 fn attach_plan_section_acceptance_criteria(
     spec: &AgentSpec,
-    request: &mut RunRequest,
+    task_spec: &mut TaskSpec,
+    hints: &WorkflowHints,
     memory: &crate::types::ResolvedMemory,
 ) {
-    if !should_attach_plan_acceptance_criteria(spec, request) {
+    if !should_attach_plan_acceptance_criteria(spec, hints) {
         return;
     }
 
@@ -321,25 +325,25 @@ fn attach_plan_section_acceptance_criteria(
     }
 
     for item in extracted {
-        if request
+        if task_spec
             .acceptance_criteria
             .iter()
             .any(|existing| existing.eq_ignore_ascii_case(&item))
         {
             continue;
         }
-        request.acceptance_criteria.push(item);
+        task_spec.acceptance_criteria.push(item);
     }
 }
 
-fn should_attach_plan_acceptance_criteria(spec: &AgentSpec, request: &RunRequest) -> bool {
+fn should_attach_plan_acceptance_criteria(spec: &AgentSpec, hints: &WorkflowHints) -> bool {
     if matches!(
         spec.runtime.delegation_context,
         DelegationContextPolicy::PlanSection
     ) {
         return true;
     }
-    if request
+    if hints
         .stage
         .as_deref()
         .is_some_and(|stage| stage.eq_ignore_ascii_case("review"))
@@ -405,7 +409,7 @@ mod tests {
             },
             AgentSpec,
         },
-        types::{RunMode, RunRequest},
+        types::{RunMode, TaskSpec, WorkflowHints},
     };
 
     fn sample_spec(
@@ -438,17 +442,20 @@ mod tests {
         }
     }
 
-    fn sample_request(working_dir: std::path::PathBuf) -> RunRequest {
-        RunRequest {
+    fn sample_task_spec(working_dir: std::path::PathBuf) -> TaskSpec {
+        TaskSpec {
             task: "task".to_string(),
             task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir,
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir,
+        }
+    }
+
+    fn sample_hints() -> WorkflowHints {
+        WorkflowHints {
+            run_mode: RunMode::Sync,
+            ..WorkflowHints::default()
         }
     }
 
@@ -495,11 +502,12 @@ mod tests {
             WorkingDirPolicy::TempCopy,
             vec![MemorySource::AutoProjectMemory],
         );
-        let request = sample_request(source);
+        let task_spec = sample_task_spec(source);
+        let hints = sample_hints();
         let handle = "run-success-cleanup";
         let state_dir = temp.path().join("state");
 
-        let dispatch = run_dispatch(&spec, &request, handle, &state_dir, Vec::new())
+        let dispatch = run_dispatch(&spec, &task_spec, &hints, handle, &state_dir, Vec::new())
             .await
             .expect("dispatch succeeds");
         let workspace_path = dispatch.workspace.workspace_path.clone();
@@ -520,11 +528,12 @@ mod tests {
             WorkingDirPolicy::TempCopy,
             vec![MemorySource::Glob("missing/**/*.md".to_string())],
         );
-        let request = sample_request(source);
+        let task_spec = sample_task_spec(source);
+        let hints = sample_hints();
         let handle = "run-error-cleanup";
         let state_dir = temp.path().join("state");
 
-        let err = run_dispatch(&spec, &request, handle, &state_dir, Vec::new())
+        let err = run_dispatch(&spec, &task_spec, &hints, handle, &state_dir, Vec::new())
             .await
             .expect_err("dispatch should fail at memory resolve");
         assert!(err
@@ -559,11 +568,12 @@ mod tests {
         spec.runtime.delegation_context = DelegationContextPolicy::PlanSection;
         spec.runtime.plan_section_selector = Some("Acceptance Criteria".to_string());
         spec.core.tags = vec!["review".to_string()];
-        let request = sample_request(source);
+        let task_spec = sample_task_spec(source);
+        let hints = sample_hints();
         let handle = "run-plan-section-acceptance";
         let state_dir = temp.path().join("state");
 
-        let dispatch = run_dispatch(&spec, &request, handle, &state_dir, Vec::new())
+        let dispatch = run_dispatch(&spec, &task_spec, &hints, handle, &state_dir, Vec::new())
             .await
             .expect("dispatch succeeds");
 

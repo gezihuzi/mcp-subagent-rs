@@ -12,7 +12,7 @@ use crate::{
         runtime_policy::{DelegationContextPolicy, MemorySource},
         AgentSpec, Provider,
     },
-    types::{MemorySnippet, ResolvedMemory, RunRequest, TaskSpec},
+    types::{MemorySnippet, ResolvedMemory, TaskSpec},
 };
 
 const MAX_MEMORY_SNIPPET_BYTES: usize = 32 * 1024;
@@ -20,10 +20,6 @@ const PROJECT_MEMORY_CANDIDATES: [&str; 2] = ["PROJECT.md", ".mcp-subagent/PROJE
 const ACTIVE_PLAN_CANDIDATES: [&str; 2] = ["PLAN.md", ".mcp-subagent/PLAN.md"];
 const ARCHIVED_PLAN_GLOB_PATTERNS: [&str; 3] =
     ["docs/plans/*.md", "archive/*.md", "plans/archive/*.md"];
-
-pub fn resolve_memory(spec: &AgentSpec, request: &RunRequest) -> Result<ResolvedMemory> {
-    resolve_memory_for_task(spec, &request.to_task_spec())
-}
 
 pub fn resolve_memory_for_task(spec: &AgentSpec, task_spec: &TaskSpec) -> Result<ResolvedMemory> {
     let mut resolver = MemoryResolver::new(&task_spec.working_dir);
@@ -413,13 +409,13 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        runtime::memory::resolve_memory,
+        runtime::memory::resolve_memory_for_task,
         spec::{
             core::{AgentSpecCore, Provider},
             runtime_policy::{DelegationContextPolicy, MemorySource, RuntimePolicy},
             AgentSpec,
         },
-        types::{RunMode, RunRequest},
+        types::TaskSpec,
     };
 
     fn sample_spec(provider: Provider, memory_sources: Vec<MemorySource>) -> AgentSpec {
@@ -446,17 +442,13 @@ mod tests {
         }
     }
 
-    fn sample_request(working_dir: PathBuf) -> RunRequest {
-        RunRequest {
+    fn sample_task_spec(working_dir: PathBuf) -> TaskSpec {
+        TaskSpec {
             task: "task".to_string(),
             task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir,
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir,
         }
     }
 
@@ -467,8 +459,8 @@ mod tests {
         fs::write(temp.path().join("AGENTS.md"), "codex native").expect("write native");
 
         let spec = sample_spec(Provider::Codex, vec![MemorySource::AutoProjectMemory]);
-        let request = sample_request(temp.path().to_path_buf());
-        let resolved = resolve_memory(&spec, &request).expect("resolve");
+        let task_spec = sample_task_spec(temp.path().to_path_buf());
+        let resolved = resolve_memory_for_task(&spec, &task_spec).expect("resolve");
 
         assert_eq!(resolved.project_memories.len(), 1);
         assert_eq!(resolved.additional_memories.len(), 0);
@@ -493,8 +485,8 @@ mod tests {
                 MemorySource::File("AGENTS.md".to_string()),
             ],
         );
-        let request = sample_request(temp.path().to_path_buf());
-        let resolved = resolve_memory(&spec, &request).expect("resolve");
+        let task_spec = sample_task_spec(temp.path().to_path_buf());
+        let resolved = resolve_memory_for_task(&spec, &task_spec).expect("resolve");
 
         assert_eq!(resolved.native_passthrough_paths.len(), 0);
         assert_eq!(resolved.additional_memories.len(), 1);
@@ -516,8 +508,8 @@ mod tests {
             Provider::Codex,
             vec![MemorySource::Glob("docs/**/*.md".to_string())],
         );
-        let request = sample_request(temp.path().to_path_buf());
-        let resolved = resolve_memory(&spec, &request).expect("resolve");
+        let task_spec = sample_task_spec(temp.path().to_path_buf());
+        let resolved = resolve_memory_for_task(&spec, &task_spec).expect("resolve");
 
         assert_eq!(resolved.additional_memories.len(), 2);
     }
@@ -529,9 +521,9 @@ mod tests {
             Provider::Codex,
             vec![MemorySource::Glob("missing/**/*.md".to_string())],
         );
-        let request = sample_request(temp.path().to_path_buf());
+        let task_spec = sample_task_spec(temp.path().to_path_buf());
 
-        let err = resolve_memory(&spec, &request).expect_err("empty glob should fail");
+        let err = resolve_memory_for_task(&spec, &task_spec).expect_err("empty glob should fail");
         assert!(
             err.to_string().contains("did not match any files"),
             "unexpected error: {err}"
@@ -542,9 +534,9 @@ mod tests {
     fn active_plan_source_is_noop_when_plan_missing() {
         let temp = tempdir().expect("tempdir");
         let spec = sample_spec(Provider::Codex, vec![MemorySource::ActivePlan]);
-        let request = sample_request(temp.path().to_path_buf());
+        let task_spec = sample_task_spec(temp.path().to_path_buf());
 
-        let resolved = resolve_memory(&spec, &request).expect("resolve");
+        let resolved = resolve_memory_for_task(&spec, &task_spec).expect("resolve");
         assert!(resolved.additional_memories.is_empty());
     }
 
@@ -553,9 +545,9 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         fs::write(temp.path().join("PLAN.md"), "# Goal\nship feature").expect("write plan");
         let spec = sample_spec(Provider::Codex, vec![MemorySource::ActivePlan]);
-        let request = sample_request(temp.path().to_path_buf());
+        let task_spec = sample_task_spec(temp.path().to_path_buf());
 
-        let resolved = resolve_memory(&spec, &request).expect("resolve");
+        let resolved = resolve_memory_for_task(&spec, &task_spec).expect("resolve");
         assert_eq!(resolved.additional_memories.len(), 1);
         assert!(resolved.additional_memories[0]
             .label
@@ -575,9 +567,9 @@ mod tests {
         )
         .expect("write archived");
         let spec = sample_spec(Provider::Codex, vec![MemorySource::ArchivedPlans]);
-        let request = sample_request(temp.path().to_path_buf());
+        let task_spec = sample_task_spec(temp.path().to_path_buf());
 
-        let resolved = resolve_memory(&spec, &request).expect("resolve");
+        let resolved = resolve_memory_for_task(&spec, &task_spec).expect("resolve");
         assert_eq!(resolved.additional_memories.len(), 1);
         assert!(resolved.additional_memories[0]
             .label
@@ -607,9 +599,9 @@ Ship v0.9.
         let mut spec = sample_spec(Provider::Codex, vec![MemorySource::AutoProjectMemory]);
         spec.runtime.delegation_context = DelegationContextPolicy::PlanSection;
         spec.runtime.plan_section_selector = Some("Acceptance Criteria".to_string());
-        let request = sample_request(temp.path().to_path_buf());
+        let task_spec = sample_task_spec(temp.path().to_path_buf());
 
-        let resolved = resolve_memory(&spec, &request).expect("resolve");
+        let resolved = resolve_memory_for_task(&spec, &task_spec).expect("resolve");
         let section = resolved
             .additional_memories
             .iter()
@@ -631,9 +623,9 @@ Ship v0.9.
         let mut spec = sample_spec(Provider::Codex, vec![MemorySource::AutoProjectMemory]);
         spec.runtime.delegation_context = DelegationContextPolicy::PlanSection;
         spec.runtime.plan_section_selector = Some("Acceptance Criteria".to_string());
-        let request = sample_request(temp.path().to_path_buf());
+        let task_spec = sample_task_spec(temp.path().to_path_buf());
 
-        let err = resolve_memory(&spec, &request).expect_err("selector should fail");
+        let err = resolve_memory_for_task(&spec, &task_spec).expect_err("selector should fail");
         assert!(
             err.to_string().contains("plan section selector"),
             "unexpected error: {err}"

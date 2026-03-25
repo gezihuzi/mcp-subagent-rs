@@ -23,7 +23,7 @@ use crate::{
         workflow::WorkflowStageKind,
         Provider,
     },
-    types::{ResolvedMemory, RunRequest},
+    types::{ResolvedMemory, TaskSpec, WorkflowHints},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -121,31 +121,34 @@ where
     pub async fn run(
         &self,
         spec: &crate::spec::AgentSpec,
-        request: &RunRequest,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
         memory: ResolvedMemory,
     ) -> Result<DispatchRunResult> {
-        self.run_with_observers(spec, request, memory, |_prev, _next| {}, None)
+        self.run_with_observers(spec, task_spec, hints, memory, |_prev, _next| {}, None)
             .await
     }
 
     pub async fn run_with_transition_observer<F>(
         &self,
         spec: &crate::spec::AgentSpec,
-        request: &RunRequest,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
         memory: ResolvedMemory,
         mut on_transition: F,
     ) -> Result<DispatchRunResult>
     where
         F: FnMut(Option<RunStatus>, RunStatus),
     {
-        self.run_with_observers(spec, request, memory, &mut on_transition, None)
+        self.run_with_observers(spec, task_spec, hints, memory, &mut on_transition, None)
             .await
     }
 
     pub async fn run_with_observers<F>(
         &self,
         spec: &crate::spec::AgentSpec,
-        request: &RunRequest,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
         memory: ResolvedMemory,
         mut on_transition: F,
         mut output_observer: Option<&mut dyn RunnerOutputObserver>,
@@ -153,17 +156,15 @@ where
     where
         F: FnMut(Option<RunStatus>, RunStatus),
     {
-        let task_spec = request.to_task_spec();
-        let workflow_hints = request.to_workflow_hints();
-        let mut tracker = RunTracker::new(spec, request.working_dir.clone());
+        let mut tracker = RunTracker::new(spec, task_spec.working_dir.clone());
 
         let mut previous_status = tracker.status.clone();
         tracker.transition(RunStatus::Validating);
         on_transition(Some(previous_status), RunStatus::Validating);
         validate_agent_spec(spec)?;
-        enforce_readonly_gitworktree_scope(spec, request)?;
-        enforce_runtime_depth(spec, request)?;
-        enforce_workflow_gate(spec, request)?;
+        enforce_readonly_gitworktree_scope(spec, hints)?;
+        enforce_runtime_depth(spec, hints)?;
+        enforce_workflow_gate(spec, task_spec, hints)?;
 
         previous_status = tracker.status.clone();
         tracker.transition(RunStatus::ProbingProvider);
@@ -178,9 +179,7 @@ where
         previous_status = tracker.status.clone();
         tracker.transition(RunStatus::CompilingContext);
         on_transition(Some(previous_status), RunStatus::CompilingContext);
-        let compiled = self
-            .compiler
-            .compile_task(spec, &task_spec, &workflow_hints, memory)?;
+        let compiled = self.compiler.compile_task(spec, task_spec, hints, memory)?;
         let compiled_context_markdown =
             format!("{}\n\n{}", compiled.system_prefix, compiled.injected_prompt);
 
@@ -209,18 +208,12 @@ where
             let execution = match output_observer.as_deref_mut() {
                 Some(observer) => {
                     self.runner
-                        .execute_task_with_observer(
-                            spec,
-                            &task_spec,
-                            &workflow_hints,
-                            &compiled,
-                            observer,
-                        )
+                        .execute_task_with_observer(spec, task_spec, hints, &compiled, observer)
                         .await?
                 }
                 None => {
                     self.runner
-                        .execute_task(spec, &task_spec, &workflow_hints, &compiled)
+                        .execute_task(spec, task_spec, hints, &compiled)
                         .await?
                 }
             };
@@ -530,7 +523,11 @@ fn classify_error_message(message: &str) -> RetryMessageClassification {
     }
 }
 
-fn enforce_workflow_gate(spec: &crate::spec::AgentSpec, request: &RunRequest) -> Result<()> {
+fn enforce_workflow_gate(
+    spec: &crate::spec::AgentSpec,
+    task_spec: &TaskSpec,
+    hints: &WorkflowHints,
+) -> Result<()> {
     let Some(workflow) = spec.workflow.as_ref() else {
         return Ok(());
     };
@@ -538,7 +535,7 @@ fn enforce_workflow_gate(spec: &crate::spec::AgentSpec, request: &RunRequest) ->
         return Ok(());
     }
 
-    let Some(stage_raw) = request.stage.as_deref() else {
+    let Some(stage_raw) = hints.stage.as_deref() else {
         return Ok(());
     };
     let stage = parse_stage_kind(stage_raw)?;
@@ -554,19 +551,19 @@ fn enforce_workflow_gate(spec: &crate::spec::AgentSpec, request: &RunRequest) ->
         )));
     }
     enforce_stage_agent_routing(spec, &stage, stage_raw)?;
-    enforce_review_policy(spec, request, &stage, stage_raw)?;
+    enforce_review_policy(spec, task_spec, hints, &stage, stage_raw)?;
 
     if !matches!(stage, WorkflowStageKind::Build | WorkflowStageKind::Review) {
         return Ok(());
     }
 
     let gate = &workflow.require_plan_when;
-    let triggered_reasons = collect_plan_gate_triggered_reasons(spec, request, gate);
+    let triggered_reasons = collect_plan_gate_triggered_reasons(spec, task_spec, hints, gate);
     if triggered_reasons.is_empty() {
         return Ok(());
     }
 
-    if has_plan_file(request) {
+    if has_plan_file(task_spec, hints) {
         return Ok(());
     }
 
@@ -576,7 +573,7 @@ fn enforce_workflow_gate(spec: &crate::spec::AgentSpec, request: &RunRequest) ->
     )))
 }
 
-fn enforce_runtime_depth(spec: &crate::spec::AgentSpec, request: &RunRequest) -> Result<()> {
+fn enforce_runtime_depth(spec: &crate::spec::AgentSpec, hints: &WorkflowHints) -> Result<()> {
     let Some(workflow) = spec.workflow.as_ref() else {
         return Ok(());
     };
@@ -584,7 +581,7 @@ fn enforce_runtime_depth(spec: &crate::spec::AgentSpec, request: &RunRequest) ->
         return Ok(());
     }
 
-    let depth = infer_runtime_depth(request);
+    let depth = infer_runtime_depth(hints);
     if depth > workflow.max_runtime_depth {
         return Err(McpSubagentError::SpecValidation(format!(
             "workflow runtime depth exceeded: depth={} max_runtime_depth={}",
@@ -596,7 +593,7 @@ fn enforce_runtime_depth(spec: &crate::spec::AgentSpec, request: &RunRequest) ->
 
 fn enforce_readonly_gitworktree_scope(
     spec: &crate::spec::AgentSpec,
-    request: &RunRequest,
+    hints: &WorkflowHints,
 ) -> Result<()> {
     if !matches!(spec.runtime.sandbox, SandboxPolicy::ReadOnly)
         || !matches!(
@@ -607,7 +604,7 @@ fn enforce_readonly_gitworktree_scope(
         return Ok(());
     }
 
-    let Some(stage_raw) = request.stage.as_deref() else {
+    let Some(stage_raw) = hints.stage.as_deref() else {
         return Err(McpSubagentError::SpecValidation(
             "ReadOnly + GitWorktree requires explicit stage Research or Plan".to_string(),
         ));
@@ -622,8 +619,8 @@ fn enforce_readonly_gitworktree_scope(
     )))
 }
 
-fn infer_runtime_depth(request: &RunRequest) -> u8 {
-    let Some(parent_summary) = request.parent_summary.as_deref() else {
+fn infer_runtime_depth(hints: &WorkflowHints) -> u8 {
+    let Some(parent_summary) = hints.parent_summary.as_deref() else {
         return 0;
     };
     parse_runtime_depth_marker(parent_summary)
@@ -655,16 +652,19 @@ fn parse_stage_kind(stage: &str) -> Result<WorkflowStageKind> {
     }
 }
 
-fn has_plan_file(request: &RunRequest) -> bool {
-    if let Some(plan_ref) = request.plan_ref.as_deref() {
-        let plan_path = request.working_dir.join(plan_ref);
+fn has_plan_file(task_spec: &TaskSpec, hints: &WorkflowHints) -> bool {
+    if let Some(plan_ref) = hints.plan_ref.as_deref() {
+        let plan_path = task_spec.working_dir.join(plan_ref);
         if plan_path.is_file() {
             return true;
         }
     }
 
-    request.working_dir.join("PLAN.md").is_file()
-        || request.working_dir.join(".mcp-subagent/PLAN.md").is_file()
+    task_spec.working_dir.join("PLAN.md").is_file()
+        || task_spec
+            .working_dir
+            .join(".mcp-subagent/PLAN.md")
+            .is_file()
 }
 
 fn enforce_stage_agent_routing(
@@ -746,7 +746,8 @@ fn enforce_stage_agent_routing(
 
 fn enforce_review_policy(
     spec: &crate::spec::AgentSpec,
-    request: &RunRequest,
+    task_spec: &TaskSpec,
+    hints: &WorkflowHints,
     stage: &WorkflowStageKind,
     stage_raw: &str,
 ) -> Result<()> {
@@ -762,7 +763,8 @@ fn enforce_review_policy(
 
     let policy = &workflow.review_policy;
     let high_risk =
-        !collect_plan_gate_triggered_reasons(spec, request, &workflow.require_plan_when).is_empty();
+        !collect_plan_gate_triggered_reasons(spec, task_spec, hints, &workflow.require_plan_when)
+            .is_empty();
     let required_style = policy.require_style_review || high_risk;
     let required_correctness = policy.require_correctness_review;
     if !required_correctness && !required_style {
@@ -771,7 +773,7 @@ fn enforce_review_policy(
 
     let profile = agent_stage_profile(spec);
     let current_tracks = detect_review_tracks(&profile);
-    let parent_tracks = detect_parent_summary_review_tracks(request.parent_summary.as_deref());
+    let parent_tracks = detect_parent_summary_review_tracks(hints.parent_summary.as_deref());
     let has_correctness = current_tracks.correctness || parent_tracks.correctness;
     let has_style = current_tracks.style || parent_tracks.style;
 
@@ -861,14 +863,15 @@ fn agent_stage_profile(spec: &crate::spec::AgentSpec) -> String {
 
 fn collect_plan_gate_triggered_reasons(
     spec: &crate::spec::AgentSpec,
-    request: &RunRequest,
+    task_spec: &TaskSpec,
+    hints: &WorkflowHints,
     gate: &crate::spec::workflow::WorkflowGatePolicy,
 ) -> Vec<String> {
     let mut reasons = Vec::new();
 
     if gate
         .require_plan_if_touched_files_ge
-        .is_some_and(|threshold| request.selected_files.len() as u32 >= threshold)
+        .is_some_and(|threshold| task_spec.selected_files.len() as u32 >= threshold)
     {
         reasons.push("touched_files_ge".to_string());
     }
@@ -879,31 +882,31 @@ fn collect_plan_gate_triggered_reasons(
         reasons.push("estimated_runtime_minutes_ge".to_string());
     }
     if gate.require_plan_if_parallel_agents
-        && matches!(request.run_mode, crate::types::RunMode::Async)
+        && matches!(hints.run_mode, crate::types::RunMode::Async)
     {
         reasons.push("parallel_agents".to_string());
     }
-    if gate.require_plan_if_cross_module && detect_cross_module_request(request) {
+    if gate.require_plan_if_cross_module && detect_cross_module_request(task_spec) {
         reasons.push("cross_module".to_string());
     }
-    if gate.require_plan_if_new_interface && detect_new_interface_request(request) {
+    if gate.require_plan_if_new_interface && detect_new_interface_request(task_spec) {
         reasons.push("new_interface".to_string());
     }
-    if gate.require_plan_if_migration && detect_migration_request(request) {
+    if gate.require_plan_if_migration && detect_migration_request(task_spec) {
         reasons.push("migration".to_string());
     }
-    if gate.require_plan_if_human_approval_point && detect_human_approval_point(spec, request) {
+    if gate.require_plan_if_human_approval_point && detect_human_approval_point(spec, task_spec) {
         reasons.push("human_approval_point".to_string());
     }
 
     reasons
 }
 
-fn detect_cross_module_request(request: &RunRequest) -> bool {
+fn detect_cross_module_request(task_spec: &TaskSpec) -> bool {
     let mut roots = HashSet::new();
 
-    for selected in &request.selected_files {
-        let root = top_level_module_root(request, &selected.path);
+    for selected in &task_spec.selected_files {
+        let root = top_level_module_root(task_spec, &selected.path);
         if let Some(root) = root {
             roots.insert(root);
         }
@@ -912,7 +915,7 @@ fn detect_cross_module_request(request: &RunRequest) -> bool {
         }
     }
 
-    let text = workflow_signal_text(request);
+    let text = workflow_signal_text(task_spec);
     contains_any_keyword(
         &text,
         &[
@@ -926,10 +929,10 @@ fn detect_cross_module_request(request: &RunRequest) -> bool {
     )
 }
 
-fn top_level_module_root(request: &RunRequest, selected_path: &std::path::Path) -> Option<String> {
+fn top_level_module_root(task_spec: &TaskSpec, selected_path: &std::path::Path) -> Option<String> {
     let effective_path = if selected_path.is_absolute() {
         selected_path
-            .strip_prefix(&request.working_dir)
+            .strip_prefix(&task_spec.working_dir)
             .unwrap_or(selected_path)
     } else {
         selected_path
@@ -943,8 +946,8 @@ fn top_level_module_root(request: &RunRequest, selected_path: &std::path::Path) 
         })
 }
 
-fn detect_new_interface_request(request: &RunRequest) -> bool {
-    let text = workflow_signal_text(request);
+fn detect_new_interface_request(task_spec: &TaskSpec) -> bool {
+    let text = workflow_signal_text(task_spec);
     contains_any_keyword(
         &text,
         &[
@@ -963,8 +966,8 @@ fn detect_new_interface_request(request: &RunRequest) -> bool {
     )
 }
 
-fn detect_migration_request(request: &RunRequest) -> bool {
-    let text = workflow_signal_text(request);
+fn detect_migration_request(task_spec: &TaskSpec) -> bool {
+    let text = workflow_signal_text(task_spec);
     contains_any_keyword(
         &text,
         &[
@@ -981,11 +984,11 @@ fn detect_migration_request(request: &RunRequest) -> bool {
     )
 }
 
-fn detect_human_approval_point(spec: &crate::spec::AgentSpec, request: &RunRequest) -> bool {
+fn detect_human_approval_point(spec: &crate::spec::AgentSpec, task_spec: &TaskSpec) -> bool {
     if matches!(spec.runtime.approval, ApprovalPolicy::Ask) {
         return true;
     }
-    let text = workflow_signal_text(request);
+    let text = workflow_signal_text(task_spec);
     contains_any_keyword(
         &text,
         &[
@@ -1000,11 +1003,11 @@ fn detect_human_approval_point(spec: &crate::spec::AgentSpec, request: &RunReque
     )
 }
 
-fn workflow_signal_text(request: &RunRequest) -> String {
+fn workflow_signal_text(task_spec: &TaskSpec) -> String {
     let mut text = String::new();
-    text.push_str(&request.task);
+    text.push_str(&task_spec.task);
     text.push('\n');
-    if let Some(task_brief) = request.task_brief.as_deref() {
+    if let Some(task_brief) = task_spec.task_brief.as_deref() {
         text.push_str(task_brief);
     }
     text.to_lowercase()
@@ -1100,7 +1103,7 @@ mod tests {
             workflow::{WorkflowGatePolicy, WorkflowSpec, WorkflowStageKind},
             AgentSpec,
         },
-        types::{ResolvedMemory, RunMode, RunRequest, SelectedFile},
+        types::{ResolvedMemory, RunMode, SelectedFile, TaskSpec, WorkflowHints},
     };
 
     fn sample_spec() -> AgentSpec {
@@ -1142,10 +1145,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentRunner for SequenceRunner {
-        async fn execute(
+        async fn execute_task(
             &self,
             _spec: &AgentSpec,
-            _request: &RunRequest,
+            _task_spec: &TaskSpec,
+            _hints: &WorkflowHints,
             _compiled: &crate::types::CompiledContext,
         ) -> crate::error::Result<RunnerExecution> {
             let mut executions = self.executions.lock().expect("lock sequence");
@@ -1162,17 +1166,20 @@ mod tests {
         }
     }
 
-    fn sample_request() -> RunRequest {
-        RunRequest {
+    fn sample_task_spec() -> TaskSpec {
+        TaskSpec {
             task: "review parser".to_string(),
             task_brief: Some("review parser".to_string()),
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir: PathBuf::from("."),
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir: PathBuf::from("."),
+        }
+    }
+
+    fn sample_hints() -> WorkflowHints {
+        WorkflowHints {
+            run_mode: RunMode::Sync,
+            ..WorkflowHints::default()
         }
     }
 
@@ -1299,7 +1306,12 @@ mod tests {
         );
 
         let result = dispatcher
-            .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .run(
+                &sample_spec(),
+                &sample_task_spec(),
+                &sample_hints(),
+                ResolvedMemory::default(),
+            )
             .await
             .expect("dispatch run");
 
@@ -1322,7 +1334,12 @@ mod tests {
         );
 
         let result = dispatcher
-            .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .run(
+                &sample_spec(),
+                &sample_task_spec(),
+                &sample_hints(),
+                ResolvedMemory::default(),
+            )
             .await
             .expect("dispatch run");
 
@@ -1352,7 +1369,12 @@ mod tests {
         );
 
         let result = dispatcher
-            .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .run(
+                &sample_spec(),
+                &sample_task_spec(),
+                &sample_hints(),
+                ResolvedMemory::default(),
+            )
             .await
             .expect("dispatch run");
 
@@ -1387,7 +1409,12 @@ mod tests {
         );
 
         let result = dispatcher
-            .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .run(
+                &sample_spec(),
+                &sample_task_spec(),
+                &sample_hints(),
+                ResolvedMemory::default(),
+            )
             .await
             .expect("dispatch run");
 
@@ -1410,7 +1437,12 @@ mod tests {
         spec.runtime.parse_policy = ParsePolicy::Strict;
 
         let result = dispatcher
-            .run(&spec, &sample_request(), ResolvedMemory::default())
+            .run(
+                &spec,
+                &sample_task_spec(),
+                &sample_hints(),
+                ResolvedMemory::default(),
+            )
             .await
             .expect("dispatch run");
 
@@ -1438,7 +1470,12 @@ mod tests {
         );
 
         let result = dispatcher
-            .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .run(
+                &sample_spec(),
+                &sample_task_spec(),
+                &sample_hints(),
+                ResolvedMemory::default(),
+            )
             .await
             .expect("dispatch run");
 
@@ -1464,7 +1501,12 @@ mod tests {
         );
 
         let result = dispatcher
-            .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .run(
+                &sample_spec(),
+                &sample_task_spec(),
+                &sample_hints(),
+                ResolvedMemory::default(),
+            )
             .await
             .expect("dispatch run");
 
@@ -1484,7 +1526,12 @@ mod tests {
         );
 
         let result = dispatcher
-            .run(&sample_spec(), &sample_request(), ResolvedMemory::default())
+            .run(
+                &sample_spec(),
+                &sample_task_spec(),
+                &sample_hints(),
+                ResolvedMemory::default(),
+            )
             .await
             .expect("dispatch run");
 
@@ -1518,7 +1565,12 @@ mod tests {
         );
 
         let result = dispatcher
-            .run(&spec, &sample_request(), ResolvedMemory::default())
+            .run(
+                &spec,
+                &sample_task_spec(),
+                &sample_hints(),
+                ResolvedMemory::default(),
+            )
             .await
             .expect("dispatch run");
 
@@ -1556,7 +1608,12 @@ mod tests {
         );
 
         let result = dispatcher
-            .run(&spec, &sample_request(), ResolvedMemory::default())
+            .run(
+                &spec,
+                &sample_task_spec(),
+                &sample_hints(),
+                ResolvedMemory::default(),
+            )
             .await
             .expect("dispatch run");
 
@@ -1584,10 +1641,11 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("build".to_string());
-        request.working_dir = temp.path().to_path_buf();
-        request.selected_files = vec![SelectedFile {
+        let mut task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("build".to_string());
+        task_spec.working_dir = temp.path().to_path_buf();
+        task_spec.selected_files = vec![SelectedFile {
             path: PathBuf::from("src/a.rs"),
             rationale: None,
             content: None,
@@ -1596,7 +1654,8 @@ mod tests {
         let err = dispatcher
             .run(
                 &sample_spec_with_plan_gate(),
-                &request,
+                &task_spec,
+                &hints,
                 ResolvedMemory::default(),
             )
             .await
@@ -1617,10 +1676,11 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("build".to_string());
-        request.working_dir = temp.path().to_path_buf();
-        request.selected_files = vec![SelectedFile {
+        let mut task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("build".to_string());
+        task_spec.working_dir = temp.path().to_path_buf();
+        task_spec.selected_files = vec![SelectedFile {
             path: PathBuf::from("src/a.rs"),
             rationale: None,
             content: None,
@@ -1629,7 +1689,8 @@ mod tests {
         let result = dispatcher
             .run(
                 &sample_spec_with_plan_gate(),
-                &request,
+                &task_spec,
+                &hints,
                 ResolvedMemory::default(),
             )
             .await
@@ -1646,10 +1707,11 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("build".to_string());
-        request.working_dir = temp.path().to_path_buf();
-        request.selected_files = vec![
+        let mut task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("build".to_string());
+        task_spec.working_dir = temp.path().to_path_buf();
+        task_spec.selected_files = vec![
             SelectedFile {
                 path: PathBuf::from("src/a.rs"),
                 rationale: None,
@@ -1675,7 +1737,8 @@ mod tests {
         let err = dispatcher
             .run(
                 &sample_spec_with_custom_plan_gate(gate),
-                &request,
+                &task_spec,
+                &hints,
                 ResolvedMemory::default(),
             )
             .await
@@ -1692,10 +1755,11 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("build".to_string());
-        request.working_dir = temp.path().to_path_buf();
-        request.task = "add new public API endpoint for parser".to_string();
+        let mut task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("build".to_string());
+        task_spec.working_dir = temp.path().to_path_buf();
+        task_spec.task = "add new public API endpoint for parser".to_string();
 
         let gate = WorkflowGatePolicy {
             require_plan_if_touched_files_ge: None,
@@ -1710,7 +1774,8 @@ mod tests {
         let err = dispatcher
             .run(
                 &sample_spec_with_custom_plan_gate(gate),
-                &request,
+                &task_spec,
+                &hints,
                 ResolvedMemory::default(),
             )
             .await
@@ -1727,10 +1792,11 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("build".to_string());
-        request.working_dir = temp.path().to_path_buf();
-        request.task = "run database migration from v1 to v2".to_string();
+        let mut task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("build".to_string());
+        task_spec.working_dir = temp.path().to_path_buf();
+        task_spec.task = "run database migration from v1 to v2".to_string();
 
         let gate = WorkflowGatePolicy {
             require_plan_if_touched_files_ge: None,
@@ -1745,7 +1811,8 @@ mod tests {
         let err = dispatcher
             .run(
                 &sample_spec_with_custom_plan_gate(gate),
-                &request,
+                &task_spec,
+                &hints,
                 ResolvedMemory::default(),
             )
             .await
@@ -1762,9 +1829,10 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("build".to_string());
-        request.working_dir = temp.path().to_path_buf();
+        let mut task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("build".to_string());
+        task_spec.working_dir = temp.path().to_path_buf();
 
         let gate = WorkflowGatePolicy {
             require_plan_if_touched_files_ge: None,
@@ -1780,7 +1848,7 @@ mod tests {
         spec.runtime.approval = ApprovalPolicy::Ask;
 
         let err = dispatcher
-            .run(&spec, &request, ResolvedMemory::default())
+            .run(&spec, &task_spec, &hints, ResolvedMemory::default())
             .await
             .expect_err("missing plan should fail when human_approval_point trigger hits");
         assert!(err.to_string().contains("human_approval_point"));
@@ -1794,13 +1862,15 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("research".to_string());
+        let task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("research".to_string());
 
         let err = dispatcher
             .run(
                 &sample_spec_with_plan_gate(),
-                &request,
+                &task_spec,
+                &hints,
                 ResolvedMemory::default(),
             )
             .await
@@ -1820,14 +1890,16 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.parent_summary = Some("runtime_depth=1 previous nested run".to_string());
-        request.stage = Some("build".to_string());
+        let task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.parent_summary = Some("runtime_depth=1 previous nested run".to_string());
+        hints.stage = Some("build".to_string());
 
         let err = dispatcher
             .run(
                 &sample_spec_with_depth_limit(1),
-                &request,
+                &task_spec,
+                &hints,
                 ResolvedMemory::default(),
             )
             .await
@@ -1850,11 +1922,12 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("research".to_string());
+        let task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("research".to_string());
 
         let result = dispatcher
-            .run(&spec, &request, ResolvedMemory::default())
+            .run(&spec, &task_spec, &hints, ResolvedMemory::default())
             .await
             .expect("readonly+gitworktree should pass in research stage");
         assert_eq!(result.status, RunStatus::Succeeded);
@@ -1872,11 +1945,12 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("build".to_string());
+        let task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("build".to_string());
 
         let err = dispatcher
-            .run(&spec, &request, ResolvedMemory::default())
+            .run(&spec, &task_spec, &hints, ResolvedMemory::default())
             .await
             .expect_err("readonly+gitworktree should fail in build stage");
         assert!(err.to_string().contains("only allowed for Research/Plan"));
@@ -1894,10 +1968,11 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let request = sample_request();
+        let task_spec = sample_task_spec();
+        let hints = sample_hints();
 
         let err = dispatcher
-            .run(&spec, &request, ResolvedMemory::default())
+            .run(&spec, &task_spec, &hints, ResolvedMemory::default())
             .await
             .expect_err("readonly+gitworktree should require explicit stage");
         assert!(err
@@ -1913,8 +1988,9 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("research".to_string());
+        let task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("research".to_string());
 
         let spec = sample_spec_for_stage_routing(
             "backend-coder",
@@ -1922,7 +1998,7 @@ mod tests {
             vec![WorkflowStageKind::Research],
         );
         let err = dispatcher
-            .run(&spec, &request, ResolvedMemory::default())
+            .run(&spec, &task_spec, &hints, ResolvedMemory::default())
             .await
             .expect_err("research stage should reject non-planning agent");
         assert!(err.to_string().contains("planning/research agent"));
@@ -1936,8 +2012,9 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("plan".to_string());
+        let task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("plan".to_string());
 
         let spec = sample_spec_for_stage_routing(
             "fast-researcher",
@@ -1945,7 +2022,7 @@ mod tests {
             vec![WorkflowStageKind::Plan],
         );
         let result = dispatcher
-            .run(&spec, &request, ResolvedMemory::default())
+            .run(&spec, &task_spec, &hints, ResolvedMemory::default())
             .await
             .expect("plan stage should allow research agent profile");
         assert_eq!(result.status, RunStatus::Succeeded);
@@ -1959,8 +2036,9 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("review".to_string());
+        let task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("review".to_string());
 
         let spec = sample_spec_for_stage_routing(
             "frontend-builder",
@@ -1968,7 +2046,7 @@ mod tests {
             vec![WorkflowStageKind::Review],
         );
         let err = dispatcher
-            .run(&spec, &request, ResolvedMemory::default())
+            .run(&spec, &task_spec, &hints, ResolvedMemory::default())
             .await
             .expect_err("review stage should reject builder-like agent");
         assert!(err.to_string().contains("prioritize reviewer agents"));
@@ -1982,8 +2060,9 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("review".to_string());
+        let task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("review".to_string());
 
         let spec = sample_spec_for_stage_routing(
             "correctness-reviewer",
@@ -1991,7 +2070,7 @@ mod tests {
             vec![WorkflowStageKind::Review],
         );
         let result = dispatcher
-            .run(&spec, &request, ResolvedMemory::default())
+            .run(&spec, &task_spec, &hints, ResolvedMemory::default())
             .await
             .expect("review stage should allow reviewer agent");
         assert_eq!(result.status, RunStatus::Succeeded);
@@ -2026,16 +2105,17 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("review".to_string());
-        request.selected_files = vec![SelectedFile {
+        let mut task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("review".to_string());
+        task_spec.selected_files = vec![SelectedFile {
             path: PathBuf::from("src/a.rs"),
             rationale: None,
             content: None,
         }];
 
         let err = dispatcher
-            .run(&spec, &request, ResolvedMemory::default())
+            .run(&spec, &task_spec, &hints, ResolvedMemory::default())
             .await
             .expect_err("high risk review should require style evidence");
         assert!(err.to_string().contains("requires style review"));
@@ -2070,18 +2150,18 @@ mod tests {
                 summary: success_summary(),
             }),
         );
-        let mut request = sample_request();
-        request.stage = Some("review".to_string());
-        request.selected_files = vec![SelectedFile {
+        let mut task_spec = sample_task_spec();
+        let mut hints = sample_hints();
+        hints.stage = Some("review".to_string());
+        task_spec.selected_files = vec![SelectedFile {
             path: PathBuf::from("src/a.rs"),
             rationale: None,
             content: None,
         }];
-        request.parent_summary =
-            Some("previous style review confirmed maintainability".to_string());
+        hints.parent_summary = Some("previous style review confirmed maintainability".to_string());
 
         let result = dispatcher
-            .run(&spec, &request, ResolvedMemory::default())
+            .run(&spec, &task_spec, &hints, ResolvedMemory::default())
             .await
             .expect("parent summary style evidence should satisfy dual review");
         assert_eq!(result.status, RunStatus::Succeeded);

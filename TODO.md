@@ -3120,3 +3120,30 @@
 - 已验证：
   - `cargo test --workspace` 通过。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-119 Refactor-TaskData-HardCut-MainRunJsonAndWarningFree (Completed 2026-03-26)
+
+任务：继续按“无兼容硬切”收口 Step 10-12，移除 `main.rs` 对旧 run.json 扁平字段依赖，并在不使用 `#[allow]` 的前提下解决 clippy 多参数告警。  
+验收标准：
+
+1. `src/main.rs` 的 `StoredRunRecord` 仅按新结构读取（`task_spec + state + outcome + artifact_index + spec_snapshot`），不再读取旧顶层 `status/summary/task`。
+2. `ps/show/result/stats/watch/wait` 读状态与摘要来源改为 `state/outcome`，不再依赖旧 `summary` 字段。
+3. `src/mcp/server.rs` 落盘测试断言改为新 run.json 路径（`state.created_at/state.updated_at/task_spec.task` 等）。
+4. `clippy::too_many_arguments` 通过重构签名解决，不新增 `#[allow(clippy::too_many_arguments)]`。
+5. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已升级 `src/main.rs`：
+  - `StoredRunRecord` 切换为 `task_spec/state/outcome` 新模型；
+  - 新增 `StoredRunOutcome`/`StoredRunState` 等本地读取模型；
+  - `show/result/ps/stats/watch/wait` 全链路改为消费 `state` 与 `outcome`；
+  - `normalized` 结果由 `RunOutcome::Succeeded` 直接生成，不再读取旧 `summary` 落盘字段。
+- 已更新 `src/mcp/server.rs::run_agent_tempcopy_persists_workspace_metadata`：
+  - 断言从顶层旧字段迁移到 `state.*` 与 `task_spec.*`。
+- 已重构 `src/mcp/archive.rs`：
+  - `apply_archive_hook` 改为 `ArchiveHookInput` 上下文入参，消除多参数告警；
+  - `src/mcp/tools.rs` 与 `archive` 测试调用点已同步。
+- 已修复 `src/mcp/persistence.rs` 的 `collapsible_match` 告警（合并嵌套 `if let`）。
+- 已验证：
+  - `cargo test --workspace` 通过（194 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

@@ -10,7 +10,7 @@ use crate::{
     error::{McpSubagentError, Result},
     runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
     spec::AgentSpec,
-    types::{CompiledContext, RunRequest, TaskSpec, WorkflowHints},
+    types::{CompiledContext, TaskSpec, WorkflowHints},
 };
 
 #[derive(Debug, Clone)]
@@ -31,35 +31,23 @@ impl OllamaRunner {
         Self { executable }
     }
 
-    pub async fn execute(
-        &self,
-        spec: &AgentSpec,
-        request: &RunRequest,
-        compiled: &CompiledContext,
-    ) -> Result<RunnerExecution> {
-        let task_spec = request.to_task_spec();
-        let hints = request.to_workflow_hints();
-        OllamaRunner::execute_task(self, spec, &task_spec, &hints, compiled).await
-    }
-
     pub async fn execute_task(
         &self,
         spec: &AgentSpec,
         task_spec: &TaskSpec,
-        hints: &WorkflowHints,
+        _hints: &WorkflowHints,
         compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
         let prompt = compose_prompt(compiled);
         let timeout = Duration::from_secs(spec.runtime.timeout_secs.max(1));
         let model = resolve_model(spec)?;
-        let request = RunRequest::from_parts(task_spec, hints);
 
         let mut command = tokio::process::Command::new(&self.executable);
         command
             .arg("run")
             .arg(model)
             .arg(&prompt)
-            .current_dir(&request.working_dir)
+            .current_dir(&task_spec.working_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -119,15 +107,6 @@ impl AgentRunner for OllamaRunner {
     ) -> Result<RunnerExecution> {
         OllamaRunner::execute_task(self, spec, task_spec, hints, compiled).await
     }
-
-    async fn execute(
-        &self,
-        spec: &AgentSpec,
-        request: &RunRequest,
-        compiled: &CompiledContext,
-    ) -> Result<RunnerExecution> {
-        OllamaRunner::execute(self, spec, request, compiled).await
-    }
 }
 
 fn compose_prompt(compiled: &CompiledContext) -> String {
@@ -184,7 +163,7 @@ mod tests {
             runtime_policy::{RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
             AgentSpec,
         },
-        types::{CompiledContext, RunMode, RunRequest},
+        types::{CompiledContext, RunMode, TaskSpec, WorkflowHints},
     };
 
     fn sample_spec(timeout_secs: u64) -> AgentSpec {
@@ -212,17 +191,20 @@ mod tests {
         }
     }
 
-    fn sample_request(working_dir: PathBuf) -> RunRequest {
-        RunRequest {
+    fn sample_task_spec(working_dir: PathBuf) -> TaskSpec {
+        TaskSpec {
             task: "implement parser".to_string(),
             task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir,
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir,
+        }
+    }
+
+    fn sample_hints() -> WorkflowHints {
+        WorkflowHints {
+            run_mode: RunMode::Sync,
+            ..WorkflowHints::default()
         }
     }
 
@@ -256,9 +238,10 @@ exit 0
 
         let runner = OllamaRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(30),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -288,9 +271,10 @@ exit 7
 
         let runner = OllamaRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(30),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -324,9 +308,10 @@ sleep 2
 
         let runner = OllamaRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(1),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -347,9 +332,10 @@ sleep 2
         spec.core.model = None;
 
         let err = runner
-            .execute(
+            .execute_task(
                 &spec,
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
