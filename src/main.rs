@@ -19,8 +19,8 @@ use mcp_subagent::{
     logging::{init_logging, LoggingGuard},
     mcp::{
         dto::{
-            ArtifactOutput, HandleInput, ReadAgentArtifactInput, RunAgentInput,
-            RunAgentSelectedFileInput,
+            ArtifactOutput, HandleInput, OutcomeView, ReadAgentArtifactInput, RunAgentInput,
+            RunAgentSelectedFileInput, RunView,
         },
         server::McpSubagentServer,
     },
@@ -1451,18 +1451,10 @@ fn run_events_path(state_dir: &Path, handle_id: &str) -> PathBuf {
     runs_root(state_dir).join(handle_id).join("events.jsonl")
 }
 
-fn run_events_legacy_path(state_dir: &Path, handle_id: &str) -> PathBuf {
-    runs_root(state_dir).join(handle_id).join("events.ndjson")
-}
-
 fn resolve_events_file_path(state_dir: &Path, handle_id: &str) -> Option<PathBuf> {
     let canonical_path = run_events_path(state_dir, handle_id);
     if canonical_path.exists() {
         return Some(canonical_path);
-    }
-    let legacy_path = run_events_legacy_path(state_dir, handle_id);
-    if legacy_path.exists() {
-        return Some(legacy_path);
     }
     None
 }
@@ -2487,6 +2479,7 @@ fn print_event_follow_line(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn read_logs(
     cfg: RuntimeConfig,
     handle_id: String,
@@ -2519,9 +2512,7 @@ async fn read_logs(
                 }
             };
 
-            let events = if run_events_path(&cfg.state_dir, &handle_id).exists()
-                || run_events_legacy_path(&cfg.state_dir, &handle_id).exists()
-            {
+            let events = if run_events_path(&cfg.state_dir, &handle_id).exists() {
                 match load_run_events(&cfg.state_dir, &handle_id) {
                     Ok(events) => events,
                     Err(err) => {
@@ -2537,7 +2528,10 @@ async fn read_logs(
             }
             for event in events.iter().skip(seen_event_count) {
                 if phase.as_deref().is_some_and(|needle| {
-                    !event.phase.as_deref().is_some_and(|value| value == needle)
+                    event
+                        .phase
+                        .as_deref()
+                        .is_none_or(|value| value != needle)
                 }) {
                     continue;
                 }
@@ -2697,9 +2691,7 @@ fn collect_run_event_snapshots(
     let entries = list_run_records(state_dir)?;
     let mut snapshots = Vec::new();
     for (handle_id, _record) in entries {
-        let events = if run_events_path(state_dir, &handle_id).exists()
-            || run_events_legacy_path(state_dir, &handle_id).exists()
-        {
+        let events = if run_events_path(state_dir, &handle_id).exists() {
             load_run_events(state_dir, &handle_id)?
         } else {
             Vec::new()
@@ -2712,6 +2704,7 @@ fn collect_run_event_snapshots(
     Ok(snapshots)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn read_events_all(
     cfg: RuntimeConfig,
     event: Option<String>,
@@ -2951,6 +2944,7 @@ fn read_timeline(
     ExitCode::SUCCESS
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn read_events(
     cfg: RuntimeConfig,
     handle_id: Option<String>,
@@ -3023,7 +3017,7 @@ async fn read_events(
             }
             if phase
                 .as_deref()
-                .is_some_and(|needle| !evt.phase.as_deref().is_some_and(|value| value == needle))
+                .is_some_and(|needle| evt.phase.as_deref().is_none_or(|value| value != needle))
             {
                 continue;
             }
@@ -3868,12 +3862,20 @@ async fn run_agent(
             } else {
                 let out = result.0;
                 println!("handle_id: {}", out.handle_id);
-                println!("status: {}", out.status);
-                println!("summary: {}", out.structured_summary.summary);
-                if !out.structured_summary.key_findings.is_empty() {
-                    println!("key_findings:");
-                    for finding in out.structured_summary.key_findings {
-                        println!("- {finding}");
+                println!("phase: {}", out.phase);
+                println!("terminal: {}", if out.terminal { "yes" } else { "no" });
+                if let Some(OutcomeView::Succeeded {
+                    summary,
+                    key_findings,
+                    ..
+                }) = out.outcome
+                {
+                    println!("summary: {}", summary);
+                    if !key_findings.is_empty() {
+                        println!("key_findings:");
+                        for finding in key_findings {
+                            println!("- {finding}");
+                        }
                     }
                 }
             }
@@ -3935,10 +3937,8 @@ async fn spawn_agent(
                 print_json(&output);
             } else {
                 println!("handle_id: {}", output.handle_id);
-                println!("status: {}", output.status);
-                println!("state: {}", output.state);
                 println!("phase: {}", output.phase);
-                println!("queued_at: {}", output.queued_at);
+                println!("accepted_at: {}", output.updated_at);
             }
             if cli_spawn_waits_for_completion() {
                 server.wait_for_run(&output.handle_id).await;
@@ -3969,39 +3969,24 @@ async fn get_status(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCo
                 print_json(&result.0);
             } else {
                 println!("handle_id: {}", result.0.handle_id);
-                println!("status: {}", result.0.status);
+                println!("phase: {}", result.0.phase);
+                println!("terminal: {}", if result.0.terminal { "yes" } else { "no" });
                 println!("updated_at: {}", result.0.updated_at);
-                println!(
-                    "state: {}",
-                    result
-                        .0
-                        .state
-                        .as_deref()
-                        .unwrap_or(result.0.status.as_str())
-                );
-                println!("phase: {}", result.0.phase.as_deref().unwrap_or("unknown"));
-                println!(
-                    "last_event_at: {}",
-                    result.0.last_event_at.as_deref().unwrap_or("unknown")
-                );
-                println!(
-                    "last_event_age: {}",
-                    format_elapsed_short(result.0.last_event_age_ms)
-                );
-                println!(
-                    "stalled: {}",
-                    result
-                        .0
-                        .stalled
-                        .map(|value| if value { "yes" } else { "no" })
-                        .unwrap_or("unknown")
-                );
-                println!(
-                    "block_reason: {}",
-                    result.0.block_reason.as_deref().unwrap_or("-")
-                );
-                if let Some(err) = result.0.error_message {
-                    println!("error: {err}");
+                if let Some(outcome) = result.0.outcome {
+                    match outcome {
+                        OutcomeView::Succeeded { summary, .. } => {
+                            println!("summary: {summary}");
+                        }
+                        OutcomeView::Failed { error, .. } => {
+                            println!("error: {error}");
+                        }
+                        OutcomeView::Cancelled { reason } => {
+                            println!("cancelled: {reason}");
+                        }
+                        OutcomeView::TimedOut { elapsed_secs } => {
+                            println!("timed_out_after: {}s", elapsed_secs);
+                        }
+                    }
                 }
             }
             ExitCode::SUCCESS
@@ -4060,7 +4045,8 @@ async fn read_artifact(
                 }
             };
             let target_kind = kind.unwrap_or(ArtifactKindArg::Summary);
-            match resolve_artifact_path(target_kind, &status.artifact_index) {
+            let index = artifacts_from_run_view(&status);
+            match resolve_artifact_path(target_kind, &index) {
                 Some(path) => path,
                 None => {
                     eprintln!("artifact path not found for selected kind");
@@ -4086,6 +4072,13 @@ async fn read_artifact(
             eprintln!("artifact failed: {}", err.message);
             ExitCode::from(1)
         }
+    }
+}
+
+fn artifacts_from_run_view(run: &RunView) -> Vec<ArtifactOutput> {
+    match run.outcome.as_ref() {
+        Some(OutcomeView::Succeeded { artifacts, .. }) => artifacts.clone(),
+        _ => Vec::new(),
     }
 }
 
@@ -5002,12 +4995,12 @@ target/
         let dir = tempdir().expect("tempdir");
         let run_dir = dir.path().join("runs").join("handle-1");
         fs::create_dir_all(&run_dir).expect("mkdir run");
-        let events_path = run_dir.join("events.ndjson");
+        let events_path = run_dir.join("events.jsonl");
         fs::write(
             &events_path,
             concat!(
-                "{\"event\":\"probe\",\"timestamp\":\"2026-03-25T00:00:00Z\",\"detail\":{\"status\":\"ready\"}}\n",
-                "{\"event\":\"parse\",\"timestamp\":\"2026-03-25T00:00:01Z\",\"detail\":{\"parse_status\":\"Validated\"}}\n"
+                "{\"event\":\"probe\",\"timestamp\":\"2026-03-25T00:00:00Z\",\"detail\":{\"status\":\"ready\"},\"seq\":1}\n",
+                "{\"event\":\"parse\",\"timestamp\":\"2026-03-25T00:00:01Z\",\"detail\":{\"parse_status\":\"Validated\"},\"seq\":2}\n"
             ),
         )
         .expect("write events");
@@ -5020,15 +5013,10 @@ target/
     }
 
     #[test]
-    fn load_run_events_prefers_jsonl_when_both_formats_exist() {
+    fn load_run_events_reads_jsonl_only() {
         let dir = tempdir().expect("tempdir");
         let run_dir = dir.path().join("runs").join("handle-1");
         fs::create_dir_all(&run_dir).expect("mkdir run");
-        fs::write(
-            run_dir.join("events.ndjson"),
-            "{\"event\":\"legacy\",\"timestamp\":\"2026-03-25T00:00:00Z\",\"detail\":{}}\n",
-        )
-        .expect("write legacy events");
         fs::write(
             run_dir.join("events.jsonl"),
             "{\"event\":\"canonical\",\"timestamp\":\"2026-03-25T00:00:01Z\",\"detail\":{},\"seq\":1}\n",

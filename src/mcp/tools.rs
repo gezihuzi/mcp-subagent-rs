@@ -22,17 +22,15 @@ use crate::{
             sanitize_relative_artifact_path,
         },
         dto::{
-            AgentListing, AgentStatusOutput, CancelAgentOutput, GetAgentStatsInput,
-            GetAgentStatsOutput, GetRunResultInput, GetRunResultOutput, HandleInput,
-            ListAgentsOutput, ListRunsInput, ListRunsOutput, ReadAgentArtifactInput,
-            ReadAgentArtifactOutput, ReadRunLogsInput, ReadRunLogsOutput, RunAgentInput,
-            RunAgentOutput, RunEventOutput, RunListingOutput, RunUsageOutput, RuntimePolicySummary,
-            SpawnAgentOutput, WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput,
+            AgentListing, CancelAgentOutput, GetAgentStatsInput, GetAgentStatsOutput,
+            GetRunResultInput, HandleInput, ListAgentsOutput, ListRunsInput, ListRunsOutput,
+            OutcomeView, ReadAgentArtifactInput, ReadAgentArtifactOutput, ReadRunLogsInput,
+            ReadRunLogsOutput, RunAgentInput, RunEventOutput, RunUsageOutput, RunView,
+            RuntimePolicySummary, WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput,
             WatchRunOutput,
         },
         helpers::{
             build_capability_notes, cancelled_summary, failed_summary, format_time,
-            map_summary_output,
         },
         persistence::{append_run_event, load_run_record_from_disk, persist_run_record},
         review::apply_review_evidence_hook,
@@ -54,7 +52,6 @@ pub(crate) fn build_tool_router() -> ToolRouter<McpSubagentServer> {
     McpSubagentServer::tool_router()
 }
 
-const RUN_RESULT_CONTRACT_VERSION: &str = "mcp-subagent.result.v1";
 const FIRST_OUTPUT_WARN_AFTER_SECS: u64 = 8;
 
 fn is_terminal_status(status: &RunStatus) -> bool {
@@ -69,18 +66,6 @@ fn compute_duration_ms(created_at: OffsetDateTime, updated_at: OffsetDateTime) -
         return None;
     }
     let millis = (updated_at - created_at).whole_milliseconds();
-    if millis < 0 {
-        None
-    } else {
-        Some(millis as u64)
-    }
-}
-
-fn compute_elapsed_ms(created_at: OffsetDateTime, now: OffsetDateTime) -> Option<u64> {
-    if now < created_at {
-        return None;
-    }
-    let millis = (now - created_at).whole_milliseconds();
     if millis < 0 {
         None
     } else {
@@ -225,6 +210,70 @@ fn resolve_retry_classification(record: &RunRecord) -> (String, Option<String>) 
     }
 }
 
+fn map_record_outcome(record: &RunRecord, usage: RunUsageOutput) -> Option<OutcomeView> {
+    match record.status {
+        RunStatus::Succeeded => record.summary.as_ref().map(|summary| OutcomeView::Succeeded {
+            summary: summary.summary.summary.clone(),
+            key_findings: summary.summary.key_findings.clone(),
+            touched_files: summary.summary.touched_files.clone(),
+            artifacts: record.artifact_index.clone(),
+            usage,
+        }),
+        RunStatus::Failed => {
+            let (retry_classification, _) = resolve_retry_classification(record);
+            Some(OutcomeView::Failed {
+                error: record
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "run failed".to_string()),
+                retry_classification,
+                partial_summary: record.summary.as_ref().map(|summary| summary.summary.summary.clone()),
+                usage,
+            })
+        }
+        RunStatus::Cancelled => Some(OutcomeView::Cancelled {
+            reason: record
+                .error_message
+                .clone()
+                .unwrap_or_else(|| "cancelled".to_string()),
+        }),
+        RunStatus::TimedOut => Some(OutcomeView::TimedOut {
+            elapsed_secs: compute_duration_ms(record.created_at, record.updated_at)
+                .unwrap_or(0)
+                / 1000,
+        }),
+        _ => None,
+    }
+}
+
+fn build_run_view(
+    handle_id: String,
+    record: &RunRecord,
+    runtime: Option<&EventRuntimeSnapshot>,
+) -> RunView {
+    let usage = build_usage_output(record);
+    let phase = runtime
+        .and_then(|snapshot| snapshot.phase.clone())
+        .unwrap_or_else(|| format!("{}", record.status));
+    RunView {
+        handle_id,
+        agent_name: record
+            .spec_snapshot
+            .as_ref()
+            .map(|spec| spec.name.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
+        task_brief: record
+            .request_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.task_brief.clone()),
+        phase,
+        terminal: is_terminal_status(&record.status),
+        outcome: map_record_outcome(record, usage),
+        created_at: format_time(record.created_at),
+        updated_at: format_time(record.updated_at),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 struct StoredRunEventLine {
@@ -262,22 +311,11 @@ fn run_events_jsonl_path(state_dir: &std::path::Path, handle_id: &str) -> PathBu
     run_root_dir(state_dir).join(handle_id).join("events.jsonl")
 }
 
-fn run_events_legacy_path(state_dir: &std::path::Path, handle_id: &str) -> PathBuf {
-    run_root_dir(state_dir)
-        .join(handle_id)
-        .join("events.ndjson")
-}
-
 fn load_run_events(
     state_dir: &std::path::Path,
     handle_id: &str,
 ) -> std::result::Result<Vec<RunEventOutput>, ErrorData> {
-    let canonical = run_events_jsonl_path(state_dir, handle_id);
-    let path = if canonical.exists() {
-        canonical
-    } else {
-        run_events_legacy_path(state_dir, handle_id)
-    };
+    let path = run_events_jsonl_path(state_dir, handle_id);
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -783,11 +821,7 @@ fn has_event_named(events: &[RunEventOutput], name: &str) -> bool {
 
 #[derive(Debug, Clone, Default)]
 struct EventRuntimeSnapshot {
-    state: Option<String>,
     phase: Option<String>,
-    last_event_at: Option<String>,
-    last_event_age_ms: Option<u64>,
-    stalled: bool,
     block_reason: Option<String>,
 }
 
@@ -798,9 +832,6 @@ fn build_event_runtime_snapshot(
     error_message: Option<&str>,
 ) -> EventRuntimeSnapshot {
     let latest = latest_event(events);
-    let last_event_at = latest
-        .map(|event| event.timestamp.clone())
-        .filter(|value| !value.is_empty());
     let last_event_age_ms = latest.and_then(event_time).and_then(|ts| {
         if now < ts {
             None
@@ -809,16 +840,11 @@ fn build_event_runtime_snapshot(
         }
     });
     let stalled = !is_terminal_status(status) && last_event_age_ms.is_some_and(|ms| ms >= 8_000);
-    let state = latest.and_then(|event| event.state.clone());
     let phase = latest.and_then(|event| event.phase.clone());
     let block_reason =
         classify_block_reason(status, phase.as_deref(), stalled, events, error_message);
     EventRuntimeSnapshot {
-        state,
         phase,
-        last_event_at,
-        last_event_age_ms,
-        stalled,
         block_reason,
     }
 }
@@ -1023,31 +1049,7 @@ impl McpSubagentServer {
                     now,
                     record.error_message.as_deref(),
                 );
-                let duration_ms = compute_duration_ms(record.created_at, record.updated_at);
-                let elapsed_ms = if is_terminal_status(&record.status) {
-                    duration_ms
-                } else {
-                    compute_elapsed_ms(record.created_at, now)
-                };
-                RunListingOutput {
-                    handle_id,
-                    status: format!("{}", record.status),
-                    updated_at: format_time(record.updated_at),
-                    state: runtime.state,
-                    phase: runtime.phase,
-                    last_event_at: runtime.last_event_at,
-                    last_event_age_ms: runtime.last_event_age_ms,
-                    stalled: Some(runtime.stalled),
-                    elapsed_ms,
-                    block_reason: runtime.block_reason,
-                    provider: record
-                        .spec_snapshot
-                        .as_ref()
-                        .map(|spec| spec.provider.clone()),
-                    agent: record.spec_snapshot.as_ref().map(|spec| spec.name.clone()),
-                    task: record.task,
-                    duration_ms,
-                }
+                build_run_view(handle_id, &record, Some(&runtime))
             })
             .collect();
 
@@ -1058,49 +1060,16 @@ impl McpSubagentServer {
     pub async fn get_run_result(
         &self,
         Parameters(input): Parameters<GetRunResultInput>,
-    ) -> std::result::Result<Json<GetRunResultOutput>, ErrorData> {
+    ) -> std::result::Result<Json<RunView>, ErrorData> {
         let record = self.get_or_load_run_record(&input.handle_id).await?;
-        let native_result = read_text_artifact(&record, "stdout.txt").or_else(|| {
-            record
-                .summary
-                .as_ref()
-                .and_then(|summary| summary.raw_fallback_text.clone())
-        });
-        let usage = build_usage_output(&record);
-        let (retry_classification, classification_reason) = resolve_retry_classification(&record);
-
-        Ok(Json(GetRunResultOutput {
-            contract_version: RUN_RESULT_CONTRACT_VERSION.to_string(),
-            handle_id: input.handle_id,
-            status: format!("{}", record.status),
-            updated_at: format_time(record.updated_at),
-            error_message: record.error_message.clone(),
-            provider: record
-                .spec_snapshot
-                .as_ref()
-                .map(|spec| spec.provider.clone()),
-            model: record
-                .spec_snapshot
-                .as_ref()
-                .and_then(|spec| spec.model.clone()),
-            normalization_status: record
-                .summary
-                .as_ref()
-                .map(|summary| format!("{}", summary.parse_status))
-                .unwrap_or_else(|| "NotAvailable".to_string()),
-            summary: record
-                .summary
-                .as_ref()
-                .map(|summary| summary.summary.summary.clone()),
-            native_result,
-            normalized_result: record.summary.as_ref().map(map_summary_output),
-            provider_exit_code: usage.provider_exit_code,
-            retries: usage.retries,
-            retry_classification,
-            classification_reason,
-            usage,
-            artifact_index: record.artifact_index,
-        }))
+        let events = load_run_events(self.state_dir(), &input.handle_id)?;
+        let runtime = build_event_runtime_snapshot(
+            &record.status,
+            &events,
+            OffsetDateTime::now_utc(),
+            record.error_message.as_deref(),
+        );
+        Ok(Json(build_run_view(input.handle_id, &record, Some(&runtime))))
     }
 
     #[tool(description = "Read stdout/stderr logs for a run handle.")]
@@ -1186,17 +1155,11 @@ impl McpSubagentServer {
                     false,
                 );
                 return Ok(Json(WatchRunOutput {
-                    handle_id: input.handle_id,
-                    status: format!("{}", record.status),
-                    updated_at: format_time(record.updated_at),
-                    error_message: record.error_message,
-                    current_phase,
-                    current_phase_age_ms: phase_age_ms,
+                    run: build_run_view(input.handle_id.clone(), &record, Some(&runtime)),
+                    timed_out: false,
                     phase_timeout_hit: false,
                     block_reason,
                     advice,
-                    terminal: true,
-                    timed_out: false,
                 }));
             }
             if phase_timeout_hit {
@@ -1207,17 +1170,11 @@ impl McpSubagentServer {
                     true,
                 );
                 return Ok(Json(WatchRunOutput {
-                    handle_id: input.handle_id,
-                    status: format!("{}", record.status),
-                    updated_at: format_time(record.updated_at),
-                    error_message: record.error_message,
-                    current_phase,
-                    current_phase_age_ms: phase_age_ms,
+                    run: build_run_view(input.handle_id.clone(), &record, Some(&runtime)),
+                    timed_out: true,
                     phase_timeout_hit: true,
                     block_reason,
                     advice,
-                    terminal: false,
-                    timed_out: true,
                 }));
             }
             if timeout_secs.is_some_and(|secs| started.elapsed().as_secs() >= secs) {
@@ -1228,17 +1185,11 @@ impl McpSubagentServer {
                     false,
                 );
                 return Ok(Json(WatchRunOutput {
-                    handle_id: input.handle_id,
-                    status: format!("{}", record.status),
-                    updated_at: format_time(record.updated_at),
-                    error_message: record.error_message,
-                    current_phase,
-                    current_phase_age_ms: phase_age_ms,
+                    run: build_run_view(input.handle_id.clone(), &record, Some(&runtime)),
+                    timed_out: true,
                     phase_timeout_hit: false,
                     block_reason,
                     advice,
-                    terminal: false,
-                    timed_out: true,
                 }));
             }
             tokio::time::sleep(Duration::from_millis(interval_ms)).await;
@@ -1335,7 +1286,7 @@ impl McpSubagentServer {
     pub async fn run_agent(
         &self,
         Parameters(input): Parameters<RunAgentInput>,
-    ) -> std::result::Result<Json<RunAgentOutput>, ErrorData> {
+    ) -> std::result::Result<Json<RunView>, ErrorData> {
         let (loaded, request, execution_policy) = self.prepare_run(input, RunMode::Sync)?;
         let probe_result = self.ensure_provider_ready(&loaded.spec.core.provider)?;
         let request_snapshot = build_run_request_snapshot(&request);
@@ -1393,12 +1344,6 @@ impl McpSubagentServer {
                 data: &mut artifacts,
             },
         );
-        let output = RunAgentOutput {
-            handle_id: handle_id.clone(),
-            status: format!("{}", result.metadata.status),
-            structured_summary: map_summary_output(&result.summary),
-            artifact_index: artifact_index.clone(),
-        };
         let native_usage = result.native_usage;
         let retry_classification = map_retry_classification(&result.metadata);
 
@@ -1422,6 +1367,7 @@ impl McpSubagentServer {
             retry_classification: Some(retry_classification),
             execution_policy,
         };
+        let output = build_run_view(handle_id.clone(), &record, None);
         drop(workspace_cleanup);
         self.upsert_and_persist_run(&handle_id, record).await?;
 
@@ -1432,8 +1378,10 @@ impl McpSubagentServer {
     pub async fn spawn_agent(
         &self,
         Parameters(input): Parameters<RunAgentInput>,
-    ) -> std::result::Result<Json<SpawnAgentOutput>, ErrorData> {
+    ) -> std::result::Result<Json<RunView>, ErrorData> {
         let (loaded, request, execution_policy) = self.prepare_run(input, RunMode::Async)?;
+        let accepted_agent_name = loaded.spec.core.name.clone();
+        let accepted_task_brief = request.task_brief.clone();
         let handle_id = Uuid::now_v7().to_string();
         let queued_at = format_time(OffsetDateTime::now_utc());
         let running_record = RunRecord::running(
@@ -1849,12 +1797,15 @@ impl McpSubagentServer {
             state.tasks.insert(handle_id.clone(), task);
         }
 
-        Ok(Json(SpawnAgentOutput {
+        Ok(Json(RunView {
             handle_id,
-            status: "accepted".to_string(),
-            state: "accepted".to_string(),
+            agent_name: accepted_agent_name,
+            task_brief: accepted_task_brief,
             phase: "accepted".to_string(),
-            queued_at,
+            terminal: false,
+            outcome: None,
+            created_at: queued_at.clone(),
+            updated_at: queued_at,
         }))
     }
 
@@ -1862,7 +1813,7 @@ impl McpSubagentServer {
     pub async fn get_agent_status(
         &self,
         Parameters(input): Parameters<HandleInput>,
-    ) -> std::result::Result<Json<AgentStatusOutput>, ErrorData> {
+    ) -> std::result::Result<Json<RunView>, ErrorData> {
         let record = self.get_or_load_run_record(&input.handle_id).await?;
         let events = load_run_events(self.state_dir(), &input.handle_id)?;
         let runtime = build_event_runtime_snapshot(
@@ -1871,29 +1822,8 @@ impl McpSubagentServer {
             OffsetDateTime::now_utc(),
             record.error_message.as_deref(),
         );
-        let advice = build_watch_advice(
-            &record.status,
-            runtime.phase.as_deref(),
-            runtime.block_reason.as_deref(),
-            false,
-        );
-        let structured_summary = record.summary.as_ref().map(map_summary_output);
 
-        Ok(Json(AgentStatusOutput {
-            handle_id: input.handle_id,
-            status: format!("{}", record.status),
-            updated_at: format_time(record.updated_at),
-            state: runtime.state,
-            phase: runtime.phase,
-            last_event_at: runtime.last_event_at,
-            last_event_age_ms: runtime.last_event_age_ms,
-            stalled: Some(runtime.stalled),
-            block_reason: runtime.block_reason,
-            advice,
-            error_message: record.error_message,
-            structured_summary,
-            artifact_index: record.artifact_index,
-        }))
+        Ok(Json(build_run_view(input.handle_id, &record, Some(&runtime))))
     }
 
     #[tool(description = "Cancel an async agent run if still in progress.")]

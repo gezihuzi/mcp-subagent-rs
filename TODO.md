@@ -3038,3 +3038,60 @@
   - `cargo test gemini_runner_execute_with_observer_streams_output_chunks -- --nocapture` 通过（1 passed）。
   - `cargo test claude_runner_execute_with_observer_streams_output_chunks -- --nocapture` 通过（1 passed）。
   - `cargo test dispatch_reaches_succeeded -- --nocapture` 通过（1 passed）。
+
+## T-115 Refactor-TaskData-Step7-8-DTORunViewAndToolsHardCut (Completed 2026-03-26)
+
+任务：按 `docs/refactor_task_data_structures.md` Step 7/8 完成 MCP DTO 与 tools 输出面重构，统一 `RunView + OutcomeView`，移除旧 output struct 依赖与旧字段断言。  
+验收标准：
+
+1. `src/mcp/dto.rs` 仅保留 `RunView/OutcomeView` 作为 run 返回主模型。
+2. `run_agent/spawn_agent/get_agent_status/get_run_result/list_runs/watch_run` 输出统一到新 DTO。
+3. server/e2e 相关测试不再依赖 `status/state/queued_at/structured_summary` 旧字段。
+4. 事件读取路径不再依赖 `events.ndjson` fallback。
+5. `cargo test --workspace` 可通过。
+完成记录：
+
+- 已完成 `src/mcp/server.rs` 测试迁移：断言改为 `terminal + outcome.status`，移除旧 DTO 字段断言。
+- 已完成 `tests/e2e_workflow_examples.rs` 迁移：改用 `phase/terminal/outcome`。
+- 已确认 `src/mcp/tools.rs::load_run_events` 仅读取 `events.jsonl`（无 `events.ndjson` fallback）。
+- 已通过 `cargo test --workspace`（194 + 64 + 3 全通过）。
+
+## T-116 Refactor-TaskData-Step9-PersistenceNoLegacyEvents (Completed 2026-03-26)
+
+任务：按 Step 9 收口落盘链路，去除旧事件文件兼容与旧测试假设，保持新结构可落盘可恢复。  
+验收标准：
+
+1. 运行期事件仅写 `events.jsonl`，不再写 `events.ndjson`。
+2. persistence 层测试不再验证 legacy ndjson 镜像行为。
+3. server 落盘测试改为验证新文件布局（`run.json/events.jsonl/stdout.log/stderr.log/compiled-context.md`）。
+4. 恢复路径仍可从 `run.json` 加载并对外查询。
+5. `cargo test --workspace` 通过。
+完成记录：
+
+- 已更新 `src/mcp/persistence.rs` 测试：
+  - `append_run_event_writes_jsonl_with_incrementing_seq` 仅校验 `events.jsonl`；
+  - legacy ndjson 断言已移除。
+- 已更新 `src/mcp/server.rs::run_agent_tempcopy_persists_workspace_metadata`：
+  - 新增新布局断言；
+  - 移除 `events.ndjson/request.json/status.json/workspace.meta.json` 等旧文件断言。
+- 已将 persistence 读取测试更新为当前 `run.json` 必填结构（不再验证旧 run.json 兼容）。
+- 已通过 `cargo test --workspace`（194 + 64 + 3 全通过）。
+
+## T-117 Refactor-TaskData-Step10-12-MainTestsAndQualityGate (Completed 2026-03-26)
+
+任务：完成 Step 10 适配并收口质量门禁（Step 11/12），确保 main/test 与新模型一致、全量测试与 clippy 均通过。  
+验收标准：
+
+1. `main`/测试链路不再依赖旧 DTO 字段约定。
+2. 全量 `cargo test --workspace` 通过。
+3. `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+4. 清理本轮迁移引入的 dead code / unused warnings。
+完成记录：
+
+- 已清理 `src/mcp/state.rs` 中未接入的新旧迁移残留类型（`RunPhase/PhaseEntry/TaskSpecSnapshot`）与未使用导入。
+- 已收敛 `src/mcp/tools.rs::EventRuntimeSnapshot` 到实际使用字段，消除 dead fields。
+- 已修复 `src/main.rs` 的 clippy 报警（bool 表达式最小化）并为多参数 CLI helper 增加局部 allow。
+- 已对 `src/mcp/persistence.rs` 与 `src/runtime/runners/gemini.rs` 的必要多参数函数增加局部 allow（仅限 clippy `too_many_arguments`）。
+- 已验证：
+  - `cargo test --workspace` 通过。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

@@ -154,6 +154,7 @@ impl GeminiRunner {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_once(
         &self,
         spec: &AgentSpec,

@@ -27,12 +27,12 @@ use crate::{
 };
 
 pub use crate::mcp::dto::{
-    AgentListing, AgentStatusOutput, ArtifactOutput, CancelAgentOutput, GetAgentStatsInput,
-    GetAgentStatsOutput, GetRunResultInput, GetRunResultOutput, HandleInput, ListAgentsOutput,
-    ListRunsInput, ListRunsOutput, ReadAgentArtifactInput, ReadAgentArtifactOutput,
-    ReadRunLogsInput, ReadRunLogsOutput, RunAgentInput, RunAgentOutput, RunAgentSelectedFileInput,
-    RunEventOutput, RunListingOutput, RunUsageOutput, RuntimePolicySummary, SpawnAgentOutput,
-    SummaryOutput, WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput, WatchRunOutput,
+    AgentListing, ArtifactOutput, CancelAgentOutput, GetAgentStatsInput, GetAgentStatsOutput,
+    GetRunResultInput, HandleInput, ListAgentsOutput, ListRunsInput, ListRunsOutput, OutcomeView,
+    ReadAgentArtifactInput, ReadAgentArtifactOutput, ReadRunLogsInput, ReadRunLogsOutput,
+    RunAgentInput, RunAgentSelectedFileInput, RunEventOutput, RunUsageOutput, RunView,
+    RuntimePolicySummary, WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput,
+    WatchRunOutput,
 };
 
 #[tool_handler(router = self.tool_router)]
@@ -698,12 +698,14 @@ sandbox = "read_only"
             .expect("run")
             .0;
 
-        assert_eq!(out.status, "succeeded");
-        assert!(out
-            .structured_summary
-            .summary
-            .contains("Mock run completed"));
-        assert_eq!(out.structured_summary.verification_status, "Passed");
+        assert_eq!(out.phase, "succeeded");
+        assert!(out.terminal);
+        match out.outcome {
+            Some(super::OutcomeView::Succeeded { summary, .. }) => {
+                assert!(summary.contains("Mock run completed"));
+            }
+            other => panic!("expected succeeded outcome, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -783,10 +785,10 @@ sandbox = "read_only"
             "spawn took {:?}, expected < 300ms",
             elapsed
         );
-        assert_eq!(spawn.status, "accepted");
-        assert_eq!(spawn.state, "accepted");
         assert_eq!(spawn.phase, "accepted");
-        assert!(!spawn.queued_at.is_empty());
+        assert!(!spawn.terminal);
+        assert!(spawn.outcome.is_none());
+        assert!(!spawn.created_at.is_empty());
 
         let status = server
             .get_agent_status(rmcp::handler::server::wrapper::Parameters(HandleInput {
@@ -795,7 +797,7 @@ sandbox = "read_only"
             .await
             .expect("status")
             .0;
-        assert_eq!(status.status, "running");
+        assert!(!status.terminal);
 
         server.wait_for_run(&spawn.handle_id).await;
         let finished = server
@@ -805,7 +807,11 @@ sandbox = "read_only"
             .await
             .expect("final status")
             .0;
-        assert_eq!(finished.status, "succeeded");
+        assert!(finished.terminal);
+        assert!(matches!(
+            finished.outcome,
+            Some(super::OutcomeView::Succeeded { .. })
+        ));
     }
 
     #[tokio::test]
@@ -840,10 +846,10 @@ sandbox = "read_only"
             .await
             .expect("spawn")
             .0;
-        assert_eq!(spawn.status, "accepted");
-        assert_eq!(spawn.state, "accepted");
         assert_eq!(spawn.phase, "accepted");
-        assert!(!spawn.queued_at.is_empty());
+        assert!(!spawn.terminal);
+        assert!(spawn.outcome.is_none());
+        assert!(!spawn.created_at.is_empty());
 
         server.wait_for_run(&spawn.handle_id).await;
 
@@ -854,11 +860,13 @@ sandbox = "read_only"
             .await
             .expect("status")
             .0;
-        assert_eq!(status.status, "failed");
-        assert!(status
-            .error_message
-            .as_deref()
-            .is_some_and(|msg| msg.contains("provider `codex` is unavailable")));
+        assert!(status.terminal);
+        match status.outcome {
+            Some(super::OutcomeView::Failed { error, .. }) => {
+                assert!(error.contains("provider `codex` is unavailable"));
+            }
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]
@@ -930,7 +938,7 @@ exit 0
                 .await
                 .expect("spawn")
                 .0;
-            assert_eq!(spawn.status, "accepted");
+            assert_eq!(spawn.phase, "accepted");
 
             let started = Instant::now();
             let mut terminal_observed = false;
@@ -966,7 +974,11 @@ exit 0
                 .await
                 .expect("final status")
                 .0;
-            assert_eq!(final_status.status, "succeeded");
+            assert!(final_status.terminal);
+            assert!(matches!(
+                final_status.outcome,
+                Some(super::OutcomeView::Succeeded { .. })
+            ));
 
             let final_events = server
                 .watch_agent_events(rmcp::handler::server::wrapper::Parameters(
@@ -1250,11 +1262,13 @@ exit 0
         let spawn_json = spawn_res
             .structured_content
             .expect("spawn has structured content");
-        assert_eq!(structured_field(&spawn_json, "status"), "accepted");
-        assert_eq!(structured_field(&spawn_json, "state"), "accepted");
         assert_eq!(structured_field(&spawn_json, "phase"), "accepted");
+        assert_eq!(
+            spawn_json.get("terminal").and_then(|value| value.as_bool()),
+            Some(false)
+        );
         assert!(spawn_json
-            .get("queued_at")
+            .get("created_at")
             .and_then(|value| value.as_str())
             .is_some_and(|value| !value.is_empty()));
         let handle_id = structured_field(&spawn_json, "handle_id").to_string();
@@ -1275,11 +1289,17 @@ exit 0
             let status_json = status_res
                 .structured_content
                 .expect("status has structured content");
-            final_status = structured_field(&status_json, "status").to_string();
-            if matches!(
-                final_status.as_str(),
-                "succeeded" | "failed" | "cancelled" | "timed_out"
-            ) {
+            final_status = status_json
+                .get("outcome")
+                .and_then(|value| value.get("status"))
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if status_json
+                .get("terminal")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(40)).await;
@@ -1300,10 +1320,20 @@ exit 0
         let status_after_done_json = status_after_done
             .structured_content
             .expect("status after done structured");
-        assert!(status_after_done_json.get("phase").is_some());
-        assert!(status_after_done_json.get("stalled").is_some());
-        assert!(status_after_done_json.get("block_reason").is_some());
-        assert!(status_after_done_json.get("advice").is_some());
+        assert_eq!(
+            status_after_done_json
+                .get("terminal")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(status_after_done_json.get("outcome").is_some());
+        assert_eq!(
+            status_after_done_json
+                .get("outcome")
+                .and_then(|value| value.get("status"))
+                .and_then(|value| value.as_str()),
+            Some("succeeded")
+        );
 
         let artifact_res = client
             .call_tool(
@@ -1349,8 +1379,8 @@ exit 0
             })
             .expect("listed run row");
         assert!(listed.get("phase").is_some());
-        assert!(listed.get("last_event_age_ms").is_some());
-        assert!(listed.get("block_reason").is_some());
+        assert!(listed.get("terminal").is_some());
+        assert!(listed.get("outcome").is_some());
 
         let result_res = client
             .call_tool(
@@ -1366,23 +1396,15 @@ exit 0
         let result_json = result_res
             .structured_content
             .expect("get_run_result has structured content");
-        assert_eq!(structured_field(&result_json, "status"), "succeeded");
-        assert_eq!(
-            structured_field(&result_json, "contract_version"),
-            "mcp-subagent.result.v1"
-        );
         assert_eq!(
             result_json
-                .get("normalization_status")
-                .and_then(|value| value.as_str()),
-            Some("Validated")
+                .get("terminal")
+                .and_then(|value| value.as_bool()),
+            Some(true)
         );
-        assert_eq!(
-            result_json
-                .get("retry_classification")
-                .and_then(|value| value.as_str()),
-            Some("non_retryable")
-        );
+        let outcome_json = result_json.get("outcome").expect("outcome");
+        assert_eq!(structured_field(outcome_json, "status"), "succeeded");
+        assert!(structured_field(outcome_json, "summary").contains("Mock run completed"));
 
         let logs_res = client
             .call_tool(
@@ -1420,13 +1442,22 @@ exit 0
         let watch_json = watch_res
             .structured_content
             .expect("watch_run has structured content");
-        assert_eq!(structured_field(&watch_json, "status"), "succeeded");
+        let watch_run_json = watch_json.get("run").expect("run");
         assert_eq!(
-            watch_json.get("terminal").and_then(|value| value.as_bool()),
+            watch_run_json.get("terminal").and_then(|value| value.as_bool()),
             Some(true)
         );
-        assert!(watch_json.get("current_phase").is_some());
-        assert!(watch_json.get("current_phase_age_ms").is_some());
+        assert_eq!(
+            watch_run_json
+                .get("outcome")
+                .and_then(|value| value.get("status"))
+                .and_then(|value| value.as_str()),
+            Some("succeeded")
+        );
+        assert_eq!(
+            watch_json.get("timed_out").and_then(|value| value.as_bool()),
+            Some(false)
+        );
         assert!(watch_json.get("phase_timeout_hit").is_some());
         assert!(watch_json.get("block_reason").is_some());
         assert!(watch_json.get("advice").is_some());
@@ -1664,7 +1695,11 @@ exit 0
             .await
             .expect("status")
             .0;
-        assert_eq!(status.status, "succeeded");
+        assert!(status.terminal);
+        assert!(matches!(
+            status.outcome,
+            Some(super::OutcomeView::Succeeded { .. })
+        ));
 
         let artifact = restarted
             .read_agent_artifact(rmcp::handler::server::wrapper::Parameters(
@@ -1782,21 +1817,21 @@ sandbox = "workspace_write"
             .unwrap_or_default()
             .contains("ROLE"));
 
-        assert!(run_dir.join("request.json").exists());
-        assert!(run_dir.join("resolved-spec.json").exists());
+        assert!(run_dir.join("run.json").exists());
         assert!(run_dir.join("compiled-context.md").exists());
-        assert!(run_dir.join("status.json").exists());
-        assert!(run_dir.join("summary.json").exists());
-        assert!(run_dir.join("summary.raw.txt").exists());
-        assert!(run_dir.join("workspace.meta.json").exists());
-        assert!(run_dir.join("events.ndjson").exists());
-        assert!(run_dir.join("artifacts").join("index.json").exists());
+        assert!(run_dir.join("events.jsonl").exists());
+        assert!(run_dir.join("stdout.log").exists());
+        assert!(run_dir.join("stderr.log").exists());
 
-        let artifact_index_json = fs::read_to_string(run_dir.join("artifacts").join("index.json"))
-            .expect("read artifact index");
-        let artifact_index: serde_json::Value =
-            serde_json::from_str(&artifact_index_json).expect("parse artifact index");
-        let first = artifact_index
+        assert!(!run_dir.join("request.json").exists());
+        assert!(!run_dir.join("resolved-spec.json").exists());
+        assert!(!run_dir.join("status.json").exists());
+        assert!(!run_dir.join("summary.json").exists());
+        assert!(!run_dir.join("summary.raw.txt").exists());
+        assert!(!run_dir.join("workspace.meta.json").exists());
+        assert!(!run_dir.join("events.ndjson").exists());
+
+        let first = run_obj["artifact_index"]
             .as_array()
             .and_then(|items| items.first())
             .expect("artifact index item");
@@ -1808,7 +1843,7 @@ sandbox = "workspace_write"
         assert!(first.get("description").is_some());
 
         let events_text =
-            fs::read_to_string(run_dir.join("events.ndjson")).expect("read events file");
+            fs::read_to_string(run_dir.join("events.jsonl")).expect("read events file");
         let event_names = events_text
             .lines()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -1831,10 +1866,6 @@ sandbox = "workspace_write"
                 "missing event `{required}` in {event_names:?}"
             );
         }
-
-        assert!(run_dir.join("stdout.log").exists());
-        assert!(run_dir.join("stderr.log").exists());
-        assert!(run_dir.join("temp").exists());
     }
 
     #[tokio::test]
