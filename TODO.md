@@ -2259,4 +2259,32 @@
   - `spawn_agent_accepts_then_fails_when_provider_unavailable`
 - 已通过回归：
   - `cargo fmt`
+  - `cargo test -q`（`170 + 42 + 3` tests passed）。
+
+## T-087 V0.10-P0-RunEventsJsonlAndHeartbeat (Completed 2026-03-25)
+
+任务：落地 run 事件流最小闭环：事件文件升级为 `events.jsonl`、`spawn` accepted/queued/probe/heartbeat 可见，并让 CLI `watch` 直接消费增量事件。  
+验收标准：
+
+1. 每个 run 目录生成 `events.jsonl`，并兼容保留 `events.ndjson`（旧读取链路不破坏）。
+2. `spawn_agent` 在 accepted-only 路径写入 `run.accepted` / `run.queued` 事件。
+3. 后台 worker 写入 `provider.probe.started/completed`，运行中定期写入 heartbeat，终态写入 `run.completed|run.failed|run.timed_out|run.cancelled`。
+4. `watch` 在非 JSON 模式下不再只输出状态变化，而是能持续打印新增事件。
+5. `timeline` 读取优先 `events.jsonl`，缺失时自动回退 `events.ndjson`。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已完成事件持久化升级：
+  - `src/mcp/persistence.rs` 事件主文件改为 `events.jsonl`；
+  - 同步写入 legacy `events.ndjson`；
+  - 新增 `append_run_event(...)`，支持带 `seq/ts/level/state/phase/source/message` 的增量事件行。
+- 已完成 `spawn` 事件链路接入：
+  - `src/mcp/tools.rs::spawn_agent` 在同步返回前写入 `run.accepted`/`run.queued`；
+  - worker 侧写入 `provider.probe.started/completed`、`workspace.prepare.started`、`provider.heartbeat` 与终态 `run.*` 事件；
+  - provider unavailable 的异步失败路径也写入明确失败事件。
+- 已完成 CLI 消费面增强：
+  - `src/main.rs` 的 `load_run_events` 改为优先 `events.jsonl`，自动回退 `events.ndjson`；
+  - `watch` 改为实时打印新增事件（并保留状态行）。
+- 已通过回归：
+  - `cargo fmt`
   - `cargo test -q`（`169 + 41 + 3` tests passed）。

@@ -1,9 +1,14 @@
-use std::{collections::HashMap, fs, time::Duration};
+use std::{
+    collections::HashMap,
+    fs,
+    time::{Duration, Instant},
+};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     tool, tool_router, ErrorData, Json,
 };
+use serde_json::json;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -25,7 +30,7 @@ use crate::{
             build_capability_notes, cancelled_summary, failed_summary, format_time,
             map_summary_output,
         },
-        persistence::{load_run_record_from_disk, persist_run_record},
+        persistence::{append_run_event, load_run_record_from_disk, persist_run_record},
         review::apply_review_evidence_hook,
         server::{
             acquire_serialize_locks_from_state, provider_unavailable_message, McpSubagentServer,
@@ -563,14 +568,63 @@ impl McpSubagentServer {
 
         self.upsert_and_persist_run(&handle_id, running_record)
             .await?;
+        append_run_event(
+            self.state_dir(),
+            &handle_id,
+            "run.accepted",
+            "accepted",
+            "accepted",
+            "runtime",
+            "run accepted",
+            json!({
+                "agent": loaded.spec.core.name.clone(),
+                "provider": loaded.spec.core.provider.as_str(),
+            }),
+        )?;
+        append_run_event(
+            self.state_dir(),
+            &handle_id,
+            "run.queued",
+            "queued",
+            "queueing",
+            "runtime",
+            "run queued for async execution",
+            json!({}),
+        )?;
 
         let state = self.runtime_state();
         let state_dir = self.state_dir().to_path_buf();
         let task_handle_id = handle_id.clone();
         let task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(120)).await;
+            let _ = append_run_event(
+                &state_dir,
+                &task_handle_id,
+                "provider.probe.started",
+                "preparing",
+                "provider_probe",
+                "provider",
+                "provider probe started",
+                json!({
+                    "provider": loaded.spec.core.provider.as_str(),
+                }),
+            );
             let probe_result = provider_prober.probe(&loaded.spec.core.provider);
             let probe_snapshot = build_probe_result_snapshot(&probe_result);
+            let _ = append_run_event(
+                &state_dir,
+                &task_handle_id,
+                "provider.probe.completed",
+                "preparing",
+                "provider_probe",
+                "provider",
+                "provider probe completed",
+                json!({
+                    "provider": probe_result.provider.as_str(),
+                    "status": format!("{}", probe_result.status),
+                    "version": probe_result.version.clone(),
+                }),
+            );
             if !probe_result.is_available() {
                 let mut probe_details = vec![format!("status={}", probe_result.status)];
                 if let Some(version) = &probe_result.version {
@@ -603,22 +657,63 @@ impl McpSubagentServer {
                 record.compiled_context_markdown = None;
                 record.usage = None;
                 record.retry_classification = None;
+                let _ = append_run_event(
+                    &state_dir,
+                    &task_handle_id,
+                    "run.failed",
+                    "failed",
+                    "provider_probe",
+                    "runtime",
+                    "provider unavailable",
+                    json!({
+                        "error": record.error_message.clone(),
+                    }),
+                );
                 if let Err(err) = persist_run_record(&state_dir, &task_handle_id, record) {
                     record.error_message = Some(format!("failed to persist run state: {err}"));
                 }
                 return;
             }
 
+            let _ = append_run_event(
+                &state_dir,
+                &task_handle_id,
+                "workspace.prepare.started",
+                "preparing",
+                "workspace_prepare",
+                "workspace",
+                "workspace/context preparation started",
+                json!({}),
+            );
             let _serialize_guards =
                 acquire_serialize_locks_from_state(&state, lock_keys.clone()).await;
-            let dispatch = run_dispatch(
+            let dispatch_started_at = Instant::now();
+            let mut dispatch_future = Box::pin(run_dispatch(
                 &loaded.spec,
                 &request,
                 &task_handle_id,
                 &state_dir,
                 lock_keys.clone(),
-            )
-            .await;
+            ));
+            let dispatch = loop {
+                tokio::select! {
+                    output = &mut dispatch_future => break output,
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                        let _ = append_run_event(
+                            &state_dir,
+                            &task_handle_id,
+                            "provider.heartbeat",
+                            "running",
+                            "running",
+                            "runtime",
+                            "still alive",
+                            json!({
+                                "elapsed_ms": dispatch_started_at.elapsed().as_millis() as u64,
+                            }),
+                        );
+                    }
+                }
+            };
 
             let mut guard = state.lock().await;
             guard.tasks.remove(&task_handle_id);
@@ -685,6 +780,27 @@ impl McpSubagentServer {
                         Some(dispatch_result.compiled_context_markdown);
                     record.usage = dispatch_result.native_usage;
                     record.retry_classification = Some(retry_classification);
+                    let final_status = format!("{}", record.status);
+                    let final_event = match record.status {
+                        RunStatus::Succeeded => "run.completed",
+                        RunStatus::Failed => "run.failed",
+                        RunStatus::TimedOut => "run.timed_out",
+                        RunStatus::Cancelled => "run.cancelled",
+                        _ => "run.updated",
+                    };
+                    let _ = append_run_event(
+                        &state_dir,
+                        &task_handle_id,
+                        final_event,
+                        &final_status,
+                        "completed",
+                        "runtime",
+                        "run finished",
+                        json!({
+                            "status": final_status,
+                            "verification_status": format!("{}", record.summary.as_ref().map(|v| v.summary.verification_status.clone()).unwrap_or(crate::runtime::summary::VerificationStatus::NotRun)),
+                        }),
+                    );
                     drop(workspace_cleanup);
                 }
                 Err(err) => {
@@ -704,6 +820,18 @@ impl McpSubagentServer {
                     record.compiled_context_markdown = None;
                     record.usage = None;
                     record.retry_classification = None;
+                    let _ = append_run_event(
+                        &state_dir,
+                        &task_handle_id,
+                        "run.failed",
+                        "failed",
+                        "execution",
+                        "runtime",
+                        "run failed",
+                        json!({
+                            "error": record.error_message.clone(),
+                        }),
+                    );
                 }
             }
 

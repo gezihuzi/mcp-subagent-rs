@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, fs, io::Write, path::Path};
 
 use rmcp::ErrorData;
 use serde::Serialize;
@@ -43,6 +43,10 @@ fn compiled_context_path(state_dir: &Path, handle_id: &str) -> std::path::PathBu
 }
 
 fn events_path(state_dir: &Path, handle_id: &str) -> std::path::PathBuf {
+    run_dir(state_dir, handle_id).join("events.jsonl")
+}
+
+fn legacy_events_path(state_dir: &Path, handle_id: &str) -> std::path::PathBuf {
     run_dir(state_dir, handle_id).join("events.ndjson")
 }
 
@@ -177,8 +181,57 @@ pub(crate) fn persist_run_record(
         .unwrap_or("");
     write_run_log_file(&run_directory.join("stdout.log"), stdout_log_content)?;
     write_run_log_file(&run_directory.join("stderr.log"), stderr_log_content)?;
-    write_events_file(&events_path(state_dir, handle_id), build_run_events(record))?;
+    if matches!(
+        record.status,
+        crate::runtime::dispatcher::RunStatus::Succeeded
+            | crate::runtime::dispatcher::RunStatus::Failed
+            | crate::runtime::dispatcher::RunStatus::TimedOut
+            | crate::runtime::dispatcher::RunStatus::Cancelled
+    ) {
+        let events = build_run_events(record);
+        write_events_file_if_missing(&events_path(state_dir, handle_id), &events)?;
+        write_events_file_if_missing(&legacy_events_path(state_dir, handle_id), &events)?;
+    }
 
+    Ok(())
+}
+
+pub(crate) fn append_run_event(
+    state_dir: &Path,
+    handle_id: &str,
+    event: &str,
+    state: &str,
+    phase: &str,
+    source: &str,
+    message: &str,
+    detail: Value,
+) -> std::result::Result<(), ErrorData> {
+    let run_directory = run_dir(state_dir, handle_id);
+    fs::create_dir_all(&run_directory).map_err(|err| {
+        ErrorData::internal_error(
+            format!(
+                "failed to create run directory {}: {err}",
+                run_directory.display()
+            ),
+            None,
+        )
+    })?;
+
+    let canonical_path = events_path(state_dir, handle_id);
+    let seq = next_event_seq(&canonical_path)?;
+    let timestamp = format_time(OffsetDateTime::now_utc());
+    let line = RunEventRecord::runtime(
+        seq,
+        event.to_string(),
+        timestamp,
+        state.to_string(),
+        phase.to_string(),
+        source.to_string(),
+        message.to_string(),
+        detail,
+    );
+    append_event_line(&canonical_path, &line)?;
+    append_event_line(&legacy_events_path(state_dir, handle_id), &line)?;
     Ok(())
 }
 
@@ -266,9 +319,65 @@ fn write_run_log_file(path: &Path, content: &str) -> std::result::Result<(), Err
 
 #[derive(Debug, Serialize)]
 struct RunEventRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ts: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
     event: String,
     timestamp: String,
     detail: Value,
+}
+
+impl RunEventRecord {
+    fn legacy(event: String, timestamp: String, detail: Value) -> Self {
+        Self {
+            seq: None,
+            ts: None,
+            level: None,
+            state: None,
+            phase: None,
+            source: None,
+            message: None,
+            event,
+            timestamp,
+            detail,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn runtime(
+        seq: u64,
+        event: String,
+        timestamp: String,
+        state: String,
+        phase: String,
+        source: String,
+        message: String,
+        detail: Value,
+    ) -> Self {
+        Self {
+            seq: Some(seq),
+            ts: Some(timestamp.clone()),
+            level: Some("info".to_string()),
+            state: Some(state),
+            phase: Some(phase),
+            source: Some(source),
+            message: Some(message),
+            event,
+            timestamp,
+            detail,
+        }
+    }
 }
 
 fn build_run_events(record: &RunRecord) -> Vec<RunEventRecord> {
@@ -276,46 +385,46 @@ fn build_run_events(record: &RunRecord) -> Vec<RunEventRecord> {
     let mut events = Vec::new();
 
     if let Some(probe) = &record.probe_result {
-        events.push(RunEventRecord {
-            event: "probe".to_string(),
-            timestamp: timestamp.clone(),
-            detail: json!({
+        events.push(RunEventRecord::legacy(
+            "probe".to_string(),
+            timestamp.clone(),
+            json!({
                 "provider": probe.provider,
                 "status": probe.status,
                 "executable": probe.executable,
             }),
-        });
+        ));
     }
 
     if let Some(request) = &record.request_snapshot {
-        events.push(RunEventRecord {
-            event: "gate".to_string(),
-            timestamp: timestamp.clone(),
-            detail: json!({
+        events.push(RunEventRecord::legacy(
+            "gate".to_string(),
+            timestamp.clone(),
+            json!({
                 "stage": request.stage,
                 "plan_ref": request.plan_ref,
                 "run_mode": request.run_mode,
             }),
-        });
+        ));
     }
 
     if let Some(workspace) = &record.workspace {
-        events.push(RunEventRecord {
-            event: "workspace".to_string(),
-            timestamp: timestamp.clone(),
-            detail: json!({
+        events.push(RunEventRecord::legacy(
+            "workspace".to_string(),
+            timestamp.clone(),
+            json!({
                 "mode": workspace.mode,
                 "source_path": workspace.source_path,
                 "workspace_path": workspace.workspace_path,
             }),
-        });
+        ));
     }
 
     if let Some(memory) = &record.memory_resolution {
-        events.push(RunEventRecord {
-            event: "memory".to_string(),
-            timestamp: timestamp.clone(),
-            detail: json!({
+        events.push(RunEventRecord::legacy(
+            "memory".to_string(),
+            timestamp.clone(),
+            json!({
                 "project_memory_count": memory.project_memory_count,
                 "additional_memory_count": memory.additional_memory_count,
                 "native_passthrough_count": memory.native_passthrough_count,
@@ -323,14 +432,14 @@ fn build_run_events(record: &RunRecord) -> Vec<RunEventRecord> {
                 "additional_memory_labels": memory.additional_memory_labels,
                 "native_passthrough_paths": memory.native_passthrough_paths,
             }),
-        });
+        ));
     }
 
     if let Some(policy) = &record.execution_policy {
-        events.push(RunEventRecord {
-            event: "policy".to_string(),
-            timestamp: timestamp.clone(),
-            detail: json!({
+        events.push(RunEventRecord::legacy(
+            "policy".to_string(),
+            timestamp.clone(),
+            json!({
                 "requested_run_mode": policy.requested_run_mode,
                 "effective_run_mode": policy.effective_run_mode,
                 "effective_run_mode_source": policy.effective_run_mode_source,
@@ -346,30 +455,30 @@ fn build_run_events(record: &RunRecord) -> Vec<RunEventRecord> {
                 "attempts_used": policy.attempts_used,
                 "retries_used": policy.retries_used,
             }),
-        });
+        ));
     }
 
     if let Some(retry) = &record.retry_classification {
-        events.push(RunEventRecord {
-            event: "retry_classification".to_string(),
-            timestamp: timestamp.clone(),
-            detail: json!({
+        events.push(RunEventRecord::legacy(
+            "retry_classification".to_string(),
+            timestamp.clone(),
+            json!({
                 "classification": retry.classification,
                 "reason": retry.reason,
             }),
-        });
+        ));
     }
 
     if let Some(summary) = &record.summary {
-        events.push(RunEventRecord {
-            event: "parse".to_string(),
-            timestamp: timestamp.clone(),
-            detail: json!({
+        events.push(RunEventRecord::legacy(
+            "parse".to_string(),
+            timestamp.clone(),
+            json!({
                 "parse_status": format!("{}", summary.parse_status),
                 "verification_status": format!("{}", summary.summary.verification_status),
                 "exit_code": summary.summary.exit_code,
             }),
-        });
+        ));
     }
 
     if matches!(
@@ -384,23 +493,28 @@ fn build_run_events(record: &RunRecord) -> Vec<RunEventRecord> {
             .as_ref()
             .map(|workspace| !workspace.workspace_path.exists())
             .unwrap_or(true);
-        events.push(RunEventRecord {
-            event: "cleanup".to_string(),
+        events.push(RunEventRecord::legacy(
+            "cleanup".to_string(),
             timestamp,
-            detail: json!({
+            json!({
                 "cleaned": cleaned,
                 "status": record.status,
             }),
-        });
+        ));
     }
 
     events
 }
 
-fn write_events_file(
+fn write_events_file_if_missing(
     path: &Path,
-    events: Vec<RunEventRecord>,
+    events: &[RunEventRecord],
 ) -> std::result::Result<(), ErrorData> {
+    if let Ok(metadata) = fs::metadata(path) {
+        if metadata.len() > 0 {
+            return Ok(());
+        }
+    }
     let mut lines = String::new();
     for event in events {
         let line = serde_json::to_string(&event)
@@ -414,6 +528,56 @@ fn write_events_file(
             None,
         )
     })
+}
+
+fn append_event_line(path: &Path, event: &RunEventRecord) -> std::result::Result<(), ErrorData> {
+    let line = serde_json::to_string(event)
+        .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| {
+            ErrorData::internal_error(
+                format!("failed to open events file {}: {err}", path.display()),
+                None,
+            )
+        })?;
+    file.write_all(line.as_bytes()).map_err(|err| {
+        ErrorData::internal_error(
+            format!("failed to append events file {}: {err}", path.display()),
+            None,
+        )
+    })?;
+    file.write_all(b"\n").map_err(|err| {
+        ErrorData::internal_error(
+            format!(
+                "failed to append newline in events file {}: {err}",
+                path.display()
+            ),
+            None,
+        )
+    })?;
+    Ok(())
+}
+
+fn next_event_seq(path: &Path) -> std::result::Result<u64, ErrorData> {
+    if !path.exists() {
+        return Ok(1);
+    }
+    let raw = fs::read_to_string(path).map_err(|err| {
+        ErrorData::internal_error(
+            format!("failed to read events file {}: {err}", path.display()),
+            None,
+        )
+    })?;
+    let max_seq = raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|value| value.get("seq").and_then(|v| v.as_u64()))
+        .max()
+        .unwrap_or(0);
+    Ok(max_seq + 1)
 }
 
 fn write_json_file<T: Serialize>(path: &Path, value: &T) -> std::result::Result<(), ErrorData> {
@@ -446,12 +610,13 @@ fn format_time(value: OffsetDateTime) -> String {
 mod tests {
     use std::fs;
 
+    use serde_json::json;
     use tempfile::tempdir;
     use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
     use crate::runtime::dispatcher::RunStatus;
 
-    use super::load_run_record_from_disk;
+    use super::{append_run_event, load_run_record_from_disk};
 
     #[test]
     fn loads_legacy_run_json_without_new_fields() {
@@ -487,5 +652,60 @@ mod tests {
         assert_eq!(loaded.task, "legacy task");
         assert!(loaded.memory_resolution.is_none());
         assert!(loaded.compiled_context_markdown.is_none());
+    }
+
+    #[test]
+    fn append_run_event_writes_jsonl_and_legacy_with_incrementing_seq() {
+        let temp = tempdir().expect("tempdir");
+        let state_dir = temp.path().join("state");
+        let handle_id = "run-events";
+
+        append_run_event(
+            &state_dir,
+            handle_id,
+            "run.accepted",
+            "accepted",
+            "accepted",
+            "runtime",
+            "accepted",
+            json!({"k":"v"}),
+        )
+        .expect("append accepted");
+        append_run_event(
+            &state_dir,
+            handle_id,
+            "provider.heartbeat",
+            "running",
+            "running",
+            "runtime",
+            "still alive",
+            json!({"elapsed_ms":100}),
+        )
+        .expect("append heartbeat");
+
+        let run_dir = state_dir.join("runs").join(handle_id);
+        let jsonl = fs::read_to_string(run_dir.join("events.jsonl")).expect("read jsonl");
+        let legacy = fs::read_to_string(run_dir.join("events.ndjson")).expect("read ndjson");
+        assert_eq!(
+            jsonl.lines().count(),
+            2,
+            "events.jsonl should contain appended lines"
+        );
+        assert_eq!(
+            legacy.lines().count(),
+            2,
+            "events.ndjson should mirror appended lines"
+        );
+
+        let first: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().expect("first line")).expect("parse first");
+        let second: serde_json::Value =
+            serde_json::from_str(jsonl.lines().nth(1).expect("second line")).expect("parse second");
+        assert_eq!(first.get("seq").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(second.get("seq").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(
+            second.get("event").and_then(|v| v.as_str()),
+            Some("provider.heartbeat")
+        );
     }
 }

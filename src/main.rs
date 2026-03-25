@@ -1104,6 +1104,13 @@ struct RunTimelineEvent {
     event: String,
     timestamp: String,
     detail: serde_json::Value,
+    seq: Option<u64>,
+    ts: Option<String>,
+    level: Option<String>,
+    state: Option<String>,
+    phase: Option<String>,
+    source: Option<String>,
+    message: Option<String>,
 }
 
 impl Default for RunTimelineEvent {
@@ -1112,6 +1119,23 @@ impl Default for RunTimelineEvent {
             event: String::new(),
             timestamp: String::new(),
             detail: serde_json::Value::Null,
+            seq: None,
+            ts: None,
+            level: None,
+            state: None,
+            phase: None,
+            source: None,
+            message: None,
+        }
+    }
+}
+
+impl RunTimelineEvent {
+    fn display_timestamp(&self) -> &str {
+        if !self.timestamp.is_empty() {
+            self.timestamp.as_str()
+        } else {
+            self.ts.as_deref().unwrap_or("")
         }
     }
 }
@@ -1205,6 +1229,10 @@ fn run_json_path(state_dir: &Path, handle_id: &str) -> PathBuf {
 }
 
 fn run_events_path(state_dir: &Path, handle_id: &str) -> PathBuf {
+    runs_root(state_dir).join(handle_id).join("events.jsonl")
+}
+
+fn run_events_legacy_path(state_dir: &Path, handle_id: &str) -> PathBuf {
     runs_root(state_dir).join(handle_id).join("events.ndjson")
 }
 
@@ -1257,7 +1285,12 @@ fn load_run_events(
     state_dir: &Path,
     handle_id: &str,
 ) -> std::result::Result<Vec<RunTimelineEvent>, String> {
-    let path = run_events_path(state_dir, handle_id);
+    let canonical_path = run_events_path(state_dir, handle_id);
+    let path = if canonical_path.exists() {
+        canonical_path
+    } else {
+        run_events_legacy_path(state_dir, handle_id)
+    };
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
     let mut events = Vec::new();
@@ -1728,7 +1761,7 @@ fn read_timeline(
 
     for item in events {
         let detail = serde_json::to_string(&item.detail).unwrap_or_else(|_| "null".to_string());
-        println!("{} [{}] {}", item.timestamp, item.event, detail);
+        println!("{} [{}] {}", item.display_timestamp(), item.event, detail);
     }
     ExitCode::SUCCESS
 }
@@ -1742,6 +1775,7 @@ async fn watch_run(
 ) -> ExitCode {
     let started = Instant::now();
     let mut last_status = String::new();
+    let mut seen_event_count = 0usize;
     loop {
         let record = match load_run_record(&cfg.state_dir, &handle_id) {
             Ok(record) => record,
@@ -1751,9 +1785,30 @@ async fn watch_run(
             }
         };
 
-        if !json && record.status != last_status {
-            println!("{} {}", record.status, record.updated_at);
-            last_status = record.status.clone();
+        if !json {
+            if let Ok(events) = load_run_events(&cfg.state_dir, &handle_id) {
+                for event in events.iter().skip(seen_event_count) {
+                    let detail =
+                        serde_json::to_string(&event.detail).unwrap_or_else(|_| "null".to_string());
+                    let message = event.message.as_deref().unwrap_or("");
+                    if message.is_empty() {
+                        println!("{} [{}] {}", event.display_timestamp(), event.event, detail);
+                    } else {
+                        println!(
+                            "{} [{}] {} {}",
+                            event.display_timestamp(),
+                            event.event,
+                            message,
+                            detail
+                        );
+                    }
+                }
+                seen_event_count = events.len();
+            }
+            if record.status != last_status {
+                println!("{} {}", record.status, record.updated_at);
+                last_status = record.status.clone();
+            }
         }
 
         if is_terminal_status(record.status.as_str()) {
@@ -3140,6 +3195,28 @@ target/
         let filtered = super::filter_timeline_events(events, Some("parse"));
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].event, "parse");
+    }
+
+    #[test]
+    fn load_run_events_prefers_jsonl_when_both_formats_exist() {
+        let dir = tempdir().expect("tempdir");
+        let run_dir = dir.path().join("runs").join("handle-1");
+        fs::create_dir_all(&run_dir).expect("mkdir run");
+        fs::write(
+            run_dir.join("events.ndjson"),
+            "{\"event\":\"legacy\",\"timestamp\":\"2026-03-25T00:00:00Z\",\"detail\":{}}\n",
+        )
+        .expect("write legacy events");
+        fs::write(
+            run_dir.join("events.jsonl"),
+            "{\"event\":\"canonical\",\"timestamp\":\"2026-03-25T00:00:01Z\",\"detail\":{},\"seq\":1}\n",
+        )
+        .expect("write canonical events");
+
+        let events = super::load_run_events(dir.path(), "handle-1").expect("load events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "canonical");
+        assert_eq!(events[0].seq, Some(1));
     }
 
     #[test]
