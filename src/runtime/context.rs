@@ -651,7 +651,7 @@ mod tests {
         let compiled = compiler
             .compile(&spec, &req, ResolvedMemory::default())
             .expect("compile");
-        assert!(compiled.injected_prompt.contains("WorkflowStage: Build"));
+        assert!(compiled.injected_prompt.contains("WorkflowStage: build"));
         assert!(compiled
             .injected_prompt
             .contains("StageRolePriority: Builder -> Reviewer -> Planner"));

@@ -347,7 +347,7 @@ fn build_workspace_policy_hints(loaded_specs: &[LoadedAgentSpec]) -> Vec<Workspa
     ]
     .into_iter()
     .map(|policy| {
-        let policy_name = format!("{policy:?}");
+        let policy_name = format!("{policy}");
         WorkspacePolicyHint {
             policy: policy_name.clone(),
             usage_count: usage.get(&policy_name).copied().unwrap_or(0),
@@ -680,10 +680,10 @@ instructions = "review"
         let rendered = render_doctor_report(&report);
         assert!(rendered.contains("mcp-subagent doctor"));
         assert!(rendered.contains("agents_loaded: 1"));
-        assert!(rendered.contains("provider: Mock"));
-        assert!(rendered.contains("provider: Ollama"));
-        assert!(rendered.contains("provider: Codex"));
-        assert!(rendered.contains("status: MissingBinary"));
+        assert!(rendered.contains("provider: mock"));
+        assert!(rendered.contains("provider: ollama"));
+        assert!(rendered.contains("provider: codex"));
+        assert!(rendered.contains("status: missing_binary"));
         assert!(rendered.contains("supports_native_project_memory: true"));
         assert!(rendered.contains("validated_flags"));
         assert!(rendered.contains("--ask-for-approval"));

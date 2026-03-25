@@ -330,11 +330,11 @@ tags = ["research", "read-only", "fast"]
 context_mode = "expanded_brief"
 memory_sources = ["auto_project_memory", "active_plan"]
 working_dir_policy = "auto"
-file_conflict_policy = "Serialize"
+file_conflict_policy = "serialize"
 sandbox = "read_only"
 approval = "provider_default"
 timeout_secs = 600
-spawn_policy = "Sync"
+spawn_policy = "sync"
 
 [workflow]
 enabled = true
@@ -354,11 +354,11 @@ tags = ["build", "backend", "rust", "codex"]
 context_mode = { SelectedFiles = ["src/**", "Cargo.toml", "PLAN.md"] }
 memory_sources = ["auto_project_memory", "active_plan"]
 working_dir_policy = "auto"
-file_conflict_policy = "Serialize"
+file_conflict_policy = "serialize"
 sandbox = "workspace_write"
 approval = "deny_by_default"
 timeout_secs = 1200
-spawn_policy = "Async"
+spawn_policy = "async"
 
 [provider_overrides.codex]
 model_reasoning_effort = "medium"
@@ -381,11 +381,11 @@ tags = ["build", "frontend", "ui", "gemini"]
 context_mode = { SelectedFiles = ["web/**", "src/**", "package.json", "PLAN.md"] }
 memory_sources = ["auto_project_memory", "active_plan"]
 working_dir_policy = "auto"
-file_conflict_policy = "Serialize"
+file_conflict_policy = "serialize"
 sandbox = "workspace_write"
 approval = "provider_default"
 timeout_secs = 1200
-spawn_policy = "Async"
+spawn_policy = "async"
 
 [provider_overrides.gemini]
 experimental_subagents = true
@@ -408,11 +408,11 @@ tags = ["review", "correctness", "codex"]
 context_mode = "summary_only"
 memory_sources = ["auto_project_memory", "active_plan"]
 working_dir_policy = "auto"
-file_conflict_policy = "Serialize"
+file_conflict_policy = "serialize"
 sandbox = "read_only"
 approval = "deny_by_default"
 timeout_secs = 900
-spawn_policy = "Sync"
+spawn_policy = "sync"
 
 [provider_overrides.codex]
 model_reasoning_effort = "high"
@@ -435,11 +435,11 @@ tags = ["review", "style", "claude"]
 context_mode = "summary_only"
 memory_sources = ["auto_project_memory", "active_plan"]
 working_dir_policy = "auto"
-file_conflict_policy = "Serialize"
+file_conflict_policy = "serialize"
 sandbox = "read_only"
 approval = "deny_by_default"
 timeout_secs = 900
-spawn_policy = "Sync"
+spawn_policy = "sync"
 
 [workflow]
 enabled = true
@@ -459,11 +459,11 @@ tags = ["review", "style", "codex"]
 context_mode = "summary_only"
 memory_sources = ["auto_project_memory", "active_plan"]
 working_dir_policy = "auto"
-file_conflict_policy = "Serialize"
+file_conflict_policy = "serialize"
 sandbox = "read_only"
 approval = "deny_by_default"
 timeout_secs = 900
-spawn_policy = "Sync"
+spawn_policy = "sync"
 
 [provider_overrides.codex]
 model_reasoning_effort = "high"
@@ -486,11 +486,11 @@ tags = ["review", "style", "gemini"]
 context_mode = "summary_only"
 memory_sources = ["auto_project_memory", "active_plan"]
 working_dir_policy = "auto"
-file_conflict_policy = "Serialize"
+file_conflict_policy = "serialize"
 sandbox = "read_only"
 approval = "provider_default"
 timeout_secs = 900
-spawn_policy = "Sync"
+spawn_policy = "sync"
 
 [workflow]
 enabled = true
@@ -510,11 +510,11 @@ tags = ["build", "local", "ollama", "fallback"]
 context_mode = { SelectedFiles = ["src/**", "PLAN.md"] }
 memory_sources = ["auto_project_memory", "active_plan"]
 working_dir_policy = "auto"
-file_conflict_policy = "Serialize"
+file_conflict_policy = "serialize"
 sandbox = "workspace_write"
 approval = "deny_by_default"
 timeout_secs = 1200
-spawn_policy = "Async"
+spawn_policy = "async"
 
 [workflow]
 enabled = true
@@ -534,11 +534,11 @@ tags = ["build", "codex", "minimal"]
 context_mode = { SelectedFiles = ["src/**", "PLAN.md"] }
 memory_sources = ["auto_project_memory", "active_plan"]
 working_dir_policy = "auto"
-file_conflict_policy = "Serialize"
+file_conflict_policy = "serialize"
 sandbox = "workspace_write"
 approval = "deny_by_default"
 timeout_secs = 900
-spawn_policy = "Sync"
+spawn_policy = "sync"
 
 [workflow]
 enabled = true

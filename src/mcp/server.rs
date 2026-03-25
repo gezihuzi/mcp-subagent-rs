@@ -624,7 +624,7 @@ sandbox = "read_only"
             .expect("run")
             .0;
 
-        assert_eq!(out.status, "Succeeded");
+        assert_eq!(out.status, "succeeded");
         assert!(out
             .structured_summary
             .summary
@@ -669,7 +669,7 @@ sandbox = "read_only"
         assert!(err
             .message
             .as_ref()
-            .contains("provider `Codex` is unavailable"));
+            .contains("provider `codex` is unavailable"));
     }
 
     #[tokio::test]
@@ -783,7 +783,7 @@ sandbox = "read_only"
         assert!(err
             .message
             .as_ref()
-            .contains("provider `Ollama` is unavailable"));
+            .contains("provider `ollama` is unavailable"));
     }
 
     #[derive(Debug, Clone, Default)]
@@ -908,13 +908,13 @@ sandbox = "read_only"
             final_status = structured_field(&status_json, "status").to_string();
             if matches!(
                 final_status.as_str(),
-                "Succeeded" | "Failed" | "Cancelled" | "TimedOut"
+                "succeeded" | "failed" | "cancelled" | "timed_out"
             ) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(40)).await;
         }
-        assert_eq!(final_status, "Succeeded");
+        assert_eq!(final_status, "succeeded");
 
         let artifact_res = client
             .call_tool(
@@ -971,7 +971,7 @@ sandbox = "read_only"
         let cancel_json = cancel_res
             .structured_content
             .expect("cancel structured content");
-        assert_eq!(structured_field(&cancel_json, "status"), "Cancelled");
+        assert_eq!(structured_field(&cancel_json, "status"), "cancelled");
 
         client.cancel().await.expect("cancel client");
         server_handle.await.expect("server join");
@@ -1015,7 +1015,7 @@ sandbox = "read_only"
             .await
             .expect("status")
             .0;
-        assert_eq!(status.status, "Succeeded");
+        assert_eq!(status.status, "succeeded");
 
         let artifact = restarted
             .read_agent_artifact(rmcp::handler::server::wrapper::Parameters(
