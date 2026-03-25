@@ -17,6 +17,8 @@ use crate::{
         },
         workspace::{prepare_workspace, PreparedWorkspace, WorkspaceMode},
     },
+    spec::runtime_policy::DelegationContextPolicy,
+    spec::AgentSpec,
     spec::Provider,
     types::RunRequest,
 };
@@ -45,6 +47,7 @@ pub(crate) async fn run_dispatch(
     effective_request.working_dir = prepared_workspace.workspace_path;
     let resolved_memory = resolve_memory(spec, &effective_request)
         .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
+    attach_plan_section_acceptance_criteria(spec, &mut effective_request, &resolved_memory);
     let memory_resolution = build_memory_resolution_snapshot(&resolved_memory);
 
     let runner = select_runner(&spec.core.provider);
@@ -96,6 +99,96 @@ fn parse_handle_id(handle_id: &str) -> Uuid {
     Uuid::parse_str(handle_id).unwrap_or_else(|_| Uuid::now_v7())
 }
 
+fn attach_plan_section_acceptance_criteria(
+    spec: &AgentSpec,
+    request: &mut RunRequest,
+    memory: &crate::types::ResolvedMemory,
+) {
+    if !should_attach_plan_acceptance_criteria(spec, request) {
+        return;
+    }
+
+    let Some(plan_section) = memory
+        .additional_memories
+        .iter()
+        .find(|snippet| snippet.label.starts_with("plan_section:"))
+    else {
+        return;
+    };
+
+    let extracted = extract_markdown_checklist_items(&plan_section.content);
+    if extracted.is_empty() {
+        return;
+    }
+
+    for item in extracted {
+        if request
+            .acceptance_criteria
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&item))
+        {
+            continue;
+        }
+        request.acceptance_criteria.push(item);
+    }
+}
+
+fn should_attach_plan_acceptance_criteria(spec: &AgentSpec, request: &RunRequest) -> bool {
+    if matches!(
+        spec.runtime.delegation_context,
+        DelegationContextPolicy::PlanSection
+    ) {
+        return true;
+    }
+    if request
+        .stage
+        .as_deref()
+        .is_some_and(|stage| stage.eq_ignore_ascii_case("review"))
+    {
+        return true;
+    }
+    spec.core
+        .tags
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case("review"))
+}
+
+fn extract_markdown_checklist_items(section: &str) -> Vec<String> {
+    section
+        .lines()
+        .filter_map(markdown_list_item)
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+fn markdown_list_item(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    for marker in ["- ", "* ", "+ "] {
+        if let Some(item) = trimmed.strip_prefix(marker) {
+            return Some(item);
+        }
+    }
+
+    let bytes = trimmed.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        idx += 1;
+    }
+    if idx == 0 {
+        return None;
+    }
+    if idx >= bytes.len() || bytes[idx] != b'.' {
+        return None;
+    }
+    idx += 1;
+    if idx >= bytes.len() || bytes[idx] != b' ' {
+        return None;
+    }
+    idx += 1;
+    Some(&trimmed[idx..])
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, fs};
@@ -107,8 +200,8 @@ mod tests {
         spec::{
             core::{AgentSpecCore, Provider},
             runtime_policy::{
-                ContextMode, FileConflictPolicy, MemorySource, RuntimePolicy, SandboxPolicy,
-                WorkingDirPolicy,
+                ContextMode, DelegationContextPolicy, FileConflictPolicy, MemorySource,
+                RuntimePolicy, SandboxPolicy, WorkingDirPolicy,
             },
             AgentSpec,
         },
@@ -209,5 +302,47 @@ mod tests {
 
         let workspace_path = state_dir.join("runs").join(handle).join("workspace");
         assert!(!workspace_path.exists());
+    }
+
+    #[tokio::test]
+    async fn run_dispatch_attaches_plan_section_acceptance_criteria_for_reviewer() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        fs::create_dir_all(&source).expect("create source");
+        fs::write(
+            source.join("PLAN.md"),
+            r#"# PLAN
+
+## Acceptance Criteria
+- Must include regression coverage.
+- Must mention open risks.
+"#,
+        )
+        .expect("write plan");
+
+        let mut spec = sample_spec(
+            WorkingDirPolicy::InPlace,
+            vec![MemorySource::AutoProjectMemory],
+        );
+        spec.runtime.delegation_context = DelegationContextPolicy::PlanSection;
+        spec.runtime.plan_section_selector = Some("Acceptance Criteria".to_string());
+        spec.core.tags = vec!["review".to_string()];
+        let request = sample_request(source);
+        let handle = "run-plan-section-acceptance";
+        let state_dir = temp.path().join("state");
+
+        let dispatch = run_dispatch(&spec, &request, handle, &state_dir, Vec::new())
+            .await
+            .expect("dispatch succeeds");
+
+        let prompt = dispatch.result.compiled_context_markdown;
+        assert!(
+            prompt.contains("Must include regression coverage."),
+            "compiled prompt missing plan-derived acceptance criteria: {prompt}"
+        );
+        assert!(
+            prompt.contains("Must mention open risks."),
+            "compiled prompt missing plan-derived acceptance criteria: {prompt}"
+        );
     }
 }

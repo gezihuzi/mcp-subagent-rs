@@ -64,6 +64,7 @@ Selected file flags for `run`/`spawn`/`submit`:
 Runtime policy note:
 
 - when `delegation_context = "plan_section"`, set `plan_section_selector = "<PLAN heading>"` (required)
+- reviewer-like runs automatically append checklist items from resolved `plan_section` into acceptance criteria when available
 
 ## Config Precedence
 

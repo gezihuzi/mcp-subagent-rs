@@ -2008,3 +2008,28 @@
   - `docs/mcp-subagent_tech_design_v0.9.md` 的 `correctness-reviewer` 示例补 `plan_section_selector`。
 - 已通过回归：
   - `cargo test -q`（`157 + 33 + 3` tests passed）。
+
+## T-078 V0.9-P1-ReviewerDefaultAcceptanceCriteriaInjection (Completed 2026-03-25)
+
+任务：让 reviewer 路径默认附带 plan acceptance criteria，减少“审查与计划标准脱节”的情况。  
+验收标准：
+
+1. dispatch 阶段在 review 相关任务上自动吸收 `plan_section` memory 中的 checklist 条目并追加到 `request.acceptance_criteria`（不覆盖用户显式 criteria）。
+2. 注入策略要去重，避免重复标准。
+3. 无 `plan_section` 内容时保持原行为，不报错。
+4. 新增测试覆盖“review + plan_section”时 compiled prompt 含 plan 条目。
+5. `cargo test -q` 通过。
+完成记录：
+
+- 已在 dispatch 阶段落地 reviewer 默认标准注入：
+  - `src/mcp/service.rs` 新增 `attach_plan_section_acceptance_criteria`；
+  - 当任务为 review 相关（`delegation_context=plan_section` / `stage=review` / `tag=review`）时，从 `plan_section:*` memory 提取 checklist 项并追加到 `request.acceptance_criteria`。
+- 已实现提取与去重逻辑：
+  - 支持 markdown `-/*/+` 与 `1. ` 列表项提取；
+  - 通过不区分大小写比较避免重复注入。
+- 已保持兼容行为：
+  - 无 `plan_section` memory 或无 checklist 时保持原行为，不报错。
+- 已补测试：
+  - `src/mcp/service.rs::run_dispatch_attaches_plan_section_acceptance_criteria_for_reviewer` 验证 compiled prompt 出现 plan 衍生标准。
+- 已通过回归：
+  - `cargo test -q`（`158 + 33 + 3` tests passed）。

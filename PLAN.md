@@ -13,10 +13,10 @@
 回滚策略：新策略字段全部有默认值，旧 agent spec 可无缝加载；`spawn/status` 兼容保留，`submit` 只是别名扩展。
 风险与控制：放宽解析可能掩盖格式问题；通过在 summary 中保留 `parse_status` 与 raw artifact，并在 strict 模式保留旧失败语义。
 
-### Batch V0.9-P1 - MCP Run Result Surface（已完成 T-075/T-076/T-077）
+### Batch V0.9-P1 - MCP Run Result Surface（已完成 T-075/T-076/T-077/T-078）
 
 目标：在 MCP 工具面补齐 run 可观测能力：`list_runs/get_run_result/read_run_logs/watch_run`，让 host 不需要拼 `status + artifact` 才能消费结果。
-依赖顺序：`T-075 -> T-076 -> T-077`（Completed 2026-03-25，`PlanSection` section selector 已完成解析与校验落地）。
+依赖顺序：`T-075 -> T-076 -> T-077 -> T-078`（Completed 2026-03-25，reviewer 默认附带 plan acceptance criteria 已落地）。
 回滚策略：新增 MCP tools 仅扩展协议面，不破坏既有 `list_agents/run_agent/spawn_agent/get_agent_status/cancel_agent/read_agent_artifact`。
 风险与控制：watch 轮询可能带来频繁 IO；通过最小轮询间隔（50ms）与可配置 timeout 控制开销。
 
