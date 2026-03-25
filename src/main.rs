@@ -1147,6 +1147,12 @@ struct RunListEntry {
     handle_id: String,
     status: String,
     updated_at: String,
+    state: Option<String>,
+    phase: Option<String>,
+    last_event_at: Option<String>,
+    last_event_age_ms: Option<u64>,
+    stalled: bool,
+    elapsed_ms: Option<u64>,
     provider: Option<String>,
     agent: Option<String>,
     task: String,
@@ -1479,6 +1485,19 @@ fn compute_duration_ms(started_at: Option<&str>, finished_at: &str) -> Option<u6
     }
 }
 
+fn format_elapsed_short(ms: Option<u64>) -> String {
+    let Some(ms) = ms else {
+        return "unknown".to_string();
+    };
+    if ms < 1_000 {
+        return format!("{ms}ms");
+    }
+    if ms < 60_000 {
+        return format!("{:.1}s", ms as f64 / 1_000.0);
+    }
+    format!("{:.1}m", ms as f64 / 60_000.0)
+}
+
 fn is_terminal_status(status: &str) -> bool {
     matches!(status, "succeeded" | "failed" | "timed_out" | "cancelled")
 }
@@ -1656,20 +1675,51 @@ fn list_runs(cfg: RuntimeConfig, limit: usize, json: bool) -> ExitCode {
         }
     };
 
+    let now = OffsetDateTime::now_utc();
     let rows = entries
         .into_iter()
         .take(limit)
-        .map(|(handle_id, record)| RunListEntry {
-            handle_id,
-            status: record.status.clone(),
-            updated_at: record.updated_at.clone(),
-            provider: record
-                .spec_snapshot
-                .as_ref()
-                .map(|spec| spec.provider.clone()),
-            agent: record.spec_snapshot.as_ref().map(|spec| spec.name.clone()),
-            task: record.task.clone(),
-            duration_ms: compute_duration_ms(record.created_at.as_deref(), &record.updated_at),
+        .map(|(handle_id, record)| {
+            let events = load_run_events(&cfg.state_dir, &handle_id).unwrap_or_default();
+            let latest = latest_event(&events);
+            let last_event_at = latest
+                .map(|event| event.display_timestamp().to_string())
+                .filter(|value| !value.is_empty());
+            let last_event_age_ms = latest.and_then(event_time).and_then(|ts| {
+                if now < ts {
+                    None
+                } else {
+                    Some((now - ts).whole_milliseconds().max(0) as u64)
+                }
+            });
+            let duration_ms = compute_duration_ms(record.created_at.as_deref(), &record.updated_at);
+            let elapsed_ms = if is_terminal_status(record.status.as_str()) {
+                duration_ms
+            } else {
+                let started = record.created_at.as_deref().and_then(parse_rfc3339);
+                duration_between(started, Some(now))
+            };
+            let stalled = !is_terminal_status(record.status.as_str())
+                && last_event_age_ms.is_some_and(|value| value >= 8_000);
+
+            RunListEntry {
+                handle_id,
+                status: record.status.clone(),
+                updated_at: record.updated_at.clone(),
+                state: latest.and_then(|event| event.state.clone()),
+                phase: latest.and_then(|event| event.phase.clone()),
+                last_event_at,
+                last_event_age_ms,
+                stalled,
+                elapsed_ms,
+                provider: record
+                    .spec_snapshot
+                    .as_ref()
+                    .map(|spec| spec.provider.clone()),
+                agent: record.spec_snapshot.as_ref().map(|spec| spec.name.clone()),
+                task: record.task.clone(),
+                duration_ms,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -1682,15 +1732,15 @@ fn list_runs(cfg: RuntimeConfig, limit: usize, json: bool) -> ExitCode {
         }
         for row in rows {
             println!(
-                "{} [{}] {} provider={} agent={} duration_ms={}",
+                "{} [{}] phase={} elapsed={} last_event={} stalled={} provider={} agent={}",
                 row.handle_id,
                 row.status,
-                row.updated_at,
+                row.phase.as_deref().unwrap_or("unknown"),
+                format_elapsed_short(row.elapsed_ms),
+                format_elapsed_short(row.last_event_age_ms),
+                if row.stalled { "yes" } else { "no" },
                 row.provider.as_deref().unwrap_or("unknown"),
                 row.agent.as_deref().unwrap_or("unknown"),
-                row.duration_ms
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
             );
             println!("task: {}", row.task);
         }
@@ -2760,6 +2810,31 @@ async fn get_status(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCo
                 println!("handle_id: {}", result.0.handle_id);
                 println!("status: {}", result.0.status);
                 println!("updated_at: {}", result.0.updated_at);
+                println!(
+                    "state: {}",
+                    result
+                        .0
+                        .state
+                        .as_deref()
+                        .unwrap_or(result.0.status.as_str())
+                );
+                println!("phase: {}", result.0.phase.as_deref().unwrap_or("unknown"));
+                println!(
+                    "last_event_at: {}",
+                    result.0.last_event_at.as_deref().unwrap_or("unknown")
+                );
+                println!(
+                    "last_event_age: {}",
+                    format_elapsed_short(result.0.last_event_age_ms)
+                );
+                println!(
+                    "stalled: {}",
+                    result
+                        .0
+                        .stalled
+                        .map(|value| if value { "yes" } else { "no" })
+                        .unwrap_or("unknown")
+                );
                 if let Some(err) = result.0.error_message {
                     println!("error: {err}");
                 }

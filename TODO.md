@@ -2355,3 +2355,34 @@
 - 已通过回归：
   - `cargo fmt`
   - `cargo test -q`（`170 + 46 + 3` tests passed）。
+
+## T-090 V0.10-P1-StatusPsObservabilitySurface (Completed 2026-03-25)
+
+任务：补齐状态面的人类可读可观察输出：`status/ps` 显示 phase、last event age、stalled 与 elapsed，减少“只看到 running”的黑盒感。  
+验收标准：
+
+1. CLI `status` 文本输出包含 `state/phase/last_event/last_event_age/stalled`。
+2. CLI `ps` 文本输出对 running 任务展示 `phase/elapsed/last_event/stalled`。
+3. MCP `get_agent_status` 输出新增可观察字段（可选，不破坏兼容）。
+4. MCP `list_runs` 输出新增可观察字段（可选，不破坏兼容）。
+5. MCP e2e roundtrip 覆盖新字段存在性断言。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 DTO（兼容可选字段）：
+  - `src/mcp/dto.rs::AgentStatusOutput` 新增 `state/phase/last_event_at/last_event_age_ms/stalled`；
+  - `src/mcp/dto.rs::RunListingOutput` 新增 `state/phase/last_event_at/last_event_age_ms/stalled/elapsed_ms`。
+- 已升级 MCP 工具输出：
+  - `src/mcp/tools.rs::get_agent_status` 基于事件流填充 phase/age/stalled；
+  - `src/mcp/tools.rs::list_runs` 为每条 run 填充 phase/age/stalled/elapsed。
+- 已升级 CLI 展示面：
+  - `src/main.rs::get_status` 文本输出补充状态观测字段；
+  - `src/main.rs::list_runs` 文本输出改为 `phase + elapsed + last_event + stalled` 形态；
+  - 新增短时间格式化函数 `format_elapsed_short`。
+- 已补协议回归：
+  - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 增加 `get_agent_status/list_runs` 新字段断言。
+- 已同步文档：
+  - `README.md` 补充 `ps` 可观察字段说明。
+- 已通过回归：
+  - `cargo fmt`
+  - `cargo test -q`（`170 + 46 + 3` tests passed）。

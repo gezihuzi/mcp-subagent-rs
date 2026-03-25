@@ -99,6 +99,16 @@ pub struct AgentStatusOutput {
     pub handle_id: String,
     pub status: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub last_event_at: Option<String>,
+    #[serde(default)]
+    pub last_event_age_ms: Option<u64>,
+    #[serde(default)]
+    pub stalled: Option<bool>,
     pub error_message: Option<String>,
     pub structured_summary: Option<SummaryOutput>,
     pub artifact_index: Vec<ArtifactOutput>,
@@ -145,6 +155,18 @@ pub struct RunListingOutput {
     pub handle_id: String,
     pub status: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub last_event_at: Option<String>,
+    #[serde(default)]
+    pub last_event_age_ms: Option<u64>,
+    #[serde(default)]
+    pub stalled: Option<bool>,
+    #[serde(default)]
+    pub elapsed_ms: Option<u64>,
     pub provider: Option<String>,
     pub agent: Option<String>,
     pub task: String,

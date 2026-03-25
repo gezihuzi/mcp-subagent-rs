@@ -167,6 +167,8 @@ mcp-subagent ps --limit 20
 mcp-subagent watch <handle-id>
 ```
 
+`ps` now includes observability fields for running jobs: `phase`, `elapsed`, `last_event`, `stalled`.
+
 Inspect one run end-to-end:
 
 ```bash

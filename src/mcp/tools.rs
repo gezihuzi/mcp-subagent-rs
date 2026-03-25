@@ -75,6 +75,18 @@ fn compute_duration_ms(created_at: OffsetDateTime, updated_at: OffsetDateTime) -
     }
 }
 
+fn compute_elapsed_ms(created_at: OffsetDateTime, now: OffsetDateTime) -> Option<u64> {
+    if now < created_at {
+        return None;
+    }
+    let millis = (now - created_at).whole_milliseconds();
+    if millis < 0 {
+        None
+    } else {
+        Some(millis as u64)
+    }
+}
+
 fn estimate_tokens(bytes: Option<u64>) -> Option<u64> {
     bytes.map(|value| value.saturating_add(3) / 4)
 }
@@ -323,6 +335,41 @@ fn latest_event(events: &[RunEventOutput]) -> Option<&RunEventOutput> {
     events.last()
 }
 
+#[derive(Debug, Clone, Default)]
+struct EventRuntimeSnapshot {
+    state: Option<String>,
+    phase: Option<String>,
+    last_event_at: Option<String>,
+    last_event_age_ms: Option<u64>,
+    stalled: bool,
+}
+
+fn build_event_runtime_snapshot(
+    status: &RunStatus,
+    events: &[RunEventOutput],
+    now: OffsetDateTime,
+) -> EventRuntimeSnapshot {
+    let latest = latest_event(events);
+    let last_event_at = latest
+        .map(|event| event.timestamp.clone())
+        .filter(|value| !value.is_empty());
+    let last_event_age_ms = latest.and_then(event_time).and_then(|ts| {
+        if now < ts {
+            None
+        } else {
+            Some((now - ts).whole_milliseconds().max(0) as u64)
+        }
+    });
+    let stalled = !is_terminal_status(status) && last_event_age_ms.is_some_and(|ms| ms >= 8_000);
+    EventRuntimeSnapshot {
+        state: latest.and_then(|event| event.state.clone()),
+        phase: latest.and_then(|event| event.phase.clone()),
+        last_event_at,
+        last_event_age_ms,
+        stalled,
+    }
+}
+
 fn build_agent_stats_output(
     handle_id: &str,
     record: &RunRecord,
@@ -481,20 +528,37 @@ impl McpSubagentServer {
         rows.reverse();
 
         let limit = input.limit.unwrap_or(50).max(1);
+        let now = OffsetDateTime::now_utc();
         let runs = rows
             .into_iter()
             .take(limit)
-            .map(|(handle_id, record)| RunListingOutput {
-                handle_id,
-                status: format!("{}", record.status),
-                updated_at: format_time(record.updated_at),
-                provider: record
-                    .spec_snapshot
-                    .as_ref()
-                    .map(|spec| spec.provider.clone()),
-                agent: record.spec_snapshot.as_ref().map(|spec| spec.name.clone()),
-                task: record.task,
-                duration_ms: compute_duration_ms(record.created_at, record.updated_at),
+            .map(|(handle_id, record)| {
+                let events = load_run_events(self.state_dir(), &handle_id).unwrap_or_default();
+                let runtime = build_event_runtime_snapshot(&record.status, &events, now);
+                let duration_ms = compute_duration_ms(record.created_at, record.updated_at);
+                let elapsed_ms = if is_terminal_status(&record.status) {
+                    duration_ms
+                } else {
+                    compute_elapsed_ms(record.created_at, now)
+                };
+                RunListingOutput {
+                    handle_id,
+                    status: format!("{}", record.status),
+                    updated_at: format_time(record.updated_at),
+                    state: runtime.state,
+                    phase: runtime.phase,
+                    last_event_at: runtime.last_event_at,
+                    last_event_age_ms: runtime.last_event_age_ms,
+                    stalled: Some(runtime.stalled),
+                    elapsed_ms,
+                    provider: record
+                        .spec_snapshot
+                        .as_ref()
+                        .map(|spec| spec.provider.clone()),
+                    agent: record.spec_snapshot.as_ref().map(|spec| spec.name.clone()),
+                    task: record.task,
+                    duration_ms,
+                }
             })
             .collect();
 
@@ -1086,12 +1150,20 @@ impl McpSubagentServer {
         Parameters(input): Parameters<HandleInput>,
     ) -> std::result::Result<Json<AgentStatusOutput>, ErrorData> {
         let record = self.get_or_load_run_record(&input.handle_id).await?;
+        let events = load_run_events(self.state_dir(), &input.handle_id)?;
+        let runtime =
+            build_event_runtime_snapshot(&record.status, &events, OffsetDateTime::now_utc());
         let structured_summary = record.summary.as_ref().map(map_summary_output);
 
         Ok(Json(AgentStatusOutput {
             handle_id: input.handle_id,
             status: format!("{}", record.status),
             updated_at: format_time(record.updated_at),
+            state: runtime.state,
+            phase: runtime.phase,
+            last_event_at: runtime.last_event_at,
+            last_event_age_ms: runtime.last_event_age_ms,
+            stalled: Some(runtime.stalled),
             error_message: record.error_message,
             structured_summary,
             artifact_index: record.artifact_index,

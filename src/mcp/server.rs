@@ -1041,6 +1041,23 @@ sandbox = "read_only"
         }
         assert_eq!(final_status, "succeeded");
 
+        let status_after_done = client
+            .call_tool(
+                CallToolRequestParams::new("get_agent_status").with_arguments(
+                    json!({"handle_id": handle_id.clone()})
+                        .as_object()
+                        .expect("object")
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("status after done");
+        let status_after_done_json = status_after_done
+            .structured_content
+            .expect("status after done structured");
+        assert!(status_after_done_json.get("phase").is_some());
+        assert!(status_after_done_json.get("stalled").is_some());
+
         let artifact_res = client
             .call_tool(
                 CallToolRequestParams::new("read_agent_artifact").with_arguments(
@@ -1078,6 +1095,14 @@ sandbox = "read_only"
             .iter()
             .any(|row| row.get("handle_id").and_then(|value| value.as_str())
                 == Some(handle_id.as_str())));
+        let listed = run_rows
+            .iter()
+            .find(|row| {
+                row.get("handle_id").and_then(|value| value.as_str()) == Some(handle_id.as_str())
+            })
+            .expect("listed run row");
+        assert!(listed.get("phase").is_some());
+        assert!(listed.get("last_event_age_ms").is_some());
 
         let result_res = client
             .call_tool(
