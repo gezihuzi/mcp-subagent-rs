@@ -975,6 +975,10 @@ sandbox = "read_only"
             .expect("get_run_result has structured content");
         assert_eq!(structured_field(&result_json, "status"), "succeeded");
         assert_eq!(
+            structured_field(&result_json, "contract_version"),
+            "mcp-subagent.result.v1"
+        );
+        assert_eq!(
             result_json
                 .get("normalization_status")
                 .and_then(|value| value.as_str()),

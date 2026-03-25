@@ -1946,3 +1946,31 @@
   - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 覆盖新增工具调用链路（list/result/logs/watch）。
 - 已通过回归：
   - `cargo test -q`（`153 + 32 + 3` tests passed）。
+
+## T-076 V0.9-P1-ResultJsonStableSchema (Completed 2026-03-25)
+
+任务：固定 `result --json` 输出 schema，并与 MCP `get_run_result` 结果模型对齐，减少 host 端解析分支。  
+验收标准：
+
+1. CLI `result --json` 输出包含固定字段：`contract_version/view/normalization_status/native_result/normalized_result/usage/provider_exit_code/retries`。
+2. MCP `get_run_result` 输出增加 `contract_version`，字段语义与 CLI 对齐。
+3. 新增测试覆盖固定 schema 的关键字段存在性（至少覆盖 CLI 序列化和 MCP e2e 返回）。
+4. README 命令说明补充固定 schema 约定（简要说明）。
+5. `cargo test -q` 通过。
+完成记录：
+
+- 已固定 CLI `result --json` 契约：
+  - `src/main.rs` 的 `RunResultOutput` 新增固定字段 `contract_version/view/summary/provider_exit_code/retries/usage/error_message/artifact_index`；
+  - `normalization_status` 改为稳定字符串（无 summary 时输出 `NotAvailable`）；
+  - 契约版本固定为 `mcp-subagent.result.v1`。
+- 已对齐 MCP `get_run_result`：
+  - `src/mcp/dto.rs` 的 `GetRunResultOutput` 新增 `contract_version`；
+  - `normalization_status` 改为稳定字符串；
+  - `src/mcp/tools.rs` 返回与 CLI 对齐的契约版本和状态语义。
+- 已补测试：
+  - `src/main.rs::result_json_schema_contains_stable_fields` 覆盖 CLI JSON 固定字段；
+  - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 增加 `contract_version` 断言。
+- 已同步文档：
+  - `README.md` 增加 `result --json` / `get_run_result` 使用同一 `contract_version` 说明。
+- 已通过回归：
+  - `cargo test -q`（`153 + 33 + 3` tests passed）。

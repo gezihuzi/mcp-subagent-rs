@@ -37,6 +37,8 @@ mcp-subagent cancel <handle-id> [--json]
 mcp-subagent artifact <handle-id> [--path ... | --kind summary|log|patch|json] [--json]
 ```
 
+`result --json` uses stable schema contract `mcp-subagent.result.v1` (MCP `get_run_result` returns the same `contract_version` for parser alignment).
+
 ## MCP Transport
 
 - Current implementation is `stdio` only (`mcp-subagent mcp`).

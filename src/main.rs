@@ -37,6 +37,7 @@ const PROJECT_GITIGNORE_RELATIVE: &str = ".gitignore";
 const BRIDGE_AGENTS_DIR_RELATIVE: &str = "./.mcp-subagent/bootstrap/agents";
 const BRIDGE_STATE_DIR_RELATIVE: &str = "./.mcp-subagent/bootstrap/.mcp-subagent/state";
 const GITIGNORE_RUNTIME_HEADER: &str = "# mcp-subagent runtime artifacts";
+const RESULT_CONTRACT_VERSION: &str = "mcp-subagent.result.v1";
 const GITIGNORE_RUNTIME_RULES: [&str; 3] = [
     ".mcp-subagent/state/",
     ".mcp-subagent/logs/",
@@ -1025,11 +1026,19 @@ struct RunShowOutput {
 
 #[derive(Debug, Clone, Serialize)]
 struct RunResultOutput {
+    contract_version: String,
     handle_id: String,
     status: String,
-    normalization_status: Option<String>,
+    view: String,
+    normalization_status: String,
+    summary: Option<String>,
     native_result: Option<String>,
     normalized_result: Option<StoredSummaryEnvelope>,
+    provider_exit_code: Option<i32>,
+    retries: u32,
+    usage: UsageStatsOutput,
+    error_message: Option<String>,
+    artifact_index: Vec<ArtifactOutput>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1365,7 +1374,7 @@ fn read_result(
     handle_id: String,
     raw: bool,
     normalized: bool,
-    _summary: bool,
+    summary: bool,
     json: bool,
 ) -> ExitCode {
     let record = match load_run_record(&cfg.state_dir, &handle_id) {
@@ -1386,15 +1395,37 @@ fn read_result(
                 .and_then(|summary| summary.raw_fallback_text.clone())
         });
     let normalized_result = record.summary.clone();
+    let usage = build_usage_output(&cfg.state_dir, &handle_id, &record);
+    let view = if raw {
+        "raw"
+    } else if normalized {
+        "normalized"
+    } else if summary {
+        "summary"
+    } else {
+        "auto"
+    };
     let output = RunResultOutput {
+        contract_version: RESULT_CONTRACT_VERSION.to_string(),
         handle_id: handle_id.clone(),
         status: record.status.clone(),
+        view: view.to_string(),
         normalization_status: record
             .summary
             .as_ref()
-            .map(|summary| summary.parse_status.clone()),
+            .map(|summary| summary.parse_status.clone())
+            .unwrap_or_else(|| "NotAvailable".to_string()),
+        summary: record
+            .summary
+            .as_ref()
+            .map(|summary| summary.summary.summary.clone()),
         native_result: native_result.clone(),
         normalized_result: normalized_result.clone(),
+        provider_exit_code: usage.provider_exit_code,
+        retries: usage.retries,
+        usage,
+        error_message: record.error_message.clone(),
+        artifact_index: record.artifact_index.clone(),
     };
 
     if json {
@@ -2250,7 +2281,8 @@ mod tests {
         bootstrap_bridge_config_template, build_selected_file_inputs, clean_state_dir,
         ensure_bootstrap_bridge_config, ensure_project_gitignore, resolve_init_root,
         ArtifactKindArg, Cli, Commands, ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput,
-        DEFAULT_BOOTSTRAP_ROOT_RELATIVE,
+        RunResultOutput, UsageStatsOutput, DEFAULT_BOOTSTRAP_ROOT_RELATIVE,
+        RESULT_CONTRACT_VERSION,
     };
 
     #[test]
@@ -2584,6 +2616,66 @@ target/
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn result_json_schema_contains_stable_fields() {
+        let output = RunResultOutput {
+            contract_version: RESULT_CONTRACT_VERSION.to_string(),
+            handle_id: "h-1".to_string(),
+            status: "succeeded".to_string(),
+            view: "summary".to_string(),
+            normalization_status: "Validated".to_string(),
+            summary: Some("done".to_string()),
+            native_result: Some("native".to_string()),
+            normalized_result: None,
+            provider_exit_code: Some(0),
+            retries: 0,
+            usage: UsageStatsOutput {
+                started_at: Some("2026-03-25T00:00:00Z".to_string()),
+                finished_at: Some("2026-03-25T00:00:01Z".to_string()),
+                duration_ms: Some(1000),
+                provider: "Codex".to_string(),
+                model: Some("gpt-5.3-codex".to_string()),
+                provider_exit_code: Some(0),
+                retries: 0,
+                token_source: "estimated".to_string(),
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                total_tokens: Some(30),
+                estimated_prompt_bytes: Some(40),
+                estimated_output_bytes: Some(80),
+            },
+            error_message: None,
+            artifact_index: Vec::new(),
+        };
+        let value = serde_json::to_value(&output).expect("serialize output");
+
+        for key in [
+            "contract_version",
+            "handle_id",
+            "status",
+            "view",
+            "normalization_status",
+            "native_result",
+            "normalized_result",
+            "usage",
+            "provider_exit_code",
+            "retries",
+            "error_message",
+            "artifact_index",
+        ] {
+            assert!(
+                value.get(key).is_some(),
+                "missing key `{key}` in result json: {value}"
+            );
+        }
+        assert_eq!(
+            value
+                .get("contract_version")
+                .and_then(serde_json::Value::as_str),
+            Some(RESULT_CONTRACT_VERSION)
+        );
     }
 
     #[test]

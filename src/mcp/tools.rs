@@ -42,6 +42,8 @@ pub(crate) fn build_tool_router() -> ToolRouter<McpSubagentServer> {
     McpSubagentServer::tool_router()
 }
 
+const RUN_RESULT_CONTRACT_VERSION: &str = "mcp-subagent.result.v1";
+
 fn is_terminal_status(status: &RunStatus) -> bool {
     matches!(
         status,
@@ -275,6 +277,7 @@ impl McpSubagentServer {
         let usage = build_usage_output(&record);
 
         Ok(Json(GetRunResultOutput {
+            contract_version: RUN_RESULT_CONTRACT_VERSION.to_string(),
             handle_id: input.handle_id,
             status: format!("{}", record.status),
             updated_at: format_time(record.updated_at),
@@ -290,7 +293,8 @@ impl McpSubagentServer {
             normalization_status: record
                 .summary
                 .as_ref()
-                .map(|summary| format!("{}", summary.parse_status)),
+                .map(|summary| format!("{}", summary.parse_status))
+                .unwrap_or_else(|| "NotAvailable".to_string()),
             summary: record
                 .summary
                 .as_ref()

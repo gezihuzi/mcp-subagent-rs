@@ -163,13 +163,14 @@ pub struct GetRunResultInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct GetRunResultOutput {
+    pub contract_version: String,
     pub handle_id: String,
     pub status: String,
     pub updated_at: String,
     pub error_message: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
-    pub normalization_status: Option<String>,
+    pub normalization_status: String,
     pub summary: Option<String>,
     pub native_result: Option<String>,
     pub normalized_result: Option<SummaryOutput>,
