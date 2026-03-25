@@ -1444,7 +1444,9 @@ exit 0
             .expect("watch_run has structured content");
         let watch_run_json = watch_json.get("run").expect("run");
         assert_eq!(
-            watch_run_json.get("terminal").and_then(|value| value.as_bool()),
+            watch_run_json
+                .get("terminal")
+                .and_then(|value| value.as_bool()),
             Some(true)
         );
         assert_eq!(
@@ -1455,7 +1457,9 @@ exit 0
             Some("succeeded")
         );
         assert_eq!(
-            watch_json.get("timed_out").and_then(|value| value.as_bool()),
+            watch_json
+                .get("timed_out")
+                .and_then(|value| value.as_bool()),
             Some(false)
         );
         assert!(watch_json.get("phase_timeout_hit").is_some());

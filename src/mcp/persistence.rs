@@ -514,10 +514,10 @@ fn format_time(value: OffsetDateTime) -> String {
 mod tests {
     use std::fs;
 
+    use crate::runtime::dispatcher::RunStatus;
     use serde_json::json;
     use tempfile::tempdir;
     use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-    use crate::runtime::dispatcher::RunStatus;
 
     use super::{append_run_event, load_run_record_from_disk};
 
@@ -563,7 +563,11 @@ mod tests {
         assert_eq!(loaded.status, RunStatus::Succeeded);
         assert_eq!(
             loaded.status_history,
-            vec![RunStatus::Received, RunStatus::Running, RunStatus::Succeeded]
+            vec![
+                RunStatus::Received,
+                RunStatus::Running,
+                RunStatus::Succeeded
+            ]
         );
         assert_eq!(loaded.task, "legacy task");
         assert!(loaded.memory_resolution.is_none());

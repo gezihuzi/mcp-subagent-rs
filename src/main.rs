@@ -2528,10 +2528,7 @@ async fn read_logs(
             }
             for event in events.iter().skip(seen_event_count) {
                 if phase.as_deref().is_some_and(|needle| {
-                    event
-                        .phase
-                        .as_deref()
-                        .is_none_or(|value| value != needle)
+                    event.phase.as_deref().is_none_or(|value| value != needle)
                 }) {
                     continue;
                 }

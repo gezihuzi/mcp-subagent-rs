@@ -29,9 +29,7 @@ use crate::{
             RuntimePolicySummary, WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput,
             WatchRunOutput,
         },
-        helpers::{
-            build_capability_notes, cancelled_summary, failed_summary, format_time,
-        },
+        helpers::{build_capability_notes, cancelled_summary, failed_summary, format_time},
         persistence::{append_run_event, load_run_record_from_disk, persist_run_record},
         review::apply_review_evidence_hook,
         server::{
@@ -212,13 +210,16 @@ fn resolve_retry_classification(record: &RunRecord) -> (String, Option<String>) 
 
 fn map_record_outcome(record: &RunRecord, usage: RunUsageOutput) -> Option<OutcomeView> {
     match record.status {
-        RunStatus::Succeeded => record.summary.as_ref().map(|summary| OutcomeView::Succeeded {
-            summary: summary.summary.summary.clone(),
-            key_findings: summary.summary.key_findings.clone(),
-            touched_files: summary.summary.touched_files.clone(),
-            artifacts: record.artifact_index.clone(),
-            usage,
-        }),
+        RunStatus::Succeeded => record
+            .summary
+            .as_ref()
+            .map(|summary| OutcomeView::Succeeded {
+                summary: summary.summary.summary.clone(),
+                key_findings: summary.summary.key_findings.clone(),
+                touched_files: summary.summary.touched_files.clone(),
+                artifacts: record.artifact_index.clone(),
+                usage,
+            }),
         RunStatus::Failed => {
             let (retry_classification, _) = resolve_retry_classification(record);
             Some(OutcomeView::Failed {
@@ -227,7 +228,10 @@ fn map_record_outcome(record: &RunRecord, usage: RunUsageOutput) -> Option<Outco
                     .clone()
                     .unwrap_or_else(|| "run failed".to_string()),
                 retry_classification,
-                partial_summary: record.summary.as_ref().map(|summary| summary.summary.summary.clone()),
+                partial_summary: record
+                    .summary
+                    .as_ref()
+                    .map(|summary| summary.summary.summary.clone()),
                 usage,
             })
         }
@@ -238,8 +242,7 @@ fn map_record_outcome(record: &RunRecord, usage: RunUsageOutput) -> Option<Outco
                 .unwrap_or_else(|| "cancelled".to_string()),
         }),
         RunStatus::TimedOut => Some(OutcomeView::TimedOut {
-            elapsed_secs: compute_duration_ms(record.created_at, record.updated_at)
-                .unwrap_or(0)
+            elapsed_secs: compute_duration_ms(record.created_at, record.updated_at).unwrap_or(0)
                 / 1000,
         }),
         _ => None,
@@ -1069,7 +1072,11 @@ impl McpSubagentServer {
             OffsetDateTime::now_utc(),
             record.error_message.as_deref(),
         );
-        Ok(Json(build_run_view(input.handle_id, &record, Some(&runtime))))
+        Ok(Json(build_run_view(
+            input.handle_id,
+            &record,
+            Some(&runtime),
+        )))
     }
 
     #[tool(description = "Read stdout/stderr logs for a run handle.")]
@@ -1823,7 +1830,11 @@ impl McpSubagentServer {
             record.error_message.as_deref(),
         );
 
-        Ok(Json(build_run_view(input.handle_id, &record, Some(&runtime))))
+        Ok(Json(build_run_view(
+            input.handle_id,
+            &record,
+            Some(&runtime),
+        )))
     }
 
     #[tool(description = "Cancel an async agent run if still in progress.")]
