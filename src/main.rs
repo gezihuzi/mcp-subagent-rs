@@ -1029,21 +1029,20 @@ async fn spawn_agent(
         working_dir: working_dir.map(|path| path.display().to_string()),
     };
 
-    // In CLI mode the process exits as soon as this function returns, which
-    // would kill any background tokio task before it can complete.  Run the
-    // agent synchronously so the result is fully persisted before we exit.
-    // True async spawning is only supported in long-lived MCP server mode.
-    match server.run_agent(Parameters(input)).await {
+    match server.spawn_agent(Parameters(input)).await {
         Ok(result) => {
-            let out = result.0;
+            let handle_id = result.0.handle_id.clone();
+            // In CLI mode the process exits as soon as this function returns,
+            // which would kill any background tokio task before it can persist
+            // its results.  Wait for the task to finish before printing and
+            // exiting.  True fire-and-forget spawning is only available in the
+            // long-lived MCP server mode.
+            server.wait_for_run(&handle_id).await;
             if json {
-                print_json(&mcp_subagent::mcp::dto::SpawnAgentOutput {
-                    handle_id: out.handle_id,
-                    status: out.status,
-                });
+                print_json(&result.0);
             } else {
-                println!("handle_id: {}", out.handle_id);
-                println!("status: {}", out.status);
+                println!("handle_id: {}", result.0.handle_id);
+                println!("status: {}", result.0.status);
             }
             ExitCode::SUCCESS
         }

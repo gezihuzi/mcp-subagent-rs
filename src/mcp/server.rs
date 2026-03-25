@@ -231,6 +231,19 @@ impl McpSubagentServer {
         Ok(record)
     }
 
+    /// Wait for an in-progress async run task to complete.
+    /// This is used by the CLI `spawn` command so the process doesn't exit
+    /// before the background task has a chance to persist its results.
+    pub async fn wait_for_run(&self, handle_id: &str) {
+        let task = {
+            let mut state = self.runtime_state.lock().await;
+            state.tasks.remove(handle_id)
+        };
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+    }
+
     pub(crate) async fn upsert_and_persist_run(
         &self,
         handle_id: &str,
