@@ -5,7 +5,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::{
     mcp::dto::ArtifactOutput,
-    runtime::summary::{ArtifactKind, SummaryEnvelope},
+    runtime::{outcome::RunOutcome, summary::ArtifactKind},
     spec::AgentSpec,
     types::{TaskSpec, WorkflowHints},
 };
@@ -14,7 +14,7 @@ pub(crate) fn apply_review_evidence_hook(
     spec: &AgentSpec,
     task_spec: &TaskSpec,
     hints: &WorkflowHints,
-    summary: &SummaryEnvelope,
+    outcome: &RunOutcome,
     artifact_index: &mut Vec<ArtifactOutput>,
     artifacts: &mut HashMap<String, String>,
 ) {
@@ -31,6 +31,9 @@ pub(crate) fn apply_review_evidence_hook(
     if !workflow.enabled {
         return;
     }
+    let RunOutcome::Succeeded(success) = outcome else {
+        return;
+    };
 
     let high_risk = is_high_risk_review(spec, task_spec, hints);
     let mut required_tracks = Vec::new();
@@ -75,10 +78,10 @@ pub(crate) fn apply_review_evidence_hook(
             "prefer_cross_provider_review": workflow.review_policy.prefer_cross_provider_review,
         },
         "summary": {
-            "parse_status": format!("{}", summary.parse_status),
-            "verification_status": format!("{}", summary.summary.verification_status),
-            "touched_files": summary.summary.touched_files,
-            "plan_refs": summary.summary.plan_refs,
+            "parse_status": format!("{}", success.parse_status),
+            "verification_status": format!("{}", success.verification),
+            "touched_files": success.touched_files.clone(),
+            "plan_refs": success.plan_refs.clone(),
         }
     }))
     .unwrap_or_else(|_| "{}".to_string());
@@ -254,8 +257,9 @@ mod tests {
 
     use crate::{
         mcp::{dto::ArtifactOutput, review::apply_review_evidence_hook},
-        runtime::summary::{
-            StructuredSummary, SummaryEnvelope, SummaryParseStatus, VerificationStatus,
+        runtime::{
+            outcome::{RunOutcome, SuccessOutcome, UsageStats},
+            summary::{SummaryParseStatus, VerificationStatus},
         },
         spec::{
             core::{AgentSpecCore, Provider},
@@ -304,23 +308,19 @@ mod tests {
         }
     }
 
-    fn sample_summary() -> SummaryEnvelope {
-        SummaryEnvelope {
-            contract_version: "mcp-subagent.summary.v2".to_string(),
+    fn sample_outcome() -> RunOutcome {
+        RunOutcome::Succeeded(SuccessOutcome {
+            summary: "ok".to_string(),
+            key_findings: vec!["a".to_string()],
+            artifacts: Vec::new(),
+            open_questions: Vec::new(),
+            next_steps: Vec::new(),
+            verification: VerificationStatus::Passed,
+            usage: UsageStats::ZERO,
             parse_status: SummaryParseStatus::Validated,
-            summary: StructuredSummary {
-                summary: "ok".to_string(),
-                key_findings: vec!["a".to_string()],
-                artifacts: Vec::new(),
-                open_questions: Vec::new(),
-                next_steps: Vec::new(),
-                exit_code: 0,
-                verification_status: VerificationStatus::Passed,
-                touched_files: vec!["src/parser.rs".to_string()],
-                plan_refs: vec!["step-1".to_string()],
-            },
-            raw_fallback_text: None,
-        }
+            touched_files: vec!["src/parser.rs".to_string()],
+            plan_refs: vec!["step-1".to_string()],
+        })
     }
 
     #[test]
@@ -328,7 +328,7 @@ mod tests {
         let spec = sample_spec();
         let task_spec = sample_task_spec();
         let hints = sample_hints();
-        let summary = sample_summary();
+        let outcome = sample_outcome();
         let mut index: Vec<ArtifactOutput> = Vec::new();
         let mut artifacts = HashMap::new();
 
@@ -336,7 +336,7 @@ mod tests {
             &spec,
             &task_spec,
             &hints,
-            &summary,
+            &outcome,
             &mut index,
             &mut artifacts,
         );

@@ -29,7 +29,7 @@ use crate::{
             RuntimePolicySummary, WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput,
             WatchRunOutput,
         },
-        helpers::{build_capability_notes, cancelled_summary, failed_summary, format_time},
+        helpers::{build_capability_notes, format_time},
         persistence::{
             append_run_event, load_run_record_from_disk, persist_run_record, RuntimeEventInput,
         },
@@ -40,11 +40,11 @@ use crate::{
         service::run_dispatch,
         state::{
             append_status_if_terminal, apply_execution_policy_outcome, build_probe_result_snapshot,
-            build_run_spec_snapshot, RetryClassificationRecord, RunRecord,
+            build_run_spec_snapshot, RunRecord,
         },
     },
     runtime::{
-        dispatcher::RunStatus,
+        dispatcher::RunPhase,
         outcome::{FailureOutcome, RetryClassification, RetryInfo, RunOutcome, UsageStats},
     },
     types::RunMode,
@@ -56,10 +56,10 @@ pub(crate) fn build_tool_router() -> ToolRouter<McpSubagentServer> {
 
 const FIRST_OUTPUT_WARN_AFTER_SECS: u64 = 8;
 
-fn is_terminal_status(status: &RunStatus) -> bool {
+fn is_terminal_status(status: &RunPhase) -> bool {
     matches!(
         status,
-        RunStatus::Succeeded | RunStatus::Failed | RunStatus::TimedOut | RunStatus::Cancelled
+        RunPhase::Succeeded | RunPhase::Failed | RunPhase::TimedOut | RunPhase::Cancelled
     )
 }
 
@@ -182,7 +182,7 @@ fn build_usage_output(record: &RunRecord) -> RunUsageOutput {
             .and_then(|spec| spec.model.clone()),
         provider_exit_code: infer_provider_exit_code(record),
         retries: record
-            .execution_policy
+            .policy
             .as_ref()
             .and_then(|policy| policy.retries_used)
             .unwrap_or(0),
@@ -195,26 +195,16 @@ fn build_usage_output(record: &RunRecord) -> RunUsageOutput {
     }
 }
 
-fn map_retry_classification(
-    classification: &RetryClassification,
-    reason: Option<&str>,
-) -> RetryClassificationRecord {
-    RetryClassificationRecord {
-        classification: format!("{classification}"),
-        reason: reason.map(str::to_string),
-    }
-}
-
 fn resolve_retry_classification(record: &RunRecord) -> (String, Option<String>) {
-    match &record.retry_classification {
-        Some(value) => {
-            let normalized = match value.classification.as_str() {
-                "retryable" | "non_retryable" | "unknown" => value.classification.clone(),
-                _ => "unknown".to_string(),
-            };
-            (normalized, value.reason.clone())
-        }
-        None => (format!("{}", RetryClassification::Unknown), None),
+    match record.outcome.as_ref() {
+        Some(RunOutcome::Failed(failure)) => (
+            format!("{}", failure.retry.classification),
+            failure.retry.reason.clone(),
+        ),
+        Some(RunOutcome::Succeeded(_))
+        | Some(RunOutcome::Cancelled { .. })
+        | Some(RunOutcome::TimedOut { .. })
+        | None => (format!("{}", RetryClassification::Unknown), None),
     }
 }
 
@@ -679,13 +669,13 @@ fn classify_block_reason_from_events(
 }
 
 fn classify_block_reason(
-    status: &RunStatus,
+    status: &RunPhase,
     phase: Option<&str>,
     stalled: bool,
     events: &[RunEventOutput],
     error_message: Option<&str>,
 ) -> Option<String> {
-    if matches!(status, RunStatus::Succeeded) {
+    if matches!(status, RunPhase::Succeeded) {
         return None;
     }
     if let Some(message) = error_message {
@@ -718,7 +708,7 @@ fn push_advice(advice: &mut Vec<String>, item: &str) {
 }
 
 fn build_watch_advice(
-    status: &RunStatus,
+    status: &RunPhase,
     phase: Option<&str>,
     block_reason: Option<&str>,
     phase_timeout_hit: bool,
@@ -776,19 +766,19 @@ fn build_watch_advice(
     }
 
     match status {
-        RunStatus::Succeeded => push_advice(
+        RunPhase::Succeeded => push_advice(
             &mut advice,
             "run completed; use get_run_result/read_run_logs/read_agent_artifact for outputs",
         ),
-        RunStatus::Failed => push_advice(
+        RunPhase::Failed => push_advice(
             &mut advice,
             "run failed; inspect summary.json and stderr.txt for root cause before retry",
         ),
-        RunStatus::TimedOut => push_advice(
+        RunPhase::TimedOut => push_advice(
             &mut advice,
             "run timed out; increase timeout or narrow task/context scope",
         ),
-        RunStatus::Cancelled => push_advice(
+        RunPhase::Cancelled => push_advice(
             &mut advice,
             "run was cancelled; restart with spawn/run if still needed",
         ),
@@ -835,7 +825,7 @@ struct EventRuntimeSnapshot {
 }
 
 fn build_event_runtime_snapshot(
-    status: &RunStatus,
+    status: &RunPhase,
     events: &[RunEventOutput],
     now: OffsetDateTime,
     error_message: Option<&str>,
@@ -1318,7 +1308,7 @@ impl McpSubagentServer {
             lock_keys.clone(),
         )
         .await?;
-        let crate::mcp::service::DispatchEnvelope {
+        let crate::mcp::service::RunDispatchData {
             result,
             workspace,
             memory_resolution,
@@ -1326,24 +1316,20 @@ impl McpSubagentServer {
         } = dispatch;
 
         let (artifact_index, artifacts) = build_runtime_artifacts(
-            &result.summary,
+            &result.outcome,
             &result.stdout,
             &result.stderr,
             Some(&workspace.workspace_path),
         );
-        let mut execution_policy = Some(execution_policy);
-        apply_execution_policy_outcome(
-            &mut execution_policy,
-            result.attempts_used,
-            result.retry_attempts,
-        );
+        let mut policy = Some(execution_policy);
+        apply_execution_policy_outcome(&mut policy, result.attempts_used, result.retry_attempts);
         let mut artifact_index = artifact_index;
         let mut artifacts = artifacts;
         apply_review_evidence_hook(
             &loaded.spec,
             &task_spec,
             &hints,
-            &result.summary,
+            &result.outcome,
             &mut artifact_index,
             &mut artifacts,
         );
@@ -1355,7 +1341,7 @@ impl McpSubagentServer {
                 run_status: &result.status,
                 handle_id: &handle_id,
                 workspace: &workspace,
-                summary: &result.summary,
+                outcome: &result.outcome,
             },
             &mut crate::mcp::archive::ArtifactCollector {
                 index: &mut artifact_index,
@@ -1363,11 +1349,6 @@ impl McpSubagentServer {
             },
         );
         let native_usage = result.native_usage;
-        let retry_classification = map_retry_classification(
-            &result.retry_classification,
-            result.retry_classification_reason.as_deref(),
-        );
-
         let record = RunRecord {
             status: result.status,
             created_at: run_created_at,
@@ -1385,8 +1366,7 @@ impl McpSubagentServer {
             workspace: Some(workspace),
             compiled_context_markdown: Some(result.compiled_context_markdown),
             usage: native_usage,
-            retry_classification: Some(retry_classification),
-            execution_policy,
+            policy,
         };
         let output = build_run_view(handle_id.clone(), &record, None);
         drop(workspace_cleanup);
@@ -1493,8 +1473,6 @@ impl McpSubagentServer {
                 probe_details.extend(probe_result.notes.clone());
                 let error_message =
                     provider_unavailable_message(&loaded.spec.core.provider, &probe_details);
-                let summary = failed_summary(error_message.clone());
-                let (artifact_index, artifacts) = build_runtime_artifacts(&summary, "", "", None);
                 let failure_outcome = RunOutcome::Failed(FailureOutcome {
                     error: error_message.clone(),
                     retry: RetryInfo {
@@ -1502,21 +1480,23 @@ impl McpSubagentServer {
                         reason: Some("provider unavailable during probe".to_string()),
                         attempts_used: 0,
                     },
-                    partial_summary: Some(summary.summary.summary.clone()),
+                    partial_summary: Some(error_message.clone()),
                     usage: UsageStats::ZERO,
                 });
+                let (artifact_index, artifacts) =
+                    build_runtime_artifacts(&failure_outcome, "", "", None);
 
                 let mut guard = state.lock().await;
                 guard.tasks.remove(&task_handle_id);
                 let Some(record) = guard.runs.get_mut(&task_handle_id) else {
                     return;
                 };
-                if matches!(record.status, RunStatus::Cancelled) {
+                if matches!(record.status, RunPhase::Cancelled) {
                     return;
                 }
-                record.status = RunStatus::Failed;
+                record.status = RunPhase::Failed;
                 record.updated_at = OffsetDateTime::now_utc();
-                append_status_if_terminal(&mut record.status_history, RunStatus::Failed);
+                append_status_if_terminal(&mut record.status_history, RunPhase::Failed);
                 record.error_message = Some(error_message);
                 record.outcome = Some(failure_outcome);
                 record.artifact_index = artifact_index;
@@ -1526,7 +1506,6 @@ impl McpSubagentServer {
                 record.workspace = None;
                 record.compiled_context_markdown = None;
                 record.usage = None;
-                record.retry_classification = None;
                 let _ = append_run_event(
                     &state_dir,
                     &task_handle_id,
@@ -1632,13 +1611,13 @@ impl McpSubagentServer {
                 return;
             };
 
-            if matches!(record.status, RunStatus::Cancelled) {
+            if matches!(record.status, RunPhase::Cancelled) {
                 return;
             }
 
             match dispatch {
                 Ok(dispatch) => {
-                    let crate::mcp::service::DispatchEnvelope {
+                    let crate::mcp::service::RunDispatchData {
                         result: dispatch_result,
                         workspace,
                         memory_resolution,
@@ -1727,7 +1706,7 @@ impl McpSubagentServer {
                         );
                     }
                     let (artifact_index, artifacts) = build_runtime_artifacts(
-                        &dispatch_result.summary,
+                        &dispatch_result.outcome,
                         &dispatch_result.stdout,
                         &dispatch_result.stderr,
                         Some(&workspace.workspace_path),
@@ -1735,7 +1714,7 @@ impl McpSubagentServer {
                     let mut artifact_index = artifact_index;
                     let mut artifacts = artifacts;
                     apply_execution_policy_outcome(
-                        &mut record.execution_policy,
+                        &mut record.policy,
                         dispatch_result.attempts_used,
                         dispatch_result.retry_attempts,
                     );
@@ -1743,7 +1722,7 @@ impl McpSubagentServer {
                         &loaded.spec,
                         &task_spec,
                         &hints,
-                        &dispatch_result.summary,
+                        &dispatch_result.outcome,
                         &mut artifact_index,
                         &mut artifacts,
                     );
@@ -1755,16 +1734,12 @@ impl McpSubagentServer {
                             run_status: &dispatch_result.status,
                             handle_id: &task_handle_id,
                             workspace: &workspace,
-                            summary: &dispatch_result.summary,
+                            outcome: &dispatch_result.outcome,
                         },
                         &mut crate::mcp::archive::ArtifactCollector {
                             index: &mut artifact_index,
                             data: &mut artifacts,
                         },
-                    );
-                    let retry_classification = map_retry_classification(
-                        &dispatch_result.retry_classification,
-                        dispatch_result.retry_classification_reason.as_deref(),
                     );
                     record.status = dispatch_result.status;
                     record.updated_at = OffsetDateTime::now_utc();
@@ -1779,13 +1754,12 @@ impl McpSubagentServer {
                     record.compiled_context_markdown =
                         Some(dispatch_result.compiled_context_markdown);
                     record.usage = dispatch_result.native_usage;
-                    record.retry_classification = Some(retry_classification);
                     let final_status = format!("{}", record.status);
                     let final_event = match record.status {
-                        RunStatus::Succeeded => "run.completed",
-                        RunStatus::Failed => "run.failed",
-                        RunStatus::TimedOut => "run.timed_out",
-                        RunStatus::Cancelled => "run.cancelled",
+                        RunPhase::Succeeded => "run.completed",
+                        RunPhase::Failed => "run.failed",
+                        RunPhase::TimedOut => "run.timed_out",
+                        RunPhase::Cancelled => "run.cancelled",
                         _ => "run.updated",
                     };
                     let _ = append_run_event(
@@ -1826,9 +1800,6 @@ impl McpSubagentServer {
                             },
                         );
                     }
-                    let summary = failed_summary(err.message.clone().into_owned());
-                    let (artifact_index, artifacts) =
-                        build_runtime_artifacts(&summary, "", "", None);
                     let failure_outcome = RunOutcome::Failed(FailureOutcome {
                         error: err_text.clone(),
                         retry: RetryInfo {
@@ -1836,12 +1807,14 @@ impl McpSubagentServer {
                             reason: Some("dispatch execution failed".to_string()),
                             attempts_used: 0,
                         },
-                        partial_summary: Some(summary.summary.summary.clone()),
+                        partial_summary: Some(err.message.clone().into_owned()),
                         usage: UsageStats::ZERO,
                     });
-                    record.status = RunStatus::Failed;
+                    let (artifact_index, artifacts) =
+                        build_runtime_artifacts(&failure_outcome, "", "", None);
+                    record.status = RunPhase::Failed;
                     record.updated_at = OffsetDateTime::now_utc();
-                    append_status_if_terminal(&mut record.status_history, RunStatus::Failed);
+                    append_status_if_terminal(&mut record.status_history, RunPhase::Failed);
                     record.error_message = Some(err_text);
                     record.outcome = Some(failure_outcome);
                     record.artifact_index = artifact_index;
@@ -1851,7 +1824,6 @@ impl McpSubagentServer {
                     record.workspace = None;
                     record.compiled_context_markdown = None;
                     record.usage = None;
-                    record.retry_classification = None;
                     let _ = append_run_event(
                         &state_dir,
                         &task_handle_id,
@@ -1934,7 +1906,7 @@ impl McpSubagentServer {
 
         if matches!(
             existing_status,
-            RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled | RunStatus::TimedOut
+            RunPhase::Succeeded | RunPhase::Failed | RunPhase::Cancelled | RunPhase::TimedOut
         ) {
             return Ok(Json(CancelAgentOutput {
                 handle_id: input.handle_id,
@@ -1947,15 +1919,16 @@ impl McpSubagentServer {
         }
 
         if let Some(record) = state.runs.get_mut(&input.handle_id) {
-            record.status = RunStatus::Cancelled;
+            record.status = RunPhase::Cancelled;
             record.updated_at = OffsetDateTime::now_utc();
-            append_status_if_terminal(&mut record.status_history, RunStatus::Cancelled);
+            append_status_if_terminal(&mut record.status_history, RunPhase::Cancelled);
             record.error_message = Some("cancelled by user request".to_string());
             if record.outcome.is_none() {
                 let reason = "cancelled by user request".to_string();
-                let summary = cancelled_summary(record.task_spec.task.clone());
-                let (artifact_index, artifacts) = build_runtime_artifacts(&summary, "", "", None);
-                record.outcome = Some(RunOutcome::Cancelled { reason });
+                let cancelled_outcome = RunOutcome::Cancelled { reason };
+                let (artifact_index, artifacts) =
+                    build_runtime_artifacts(&cancelled_outcome, "", "", None);
+                record.outcome = Some(cancelled_outcome);
                 record.artifact_index = artifact_index;
                 record.artifacts = artifacts;
             }
@@ -1976,7 +1949,7 @@ impl McpSubagentServer {
 
         Ok(Json(CancelAgentOutput {
             handle_id: input.handle_id,
-            status: format!("{}", RunStatus::Cancelled),
+            status: format!("{}", RunPhase::Cancelled),
         }))
     }
 
@@ -2032,7 +2005,7 @@ mod tests {
         classify_block_reason_from_text, collect_wait_reasons, current_phase_age_ms,
         detect_provider_wait_signal, parse_rfc3339, RunEventOutput,
     };
-    use crate::runtime::dispatcher::RunStatus;
+    use crate::runtime::dispatcher::RunPhase;
 
     #[test]
     fn detect_provider_wait_signal_matches_trust_prompt() {
@@ -2079,7 +2052,7 @@ mod tests {
             detail: serde_json::json!({}),
         }];
         let reason = classify_block_reason(
-            &RunStatus::Succeeded,
+            &RunPhase::Succeeded,
             Some("completed"),
             false,
             &events,
@@ -2171,7 +2144,7 @@ mod tests {
     #[test]
     fn build_watch_advice_includes_timeout_and_reason_guidance() {
         let advice = build_watch_advice(
-            &RunStatus::Running,
+            &RunPhase::Running,
             Some("provider_boot"),
             Some("auth_required"),
             true,
@@ -2190,7 +2163,7 @@ mod tests {
 
     #[test]
     fn build_watch_advice_includes_terminal_next_step() {
-        let advice = build_watch_advice(&RunStatus::Succeeded, Some("completed"), None, false);
+        let advice = build_watch_advice(&RunPhase::Succeeded, Some("completed"), None, false);
         assert!(
             advice.iter().any(|item| item.contains("get_run_result")),
             "{advice:?}"

@@ -2,12 +2,12 @@ use std::{collections::HashMap, fs, io::Write, path::Path};
 
 use rmcp::ErrorData;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::mcp::{
     artifacts::{run_artifacts_dir, run_dir, sanitize_relative_artifact_path},
-    state::{PersistedRunRecord, RunRecord},
+    state::{PersistedRun, RunRecord},
 };
 
 fn run_meta_path(state_dir: &Path, handle_id: &str) -> std::path::PathBuf {
@@ -49,7 +49,7 @@ pub(crate) fn persist_run_record(
         )
     })?;
 
-    let persisted = PersistedRunRecord::from(record);
+    let persisted = PersistedRun::from(record);
     let meta_json = serde_json::to_string_pretty(&persisted)
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     fs::write(run_meta_path(state_dir, handle_id), meta_json)
@@ -108,17 +108,6 @@ pub(crate) fn persist_run_record(
         .unwrap_or("");
     write_run_log_file(&run_directory.join("stdout.log"), stdout_log_content)?;
     write_run_log_file(&run_directory.join("stderr.log"), stderr_log_content)?;
-    if matches!(
-        record.status,
-        crate::runtime::dispatcher::RunStatus::Succeeded
-            | crate::runtime::dispatcher::RunStatus::Failed
-            | crate::runtime::dispatcher::RunStatus::TimedOut
-            | crate::runtime::dispatcher::RunStatus::Cancelled
-    ) {
-        let events = build_run_events(record);
-        write_events_file_if_missing(&events_path(state_dir, handle_id), &events)?;
-    }
-
     Ok(())
 }
 
@@ -150,18 +139,7 @@ pub(crate) fn append_run_event(
     let canonical_path = events_path(state_dir, handle_id);
     let seq = next_event_seq(&canonical_path)?;
     let timestamp = format_time(OffsetDateTime::now_utc());
-    let line = RunEventRecord {
-        seq: Some(seq),
-        ts: Some(timestamp.clone()),
-        level: Some("info".to_string()),
-        state: Some(event.state.to_string()),
-        phase: Some(event.phase.to_string()),
-        source: Some(event.source.to_string()),
-        message: Some(event.message.to_string()),
-        event: event.event.to_string(),
-        timestamp,
-        detail: event.detail,
-    };
+    let line = RunEventRecord::runtime(event, seq, timestamp);
     append_event_line(&canonical_path, &line)?;
     Ok(())
 }
@@ -181,7 +159,7 @@ pub(crate) fn load_run_record_from_disk(
             None,
         )
     })?;
-    let persisted: PersistedRunRecord = serde_json::from_str(&raw)
+    let persisted: PersistedRun = serde_json::from_str(&raw)
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
 
     let mut artifacts = HashMap::new();
@@ -211,17 +189,12 @@ pub(crate) fn load_run_record_from_disk(
 
     let status = persisted.state.status.clone();
     let updated_at = persisted.state.updated_at;
-    let status_history = if persisted.state.status_history.is_empty() {
-        vec![status.clone()]
-    } else {
-        persisted.state.status_history
-    };
 
     Ok(Some(RunRecord {
         status,
-        created_at: persisted.state.created_at.unwrap_or(updated_at),
+        created_at: persisted.state.created_at,
         updated_at,
-        status_history,
+        status_history: persisted.state.status_history,
         outcome: persisted.outcome,
         artifact_index: persisted.artifact_index,
         artifacts,
@@ -234,8 +207,7 @@ pub(crate) fn load_run_record_from_disk(
         workspace: persisted.state.workspace,
         compiled_context_markdown: persisted.state.compiled_context_markdown,
         usage: persisted.state.usage,
-        retry_classification: persisted.state.retry_classification,
-        execution_policy: persisted.state.execution_policy,
+        policy: persisted.state.policy,
     }))
 }
 
@@ -270,168 +242,20 @@ struct RunEventRecord {
 }
 
 impl RunEventRecord {
-    fn legacy(event: String, timestamp: String, detail: Value) -> Self {
+    fn runtime(event: RuntimeEventInput<'_>, seq: u64, timestamp: String) -> Self {
         Self {
-            seq: None,
-            ts: None,
-            level: None,
-            state: None,
-            phase: None,
-            source: None,
-            message: None,
-            event,
+            seq: Some(seq),
+            ts: Some(timestamp.clone()),
+            level: Some("info".to_string()),
+            state: Some(event.state.to_string()),
+            phase: Some(event.phase.to_string()),
+            source: Some(event.source.to_string()),
+            message: Some(event.message.to_string()),
+            event: event.event.to_string(),
             timestamp,
-            detail,
+            detail: event.detail,
         }
     }
-}
-
-fn build_run_events(record: &RunRecord) -> Vec<RunEventRecord> {
-    let timestamp = format_time(record.updated_at);
-    let mut events = Vec::new();
-
-    if let Some(probe) = &record.probe_result {
-        events.push(RunEventRecord::legacy(
-            "probe".to_string(),
-            timestamp.clone(),
-            json!({
-                "provider": probe.provider,
-                "status": probe.status,
-                "executable": probe.executable,
-            }),
-        ));
-    }
-
-    events.push(RunEventRecord::legacy(
-        "gate".to_string(),
-        timestamp.clone(),
-        json!({
-            "stage": record.hints.stage,
-            "plan_ref": record.hints.plan_ref,
-            "run_mode": record.hints.run_mode,
-        }),
-    ));
-
-    if let Some(workspace) = &record.workspace {
-        events.push(RunEventRecord::legacy(
-            "workspace".to_string(),
-            timestamp.clone(),
-            json!({
-                "mode": workspace.mode,
-                "source_path": workspace.source_path,
-                "workspace_path": workspace.workspace_path,
-            }),
-        ));
-    }
-
-    if let Some(memory) = &record.memory_resolution {
-        events.push(RunEventRecord::legacy(
-            "memory".to_string(),
-            timestamp.clone(),
-            json!({
-                "project_memory_count": memory.project_memory_count,
-                "additional_memory_count": memory.additional_memory_count,
-                "native_passthrough_count": memory.native_passthrough_count,
-                "project_memory_labels": memory.project_memory_labels,
-                "additional_memory_labels": memory.additional_memory_labels,
-                "native_passthrough_paths": memory.native_passthrough_paths,
-            }),
-        ));
-    }
-
-    if let Some(policy) = &record.execution_policy {
-        events.push(RunEventRecord::legacy(
-            "policy".to_string(),
-            timestamp.clone(),
-            json!({
-                "requested_run_mode": policy.requested_run_mode,
-                "effective_run_mode": policy.effective_run_mode,
-                "effective_run_mode_source": policy.effective_run_mode_source,
-                "spawn_policy": policy.spawn_policy,
-                "spawn_policy_source": policy.spawn_policy_source,
-                "background_preference": policy.background_preference,
-                "background_preference_source": policy.background_preference_source,
-                "max_turns": policy.max_turns,
-                "max_turns_source": policy.max_turns_source,
-                "retry_max_attempts": policy.retry_max_attempts,
-                "retry_backoff_secs": policy.retry_backoff_secs,
-                "retry_policy_source": policy.retry_policy_source,
-                "attempts_used": policy.attempts_used,
-                "retries_used": policy.retries_used,
-            }),
-        ));
-    }
-
-    if let Some(retry) = &record.retry_classification {
-        events.push(RunEventRecord::legacy(
-            "retry_classification".to_string(),
-            timestamp.clone(),
-            json!({
-                "classification": retry.classification,
-                "reason": retry.reason,
-            }),
-        ));
-    }
-
-    if let Some(crate::runtime::outcome::RunOutcome::Succeeded(success)) = &record.outcome {
-        events.push(RunEventRecord::legacy(
-            "parse".to_string(),
-            timestamp.clone(),
-            json!({
-                "parse_status": format!("{}", success.parse_status),
-                "verification_status": format!("{}", success.verification),
-                "exit_code": success.usage.provider_exit_code.unwrap_or(0),
-            }),
-        ));
-    }
-
-    if matches!(
-        record.status,
-        crate::runtime::dispatcher::RunStatus::Succeeded
-            | crate::runtime::dispatcher::RunStatus::Failed
-            | crate::runtime::dispatcher::RunStatus::TimedOut
-            | crate::runtime::dispatcher::RunStatus::Cancelled
-    ) {
-        let cleaned = record
-            .workspace
-            .as_ref()
-            .map(|workspace| !workspace.workspace_path.exists())
-            .unwrap_or(true);
-        events.push(RunEventRecord::legacy(
-            "cleanup".to_string(),
-            timestamp,
-            json!({
-                "cleaned": cleaned,
-                "status": record.status,
-            }),
-        ));
-    }
-
-    events
-}
-
-fn write_events_file_if_missing(
-    path: &Path,
-    events: &[RunEventRecord],
-) -> std::result::Result<(), ErrorData> {
-    if let Ok(metadata) = fs::metadata(path) {
-        if metadata.len() > 0 {
-            return Ok(());
-        }
-    }
-    let mut lines = String::new();
-    for event in events {
-        let line = serde_json::to_string(&event)
-            .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
-        lines.push_str(&line);
-        lines.push('\n');
-    }
-    fs::write(path, lines).map_err(|err| {
-        ErrorData::internal_error(
-            format!("failed to write events file {}: {err}", path.display()),
-            None,
-        )
-    })
 }
 
 fn append_event_line(path: &Path, event: &RunEventRecord) -> std::result::Result<(), ErrorData> {
@@ -492,7 +316,7 @@ fn format_time(value: OffsetDateTime) -> String {
 mod tests {
     use std::fs;
 
-    use crate::runtime::dispatcher::RunStatus;
+    use crate::runtime::dispatcher::RunPhase;
     use serde_json::json;
     use tempfile::tempdir;
     use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -511,7 +335,7 @@ mod tests {
         let updated_at = created_at + time::Duration::seconds(1);
         let current = serde_json::json!({
             "task_spec": {
-                "task": "legacy task",
+                "task": "sample task",
                 "task_brief": null,
                 "acceptance_criteria": [],
                 "selected_files": [],
@@ -534,8 +358,7 @@ mod tests {
                 "workspace": null,
                 "compiled_context_markdown": null,
                 "usage": null,
-                "retry_classification": null,
-                "execution_policy": null
+                "policy": null
             },
             "outcome": null,
             "artifact_index": [],
@@ -551,16 +374,12 @@ mod tests {
             .expect("load run")
             .expect("run exists");
 
-        assert_eq!(loaded.status, RunStatus::Succeeded);
+        assert_eq!(loaded.status, RunPhase::Succeeded);
         assert_eq!(
             loaded.status_history,
-            vec![
-                RunStatus::Received,
-                RunStatus::Running,
-                RunStatus::Succeeded
-            ]
+            vec![RunPhase::Received, RunPhase::Running, RunPhase::Succeeded]
         );
-        assert_eq!(loaded.task_spec.task, "legacy task");
+        assert_eq!(loaded.task_spec.task, "sample task");
         assert!(loaded.memory_resolution.is_none());
         assert!(loaded.compiled_context_markdown.is_none());
     }

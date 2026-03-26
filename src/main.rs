@@ -1182,13 +1182,6 @@ struct StoredNativeUsage {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
-struct StoredRetryClassification {
-    classification: String,
-    reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
 struct StoredRetryInfo {
     classification: String,
     reason: Option<String>,
@@ -1264,27 +1257,23 @@ impl StoredRunOutcome {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
 struct StoredTaskSpec {
     task: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
 struct StoredRunState {
     status: String,
     created_at: Option<String>,
     updated_at: String,
     status_history: Vec<String>,
     error_message: Option<String>,
-    execution_policy: Option<StoredExecutionPolicy>,
+    policy: Option<StoredExecutionPolicy>,
     compiled_context_markdown: Option<String>,
     usage: Option<StoredNativeUsage>,
-    retry_classification: Option<StoredRetryClassification>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
 struct StoredRunRecord {
     task_spec: StoredTaskSpec,
     state: StoredRunState,
@@ -2336,7 +2325,7 @@ fn build_usage_output(
         provider_exit_code: infer_provider_exit_code(record),
         retries: record
             .state
-            .execution_policy
+            .policy
             .as_ref()
             .and_then(|policy| policy.retries_used)
             .or_else(|| {
@@ -2367,16 +2356,7 @@ fn resolve_retry_classification(record: &StoredRunRecord) -> (String, Option<Str
         };
         return (normalized, failure.retry.reason.clone());
     }
-    match &record.state.retry_classification {
-        Some(value) => {
-            let normalized = match value.classification.as_str() {
-                "retryable" | "non_retryable" | "unknown" => value.classification.clone(),
-                _ => "unknown".to_string(),
-            };
-            (normalized, value.reason.clone())
-        }
-        None => ("unknown".to_string(), None),
-    }
+    ("unknown".to_string(), None)
 }
 
 fn list_runs(cfg: RuntimeConfig, limit: usize, json: bool) -> ExitCode {
@@ -5026,15 +5006,20 @@ target/
     }
 
     #[test]
-    fn resolve_retry_classification_reads_persisted_value() {
+    fn resolve_retry_classification_reads_failed_outcome_retry_info() {
         let record = StoredRunRecord {
-            state: super::StoredRunState {
-                retry_classification: Some(super::StoredRetryClassification {
-                    classification: "retryable".to_string(),
-                    reason: Some("matched retryable keyword `network`".to_string()),
-                }),
-                ..super::StoredRunState::default()
-            },
+            outcome: Some(super::StoredRunOutcome::Failed(
+                super::StoredFailureOutcome {
+                    error: "failed".to_string(),
+                    retry: super::StoredRetryInfo {
+                        classification: "retryable".to_string(),
+                        reason: Some("matched retryable keyword `network`".to_string()),
+                        attempts_used: 2,
+                    },
+                    partial_summary: None,
+                    usage: super::StoredOutcomeUsage::default(),
+                },
+            )),
             ..StoredRunRecord::default()
         };
         let (classification, reason) = super::resolve_retry_classification(&record);
@@ -5403,8 +5388,22 @@ target/
         fs::write(
             run_dir.join("run.json"),
             serde_json::json!({
-                "status": "running",
-                "updated_at": "2026-03-25T00:00:00Z"
+                "task_spec": {
+                    "task": "watch timeout fixture"
+                },
+                "state": {
+                    "status": "running",
+                    "created_at": "2026-03-25T00:00:00Z",
+                    "updated_at": "2026-03-25T00:00:00Z",
+                    "status_history": ["received", "running"],
+                    "error_message": null,
+                    "policy": null,
+                    "compiled_context_markdown": null,
+                    "usage": null
+                },
+                "outcome": null,
+                "artifact_index": [],
+                "spec_snapshot": null
             })
             .to_string(),
         )
@@ -5435,8 +5434,22 @@ target/
             fs::write(
                 run_dir.join("run.json"),
                 serde_json::json!({
-                    "status": status,
-                    "updated_at": "2026-03-25T00:00:00Z"
+                    "task_spec": {
+                        "task": format!("snapshot fixture {handle}")
+                    },
+                    "state": {
+                        "status": status,
+                        "created_at": "2026-03-25T00:00:00Z",
+                        "updated_at": "2026-03-25T00:00:00Z",
+                        "status_history": ["received", status],
+                        "error_message": null,
+                        "policy": null,
+                        "compiled_context_markdown": null,
+                        "usage": null
+                    },
+                    "outcome": null,
+                    "artifact_index": [],
+                    "spec_snapshot": null
                 })
                 .to_string(),
             )

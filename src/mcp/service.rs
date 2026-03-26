@@ -27,7 +27,7 @@ use crate::{
 use serde_json::json;
 
 #[derive(Debug)]
-pub(crate) struct DispatchEnvelope {
+pub(crate) struct RunDispatchData {
     pub(crate) result: DispatchRunResult,
     pub(crate) workspace: WorkspaceRecord,
     pub(crate) memory_resolution: MemoryResolutionRecord,
@@ -41,7 +41,7 @@ pub(crate) async fn run_dispatch(
     handle_id: &str,
     state_dir: &Path,
     lock_keys: Vec<String>,
-) -> std::result::Result<DispatchEnvelope, ErrorData> {
+) -> std::result::Result<RunDispatchData, ErrorData> {
     let mut prepared_workspace = prepare_workspace(spec, task_spec, hints, state_dir, handle_id)
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     let _ = append_run_event(
@@ -85,7 +85,7 @@ pub(crate) async fn run_dispatch(
             |prev, current| {
                 if matches!(
                     current,
-                    crate::runtime::dispatcher::RunStatus::CompilingContext
+                    crate::runtime::dispatcher::RunPhase::CompilingContext
                 ) {
                     let _ = append_run_event(
                         state_dir,
@@ -100,7 +100,7 @@ pub(crate) async fn run_dispatch(
                         },
                     );
                 }
-                if matches!(current, crate::runtime::dispatcher::RunStatus::Launching) {
+                if matches!(current, crate::runtime::dispatcher::RunPhase::Launching) {
                     let _ = append_run_event(
                         state_dir,
                         handle_id,
@@ -116,7 +116,7 @@ pub(crate) async fn run_dispatch(
                 }
                 if matches!(
                     current,
-                    crate::runtime::dispatcher::RunStatus::ParsingSummary
+                    crate::runtime::dispatcher::RunPhase::ParsingSummary
                 ) {
                     let _ = append_run_event(
                         state_dir,
@@ -134,11 +134,11 @@ pub(crate) async fn run_dispatch(
                 if prev.as_ref().is_some_and(|status| {
                     matches!(
                         status,
-                        crate::runtime::dispatcher::RunStatus::CompilingContext
+                        crate::runtime::dispatcher::RunPhase::CompilingContext
                     )
                 }) && !matches!(
                     current,
-                    crate::runtime::dispatcher::RunStatus::CompilingContext
+                    crate::runtime::dispatcher::RunPhase::CompilingContext
                 ) {
                     let _ = append_run_event(
                         state_dir,
@@ -154,13 +154,10 @@ pub(crate) async fn run_dispatch(
                     );
                 }
                 if prev.as_ref().is_some_and(|status| {
-                    matches!(
-                        status,
-                        crate::runtime::dispatcher::RunStatus::ParsingSummary
-                    )
+                    matches!(status, crate::runtime::dispatcher::RunPhase::ParsingSummary)
                 }) && !matches!(
                     current,
-                    crate::runtime::dispatcher::RunStatus::ParsingSummary
+                    crate::runtime::dispatcher::RunPhase::ParsingSummary
                 ) {
                     let _ = append_run_event(
                         state_dir,
@@ -182,7 +179,7 @@ pub(crate) async fn run_dispatch(
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
     result.workspace_path = effective_task_spec.working_dir.clone();
 
-    Ok(DispatchEnvelope {
+    Ok(RunDispatchData {
         result,
         workspace: workspace_record,
         memory_resolution,

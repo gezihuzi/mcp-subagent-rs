@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::runtime::outcome::{SuccessOutcome, UsageStats};
 
@@ -56,7 +55,7 @@ impl std::fmt::Display for VerificationStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct StructuredSummary {
+struct StructuredSummary {
     pub summary: String,
     pub key_findings: Vec<String>,
     pub artifacts: Vec<ArtifactRef>,
@@ -85,11 +84,11 @@ impl std::fmt::Display for SummaryParseStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SummaryEnvelope {
-    pub contract_version: String,
-    pub parse_status: SummaryParseStatus,
-    pub summary: StructuredSummary,
+    contract_version: String,
+    parse_status: SummaryParseStatus,
+    summary: StructuredSummary,
     #[serde(default)]
-    pub raw_fallback_text: Option<String>,
+    raw_fallback_text: Option<String>,
 }
 
 impl StructuredSummary {
@@ -122,6 +121,74 @@ impl StructuredSummary {
 }
 
 impl SummaryEnvelope {
+    pub fn from_success_outcome(
+        success: SuccessOutcome,
+        exit_code: i32,
+        raw_fallback_text: Option<String>,
+    ) -> Self {
+        let parse_status = success.parse_status.clone();
+        Self {
+            contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
+            parse_status,
+            summary: StructuredSummary {
+                summary: success.summary,
+                key_findings: success.key_findings,
+                artifacts: success.artifacts,
+                open_questions: success.open_questions,
+                next_steps: success.next_steps,
+                exit_code,
+                verification_status: success.verification,
+                touched_files: success.touched_files,
+                plan_refs: success.plan_refs,
+            },
+            raw_fallback_text,
+        }
+    }
+
+    pub fn parse_status(&self) -> &SummaryParseStatus {
+        &self.parse_status
+    }
+
+    pub fn summary_text(&self) -> &str {
+        &self.summary.summary
+    }
+
+    pub fn key_findings(&self) -> &[String] {
+        &self.summary.key_findings
+    }
+
+    pub fn artifacts(&self) -> &[ArtifactRef] {
+        &self.summary.artifacts
+    }
+
+    pub fn open_questions(&self) -> &[String] {
+        &self.summary.open_questions
+    }
+
+    pub fn next_steps(&self) -> &[String] {
+        &self.summary.next_steps
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        self.summary.exit_code
+    }
+
+    pub fn verification_status(&self) -> &VerificationStatus {
+        &self.summary.verification_status
+    }
+
+    pub fn touched_files(&self) -> &[String] {
+        &self.summary.touched_files
+    }
+
+    pub fn plan_refs(&self) -> &[String] {
+        &self.summary.plan_refs
+    }
+
+    pub fn raw_fallback_text(&self) -> Option<&str> {
+        self.raw_fallback_text.as_deref()
+    }
+
     pub fn into_success_outcome(self, usage: UsageStats) -> SuccessOutcome {
         self.summary.into_success_outcome(self.parse_status, usage)
     }
@@ -156,10 +223,7 @@ fn parse_from_raw(
     invalid_candidate: &mut Option<(String, String)>,
 ) -> Option<SummaryEnvelope> {
     let mut seen = HashSet::new();
-    for json_block in extract_json_blocks(raw)
-        .into_iter()
-        .chain(extract_json_objects(raw))
-    {
+    for json_block in extract_json_blocks(raw) {
         let trimmed = json_block.trim();
         if trimmed.is_empty() || !seen.insert(trimmed) {
             continue;
@@ -179,54 +243,7 @@ fn parse_from_raw(
 }
 
 fn parse_json_candidate(json_block: &str) -> Option<SummaryEnvelope> {
-    if let Ok(parsed_envelope) = serde_json::from_str::<SummaryEnvelope>(json_block) {
-        return Some(parsed_envelope);
-    }
-
-    if let Ok(parsed_summary) = serde_json::from_str::<StructuredSummary>(json_block) {
-        return Some(SummaryEnvelope {
-            contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
-            parse_status: SummaryParseStatus::Validated,
-            summary: parsed_summary,
-            raw_fallback_text: None,
-        });
-    }
-
-    if let Ok(payload) = serde_json::from_str::<Value>(json_block) {
-        if let Some(wrapped) = wrap_json_payload(payload) {
-            return Some(wrapped);
-        }
-    }
-
-    None
-}
-
-fn wrap_json_payload(payload: Value) -> Option<SummaryEnvelope> {
-    let Value::Object(map) = &payload else {
-        return None;
-    };
-    if map.is_empty() {
-        return None;
-    }
-
-    let payload_text = serde_json::to_string(&payload).ok()?;
-    Some(SummaryEnvelope {
-        contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
-        parse_status: SummaryParseStatus::Validated,
-        summary: StructuredSummary {
-            summary: "Provider returned JSON payload; runtime wrapped it into SummaryEnvelope."
-                .to_string(),
-            key_findings: vec![payload_text],
-            artifacts: Vec::new(),
-            open_questions: Vec::new(),
-            next_steps: Vec::new(),
-            exit_code: 0,
-            verification_status: VerificationStatus::Passed,
-            touched_files: Vec::new(),
-            plan_refs: Vec::new(),
-        },
-        raw_fallback_text: None,
-    })
+    serde_json::from_str::<SummaryEnvelope>(json_block).ok()
 }
 
 fn extract_json_blocks(raw: &str) -> Vec<&str> {
@@ -242,54 +259,6 @@ fn extract_json_blocks(raw: &str) -> Vec<&str> {
         offset = end + SUMMARY_END_SENTINEL.len();
     }
     blocks
-}
-
-fn extract_json_objects(raw: &str) -> Vec<&str> {
-    let mut objects = Vec::new();
-    let mut depth = 0usize;
-    let mut start_idx = None;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (idx, ch) in raw.char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            match ch {
-                '\\' => escaped = true,
-                '"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-
-        match ch {
-            '"' => in_string = true,
-            '{' => {
-                if depth == 0 {
-                    start_idx = Some(idx);
-                }
-                depth += 1;
-            }
-            '}' => {
-                if depth == 0 {
-                    continue;
-                }
-                depth -= 1;
-                if depth == 0 {
-                    if let Some(start) = start_idx.take() {
-                        let end = idx + ch.len_utf8();
-                        objects.push(raw[start..end].trim());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    objects
 }
 
 fn degraded_envelope(reason: &str, raw_fallback_text: Option<String>) -> SummaryEnvelope {
@@ -346,21 +315,6 @@ mod tests {
     };
     use crate::runtime::outcome::UsageStats;
 
-    fn legacy_summary_json() -> String {
-        r#"{
-  "summary": "ok",
-  "key_findings": ["a"],
-  "artifacts": [],
-  "open_questions": [],
-  "next_steps": ["next"],
-  "exit_code": 0,
-  "verification_status": "Passed",
-  "touched_files": ["src/main.rs"],
-  "plan_refs": ["step-1"]
-}"#
-        .to_string()
-    }
-
     fn envelope_json() -> String {
         r#"{
   "contract_version": "mcp-subagent.summary.v2",
@@ -382,11 +336,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_valid_legacy_summary_from_stdout() {
+    fn parses_valid_envelope_from_stdout() {
         let stdout = format!(
             "prefix\n{start}\n{json}\n{end}\nsuffix",
             start = SUMMARY_START_SENTINEL,
-            json = legacy_summary_json(),
+            json = envelope_json(),
             end = SUMMARY_END_SENTINEL
         );
         let parsed = parse_summary_envelope(&stdout, "");
@@ -401,27 +355,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_valid_envelope_from_stdout() {
+    fn falls_back_to_stderr_when_stdout_missing() {
         let stdout = format!(
             "{start}\n{json}\n{end}",
             start = SUMMARY_START_SENTINEL,
             json = envelope_json(),
             end = SUMMARY_END_SENTINEL
         );
-        let parsed = parse_summary_envelope(&stdout, "");
-        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
-        assert_eq!(parsed.summary.summary, "ok");
-    }
-
-    #[test]
-    fn falls_back_to_stderr_when_stdout_missing() {
-        let stderr = format!(
-            "{start}\n{json}\n{end}",
-            start = SUMMARY_START_SENTINEL,
-            json = legacy_summary_json(),
-            end = SUMMARY_END_SENTINEL
-        );
-        let parsed = parse_summary_envelope("no summary", &stderr);
+        let parsed = parse_summary_envelope("no summary", &stdout);
         assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
         assert_eq!(parsed.summary.summary, "ok");
     }
@@ -443,14 +384,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_valid_json_without_sentinels() {
-        let parsed = parse_summary_envelope(&legacy_summary_json(), "");
-        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
-        assert_eq!(parsed.summary.summary, "ok");
+    fn marks_degraded_when_envelope_json_without_sentinels() {
+        let parsed = parse_summary_envelope(&envelope_json(), "");
+        assert_eq!(parsed.parse_status, SummaryParseStatus::Degraded);
     }
 
     #[test]
-    fn parses_late_valid_json_after_placeholder_sentinel_block() {
+    fn marks_invalid_when_only_placeholder_sentinel_and_late_raw_json() {
         let stdout = format!(
             "OUTPUT SENTINELS\n{start}\n{{...valid json...}}\n{end}\nrunner logs\n{envelope}",
             start = SUMMARY_START_SENTINEL,
@@ -458,8 +398,8 @@ mod tests {
             envelope = envelope_json()
         );
         let parsed = parse_summary_envelope(&stdout, "");
-        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
-        assert_eq!(parsed.summary.summary, "ok");
+        assert_eq!(parsed.parse_status, SummaryParseStatus::Invalid);
+        assert!(parsed.raw_fallback_text.is_some());
     }
 
     #[test]
@@ -468,7 +408,7 @@ mod tests {
             "{start}\n{{...valid json...}}\n{end}\n{start}\n{json}\n{end}",
             start = SUMMARY_START_SENTINEL,
             end = SUMMARY_END_SENTINEL,
-            json = legacy_summary_json()
+            json = envelope_json()
         );
         let parsed = parse_summary_envelope(&stdout, "");
         assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
@@ -476,26 +416,30 @@ mod tests {
     }
 
     #[test]
-    fn wraps_json_payload_inside_sentinel_as_validated() {
+    fn marks_invalid_when_json_payload_inside_sentinel_is_not_envelope_contract() {
         let stdout = format!(
             "{start}\n{{\"name\":\"Octoclip\",\"url\":\"https://octoclip.app\"}}\n{end}",
             start = SUMMARY_START_SENTINEL,
             end = SUMMARY_END_SENTINEL
         );
         let parsed = parse_summary_envelope(&stdout, "");
-        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
-        assert_eq!(parsed.summary.exit_code, 0);
+        assert_eq!(parsed.parse_status, SummaryParseStatus::Invalid);
+        assert!(parsed.raw_fallback_text.is_some());
         assert_eq!(
             parsed.summary.verification_status,
-            VerificationStatus::Passed
+            VerificationStatus::NotRun
         );
-        assert_eq!(parsed.summary.key_findings.len(), 1);
-        assert!(parsed.summary.key_findings[0].contains("\"name\":\"Octoclip\""));
     }
 
     #[test]
     fn converts_parsed_envelope_to_success_outcome() {
-        let parsed = parse_summary_envelope(&legacy_summary_json(), "");
+        let stdout = format!(
+            "{start}\n{json}\n{end}",
+            start = SUMMARY_START_SENTINEL,
+            json = envelope_json(),
+            end = SUMMARY_END_SENTINEL
+        );
+        let parsed = parse_summary_envelope(&stdout, "");
         let usage = UsageStats {
             duration_ms: 42,
             input_tokens: Some(10),

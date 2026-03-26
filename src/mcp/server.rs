@@ -14,7 +14,7 @@ use crate::{
     error::McpSubagentError,
     mcp::helpers::{resolve_effective_run_mode, resolve_preferred_run_mode, run_mode_label},
     mcp::persistence::{load_run_record_from_disk, persist_run_record},
-    mcp::state::{build_execution_policy_snapshot, ExecutionPolicyRecord, RunRecord, RuntimeState},
+    mcp::state::{build_execution_policy_snapshot, PolicySnapshot, RunRecord, RuntimeState},
     mcp::tools::build_tool_router,
     probe::{ProviderProbe, ProviderProber, SystemProviderProber},
     runtime::workspace::resolve_source_path,
@@ -100,15 +100,8 @@ impl McpSubagentServer {
         &self,
         input: RunAgentInput,
         requested_run_mode: RunMode,
-    ) -> std::result::Result<
-        (
-            LoadedAgentSpec,
-            TaskSpec,
-            WorkflowHints,
-            ExecutionPolicyRecord,
-        ),
-        ErrorData,
-    > {
+    ) -> std::result::Result<(LoadedAgentSpec, TaskSpec, WorkflowHints, PolicySnapshot), ErrorData>
+    {
         let specs = self.load_specs()?;
         let loaded = specs
             .into_iter()
@@ -381,10 +374,8 @@ mod tests {
 
     use crate::{
         probe::{ProbeStatus, ProviderCapabilities, ProviderProbe, ProviderProber},
-        runtime::summary::{
-            ArtifactKind, ArtifactRef, StructuredSummary, SummaryEnvelope, SummaryParseStatus,
-            VerificationStatus, SUMMARY_CONTRACT_VERSION,
-        },
+        runtime::outcome::{RunOutcome, SuccessOutcome, UsageStats},
+        runtime::summary::{ArtifactKind, ArtifactRef, SummaryParseStatus, VerificationStatus},
         spec::Provider,
     };
 
@@ -1186,29 +1177,25 @@ exit 0
         let temp = tempdir().expect("tempdir");
         fs::write(temp.path().join("report.md"), "# report").expect("write report");
 
-        let summary = SummaryEnvelope {
-            contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
+        let outcome = RunOutcome::Succeeded(SuccessOutcome {
+            summary: "done".to_string(),
+            key_findings: vec!["one".to_string()],
+            artifacts: vec![ArtifactRef {
+                path: PathBuf::from("report.md"),
+                kind: ArtifactKind::ReportMarkdown,
+                description: "markdown report".to_string(),
+                media_type: Some("text/markdown".to_string()),
+            }],
+            open_questions: Vec::new(),
+            next_steps: Vec::new(),
+            verification: VerificationStatus::Passed,
+            usage: UsageStats::ZERO,
             parse_status: SummaryParseStatus::Validated,
-            summary: StructuredSummary {
-                summary: "done".to_string(),
-                key_findings: vec!["one".to_string()],
-                artifacts: vec![ArtifactRef {
-                    path: PathBuf::from("report.md"),
-                    kind: ArtifactKind::ReportMarkdown,
-                    description: "markdown report".to_string(),
-                    media_type: Some("text/markdown".to_string()),
-                }],
-                open_questions: Vec::new(),
-                next_steps: Vec::new(),
-                exit_code: 0,
-                verification_status: VerificationStatus::Passed,
-                touched_files: Vec::new(),
-                plan_refs: Vec::new(),
-            },
-            raw_fallback_text: None,
-        };
+            touched_files: Vec::new(),
+            plan_refs: Vec::new(),
+        });
 
-        let (index, payloads) = build_runtime_artifacts(&summary, "", "", Some(temp.path()));
+        let (index, payloads) = build_runtime_artifacts(&outcome, "", "", Some(temp.path()));
         assert!(index.iter().any(|item| item.path == "report.md"));
         assert_eq!(
             payloads.get("report.md").expect("report payload"),
@@ -1800,29 +1787,17 @@ sandbox = "workspace_write"
         assert_eq!(run_obj["state"]["probe_result"]["provider"], "mock");
         assert!(!run_obj["state"]["memory_resolution"].is_null());
         assert_eq!(run_obj["state"]["workspace"]["mode"], "temp_copy");
-        assert!(!run_obj["state"]["execution_policy"].is_null());
+        assert!(!run_obj["state"]["policy"].is_null());
+        assert_eq!(run_obj["state"]["policy"]["requested_run_mode"], "sync");
+        assert_eq!(run_obj["state"]["policy"]["effective_run_mode"], "sync");
         assert_eq!(
-            run_obj["state"]["execution_policy"]["requested_run_mode"],
-            "sync"
-        );
-        assert_eq!(
-            run_obj["state"]["execution_policy"]["effective_run_mode"],
-            "sync"
-        );
-        assert_eq!(
-            run_obj["state"]["execution_policy"]["effective_run_mode_source"],
+            run_obj["state"]["policy"]["effective_run_mode_source"],
             "spec"
         );
-        assert_eq!(
-            run_obj["state"]["execution_policy"]["retry_max_attempts"],
-            1
-        );
-        assert_eq!(
-            run_obj["state"]["execution_policy"]["retry_backoff_secs"],
-            1
-        );
-        assert_eq!(run_obj["state"]["execution_policy"]["attempts_used"], 1);
-        assert_eq!(run_obj["state"]["execution_policy"]["retries_used"], 0);
+        assert_eq!(run_obj["state"]["policy"]["retry_max_attempts"], 1);
+        assert_eq!(run_obj["state"]["policy"]["retry_backoff_secs"], 1);
+        assert_eq!(run_obj["state"]["policy"]["attempts_used"], 1);
+        assert_eq!(run_obj["state"]["policy"]["retries_used"], 0);
         let workspace_path = run_obj["state"]["workspace"]["workspace_path"]
             .as_str()
             .expect("workspace path");

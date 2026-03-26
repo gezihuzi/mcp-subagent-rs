@@ -28,7 +28,7 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RunStatus {
+pub enum RunPhase {
     Received,
     Validating,
     ProbingProvider,
@@ -46,7 +46,7 @@ pub enum RunStatus {
     TimedOut,
 }
 
-impl std::fmt::Display for RunStatus {
+impl std::fmt::Display for RunPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Self::Received => "received",
@@ -75,8 +75,8 @@ pub struct DispatchRunResult {
     pub handle_id: Uuid,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
-    pub status: RunStatus,
-    pub status_history: Vec<RunStatus>,
+    pub status: RunPhase,
+    pub status_history: Vec<RunPhase>,
     pub provider: Provider,
     pub agent_name: String,
     pub workspace_path: PathBuf,
@@ -90,12 +90,7 @@ pub struct DispatchRunResult {
     pub max_attempts: u32,
     #[serde(default)]
     pub max_turns: Option<u32>,
-    #[serde(default)]
-    pub retry_classification: RetryClassification,
-    #[serde(default)]
-    pub retry_classification_reason: Option<String>,
     pub outcome: RunOutcome,
-    pub summary: SummaryEnvelope,
     pub stdout: String,
     pub stderr: String,
     pub compiled_context_markdown: String,
@@ -138,7 +133,7 @@ where
         mut on_transition: F,
     ) -> Result<DispatchRunResult>
     where
-        F: FnMut(Option<RunStatus>, RunStatus),
+        F: FnMut(Option<RunPhase>, RunPhase),
     {
         self.run_with_observers(spec, task_spec, hints, memory, &mut on_transition, None)
             .await
@@ -154,31 +149,31 @@ where
         mut output_observer: Option<&mut dyn RunnerOutputObserver>,
     ) -> Result<DispatchRunResult>
     where
-        F: FnMut(Option<RunStatus>, RunStatus),
+        F: FnMut(Option<RunPhase>, RunPhase),
     {
         let mut tracker = RunTracker::new(spec, task_spec.working_dir.clone());
 
         let mut previous_status = tracker.status.clone();
-        tracker.transition(RunStatus::Validating);
-        on_transition(Some(previous_status), RunStatus::Validating);
+        tracker.transition(RunPhase::Validating);
+        on_transition(Some(previous_status), RunPhase::Validating);
         validate_agent_spec(spec)?;
         enforce_readonly_gitworktree_scope(spec, hints)?;
         enforce_runtime_depth(spec, hints)?;
         enforce_workflow_gate(spec, task_spec, hints)?;
 
         previous_status = tracker.status.clone();
-        tracker.transition(RunStatus::ProbingProvider);
-        on_transition(Some(previous_status), RunStatus::ProbingProvider);
+        tracker.transition(RunPhase::ProbingProvider);
+        on_transition(Some(previous_status), RunPhase::ProbingProvider);
         previous_status = tracker.status.clone();
-        tracker.transition(RunStatus::PreparingWorkspace);
-        on_transition(Some(previous_status), RunStatus::PreparingWorkspace);
+        tracker.transition(RunPhase::PreparingWorkspace);
+        on_transition(Some(previous_status), RunPhase::PreparingWorkspace);
         previous_status = tracker.status.clone();
-        tracker.transition(RunStatus::ResolvingMemory);
-        on_transition(Some(previous_status), RunStatus::ResolvingMemory);
+        tracker.transition(RunPhase::ResolvingMemory);
+        on_transition(Some(previous_status), RunPhase::ResolvingMemory);
 
         previous_status = tracker.status.clone();
-        tracker.transition(RunStatus::CompilingContext);
-        on_transition(Some(previous_status), RunStatus::CompilingContext);
+        tracker.transition(RunPhase::CompilingContext);
+        on_transition(Some(previous_status), RunPhase::CompilingContext);
         let compiled = self.compiler.compile_task(spec, task_spec, hints, memory)?;
         let compiled_context_markdown =
             format!("{}\n\n{}", compiled.system_prefix, compiled.injected_prompt);
@@ -192,7 +187,7 @@ where
 
         let mut final_execution = None;
         let mut final_summary = None;
-        let mut final_status = RunStatus::Failed;
+        let mut final_status = RunPhase::Failed;
         let mut final_error_message = Some("dispatcher terminated unexpectedly".to_string());
         let mut final_retry_classification = RetryClassification::Unknown;
         let mut final_retry_classification_reason = None;
@@ -200,11 +195,11 @@ where
         for attempt in 1..=attempt_budget {
             tracker.attempts_used = attempt;
             previous_status = tracker.status.clone();
-            tracker.transition(RunStatus::Launching);
-            on_transition(Some(previous_status), RunStatus::Launching);
+            tracker.transition(RunPhase::Launching);
+            on_transition(Some(previous_status), RunPhase::Launching);
             previous_status = tracker.status.clone();
-            tracker.transition(RunStatus::Running);
-            on_transition(Some(previous_status), RunStatus::Running);
+            tracker.transition(RunPhase::Running);
+            on_transition(Some(previous_status), RunPhase::Running);
             let execution = match output_observer.as_deref_mut() {
                 Some(observer) => {
                     self.runner
@@ -219,11 +214,11 @@ where
             };
 
             previous_status = tracker.status.clone();
-            tracker.transition(RunStatus::Collecting);
-            on_transition(Some(previous_status), RunStatus::Collecting);
+            tracker.transition(RunPhase::Collecting);
+            on_transition(Some(previous_status), RunPhase::Collecting);
             previous_status = tracker.status.clone();
-            tracker.transition(RunStatus::ParsingSummary);
-            on_transition(Some(previous_status), RunStatus::ParsingSummary);
+            tracker.transition(RunPhase::ParsingSummary);
+            on_transition(Some(previous_status), RunPhase::ParsingSummary);
             let summary_envelope = self
                 .compiler
                 .parse_summary(&execution.stdout, &execution.stderr)?;
@@ -280,11 +275,9 @@ where
         })?;
 
         tracker.retry_attempts = tracker.attempts_used.saturating_sub(1);
-        tracker.retry_classification = final_retry_classification.clone();
-        tracker.retry_classification_reason = final_retry_classification_reason.clone();
         previous_status = tracker.status.clone();
-        tracker.transition(RunStatus::Finalizing);
-        on_transition(Some(previous_status), RunStatus::Finalizing);
+        tracker.transition(RunPhase::Finalizing);
+        on_transition(Some(previous_status), RunPhase::Finalizing);
         tracker.error_message = final_error_message.clone();
         previous_status = tracker.status.clone();
         tracker.transition(final_status.clone());
@@ -302,13 +295,13 @@ where
             input_tokens: native_usage.as_ref().and_then(|u| u.input_tokens),
             output_tokens: native_usage.as_ref().and_then(|u| u.output_tokens),
             total_tokens: native_usage.as_ref().and_then(|u| u.total_tokens),
-            provider_exit_code: Some(summary_envelope.summary.exit_code),
+            provider_exit_code: Some(summary_envelope.exit_code()),
         };
         let outcome = match tracker.status {
-            RunStatus::Succeeded => {
+            RunPhase::Succeeded => {
                 RunOutcome::Succeeded(summary_envelope.to_success_outcome(usage))
             }
-            RunStatus::Failed => RunOutcome::Failed(FailureOutcome {
+            RunPhase::Failed => RunOutcome::Failed(FailureOutcome {
                 error: tracker
                     .error_message
                     .clone()
@@ -318,13 +311,13 @@ where
                     reason: final_retry_classification_reason,
                     attempts_used: tracker.attempts_used,
                 },
-                partial_summary: Some(summary_envelope.summary.summary.clone()),
+                partial_summary: Some(summary_envelope.summary_text().to_string()),
                 usage,
             }),
-            RunStatus::TimedOut => RunOutcome::TimedOut {
+            RunPhase::TimedOut => RunOutcome::TimedOut {
                 elapsed_secs: duration_ms / 1000,
             },
-            RunStatus::Cancelled => RunOutcome::Cancelled {
+            RunPhase::Cancelled => RunOutcome::Cancelled {
                 reason: tracker
                     .error_message
                     .clone()
@@ -356,10 +349,7 @@ where
             retry_attempts: tracker.retry_attempts,
             max_attempts: tracker.max_attempts,
             max_turns: tracker.max_turns,
-            retry_classification: tracker.retry_classification,
-            retry_classification_reason: tracker.retry_classification_reason,
             outcome,
-            summary: summary_envelope,
             stdout: execution.stdout,
             stderr: execution.stderr,
             compiled_context_markdown,
@@ -370,7 +360,7 @@ where
 
 #[derive(Debug)]
 struct AttemptAssessment {
-    status: RunStatus,
+    status: RunPhase,
     error_message: Option<String>,
     retryable: bool,
     retry_classification: RetryClassification,
@@ -384,9 +374,12 @@ fn assess_attempt_outcome(
 ) -> AttemptAssessment {
     match &execution.terminal_state {
         RunnerTerminalState::Succeeded => {
-            if matches!(summary_envelope.parse_status, SummaryParseStatus::Validated) {
+            if matches!(
+                summary_envelope.parse_status(),
+                SummaryParseStatus::Validated
+            ) {
                 AttemptAssessment {
-                    status: RunStatus::Succeeded,
+                    status: RunPhase::Succeeded,
                     error_message: None,
                     retryable: false,
                     retry_classification: RetryClassification::NonRetryable,
@@ -397,21 +390,21 @@ fn assess_attempt_outcome(
             } else {
                 AttemptAssessment {
                     status: if matches!(parse_policy, ParsePolicy::BestEffort) {
-                        RunStatus::Succeeded
+                        RunPhase::Succeeded
                     } else {
-                        RunStatus::Failed
+                        RunPhase::Failed
                     },
                     error_message: if matches!(parse_policy, ParsePolicy::BestEffort) {
                         None
                     } else {
                         Some(format!(
                             "structured summary parse status is {}",
-                            summary_envelope.parse_status
+                            summary_envelope.parse_status()
                         ))
                     },
                     retryable: !matches!(parse_policy, ParsePolicy::BestEffort)
                         && matches!(
-                            summary_envelope.parse_status,
+                            summary_envelope.parse_status(),
                             SummaryParseStatus::Invalid | SummaryParseStatus::Degraded
                         ),
                     retry_classification: if matches!(parse_policy, ParsePolicy::BestEffort) {
@@ -423,12 +416,12 @@ fn assess_attempt_outcome(
                         if matches!(parse_policy, ParsePolicy::BestEffort) {
                             format!(
                                 "parse_status={} accepted by best_effort policy",
-                                summary_envelope.parse_status
+                                summary_envelope.parse_status()
                             )
                         } else {
                             format!(
                                 "parse_status={} requires retry under strict policy",
-                                summary_envelope.parse_status
+                                summary_envelope.parse_status()
                             )
                         },
                     ),
@@ -438,7 +431,7 @@ fn assess_attempt_outcome(
         RunnerTerminalState::Failed { message } => {
             let classification = classify_error_message(message);
             AttemptAssessment {
-                status: RunStatus::Failed,
+                status: RunPhase::Failed,
                 error_message: Some(message.clone()),
                 retryable: classification.retryable,
                 retry_classification: classification.classification,
@@ -446,14 +439,14 @@ fn assess_attempt_outcome(
             }
         }
         RunnerTerminalState::TimedOut => AttemptAssessment {
-            status: RunStatus::TimedOut,
+            status: RunPhase::TimedOut,
             error_message: Some("runner exceeded timeout".to_string()),
             retryable: true,
             retry_classification: RetryClassification::Retryable,
             retry_classification_reason: Some("runner execution timed out".to_string()),
         },
         RunnerTerminalState::Cancelled => AttemptAssessment {
-            status: RunStatus::Cancelled,
+            status: RunPhase::Cancelled,
             error_message: Some("runner cancelled by request".to_string()),
             retryable: false,
             retry_classification: RetryClassification::NonRetryable,
@@ -1022,8 +1015,8 @@ struct RunTracker {
     handle_id: Uuid,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
-    status: RunStatus,
-    status_history: Vec<RunStatus>,
+    status: RunPhase,
+    status_history: Vec<RunPhase>,
     provider: Provider,
     agent_name: String,
     workspace_path: PathBuf,
@@ -1032,15 +1025,13 @@ struct RunTracker {
     retry_attempts: u32,
     max_attempts: u32,
     max_turns: Option<u32>,
-    retry_classification: RetryClassification,
-    retry_classification_reason: Option<String>,
 }
 
 impl RunTracker {
     fn new(spec: &crate::spec::AgentSpec, workspace_path: PathBuf) -> Self {
         let now = OffsetDateTime::now_utc();
         let handle_id = Uuid::now_v7();
-        let status = RunStatus::Received;
+        let status = RunPhase::Received;
         Self {
             handle_id,
             created_at: now,
@@ -1055,12 +1046,10 @@ impl RunTracker {
             retry_attempts: 0,
             max_attempts: 1,
             max_turns: None,
-            retry_classification: RetryClassification::Unknown,
-            retry_classification_reason: None,
         }
     }
 
-    fn transition(&mut self, status: RunStatus) {
+    fn transition(&mut self, status: RunPhase) {
         self.status = status.clone();
         self.updated_at = OffsetDateTime::now_utc();
         self.status_history.push(status);
@@ -1084,14 +1073,14 @@ mod tests {
     use crate::{
         runtime::{
             context::DefaultContextCompiler,
-            dispatcher::{Dispatcher, RunStatus},
-            outcome::RunOutcome,
+            dispatcher::{Dispatcher, RunPhase},
+            outcome::{RunOutcome, SuccessOutcome, UsageStats},
             runners::{
                 mock::{MockRunPlan, MockRunner},
                 AgentRunner, RunnerExecution, RunnerTerminalState,
             },
             summary::{
-                StructuredSummary, SummaryParseStatus, VerificationStatus, SUMMARY_END_SENTINEL,
+                SummaryEnvelope, SummaryParseStatus, VerificationStatus, SUMMARY_END_SENTINEL,
                 SUMMARY_START_SENTINEL,
             },
         },
@@ -1183,21 +1172,26 @@ mod tests {
         }
     }
 
-    fn success_summary() -> StructuredSummary {
-        StructuredSummary {
-            summary: "ok".to_string(),
-            key_findings: vec!["one".to_string()],
-            artifacts: Vec::new(),
-            open_questions: Vec::new(),
-            next_steps: Vec::new(),
-            exit_code: 0,
-            verification_status: VerificationStatus::Passed,
-            touched_files: vec!["src/parser.rs".to_string()],
-            plan_refs: vec!["step-1".to_string()],
-        }
+    fn success_summary() -> SummaryEnvelope {
+        SummaryEnvelope::from_success_outcome(
+            SuccessOutcome {
+                summary: "ok".to_string(),
+                key_findings: vec!["one".to_string()],
+                artifacts: Vec::new(),
+                open_questions: Vec::new(),
+                next_steps: Vec::new(),
+                verification: VerificationStatus::Passed,
+                usage: UsageStats::ZERO,
+                parse_status: SummaryParseStatus::Validated,
+                touched_files: vec!["src/parser.rs".to_string()],
+                plan_refs: vec!["step-1".to_string()],
+            },
+            0,
+            None,
+        )
     }
 
-    fn succeeded_execution(summary: StructuredSummary) -> RunnerExecution {
+    fn succeeded_execution(summary: SummaryEnvelope) -> RunnerExecution {
         let summary_json = serde_json::to_string_pretty(&summary).expect("serialize summary");
         RunnerExecution {
             terminal_state: RunnerTerminalState::Succeeded,
@@ -1275,19 +1269,19 @@ mod tests {
         spec
     }
 
-    fn assert_common_lifecycle(status_history: &[RunStatus]) {
+    fn assert_common_lifecycle(status_history: &[RunPhase]) {
         for status in [
-            RunStatus::Received,
-            RunStatus::Validating,
-            RunStatus::ProbingProvider,
-            RunStatus::PreparingWorkspace,
-            RunStatus::ResolvingMemory,
-            RunStatus::CompilingContext,
-            RunStatus::Launching,
-            RunStatus::Running,
-            RunStatus::Collecting,
-            RunStatus::ParsingSummary,
-            RunStatus::Finalizing,
+            RunPhase::Received,
+            RunPhase::Validating,
+            RunPhase::ProbingProvider,
+            RunPhase::PreparingWorkspace,
+            RunPhase::ResolvingMemory,
+            RunPhase::CompilingContext,
+            RunPhase::Launching,
+            RunPhase::Running,
+            RunPhase::Collecting,
+            RunPhase::ParsingSummary,
+            RunPhase::Finalizing,
         ] {
             assert!(
                 status_history.contains(&status),
@@ -1301,7 +1295,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
 
@@ -1315,13 +1309,15 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.status, RunStatus::Succeeded);
+        assert_eq!(result.status, RunPhase::Succeeded);
         assert_common_lifecycle(&result.status_history);
-        assert_eq!(
-            result.summary.summary.verification_status,
-            VerificationStatus::Passed
-        );
-        assert_eq!(result.summary.parse_status, SummaryParseStatus::Validated);
+        match &result.outcome {
+            RunOutcome::Succeeded(success) => {
+                assert_eq!(success.verification, VerificationStatus::Passed);
+                assert_eq!(success.parse_status, SummaryParseStatus::Validated);
+            }
+            other => panic!("expected succeeded outcome, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1329,7 +1325,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
 
@@ -1418,8 +1414,13 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.status, RunStatus::Succeeded);
-        assert_eq!(result.summary.parse_status, SummaryParseStatus::Degraded);
+        assert_eq!(result.status, RunPhase::Succeeded);
+        match &result.outcome {
+            RunOutcome::Succeeded(success) => {
+                assert_eq!(success.parse_status, SummaryParseStatus::Degraded);
+            }
+            other => panic!("expected succeeded outcome, got {other:?}"),
+        }
         assert_eq!(result.error_message, None);
     }
 
@@ -1446,12 +1447,20 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.status, RunStatus::Failed);
-        assert_eq!(
-            result.retry_classification,
-            super::RetryClassification::Retryable
-        );
-        assert_eq!(result.summary.parse_status, SummaryParseStatus::Degraded);
+        assert_eq!(result.status, RunPhase::Failed);
+        match &result.outcome {
+            RunOutcome::Failed(failure) => {
+                assert_eq!(
+                    failure.retry.classification,
+                    super::RetryClassification::Retryable
+                );
+                assert!(failure
+                    .partial_summary
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty()));
+            }
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
         assert!(result
             .error_message
             .as_deref()
@@ -1479,17 +1488,21 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.status, RunStatus::Failed);
+        assert_eq!(result.status, RunPhase::Failed);
         assert_common_lifecycle(&result.status_history);
-        assert_eq!(
-            result.retry_classification,
-            super::RetryClassification::Unknown
-        );
-        assert_eq!(result.summary.parse_status, SummaryParseStatus::Degraded);
-        assert_eq!(
-            result.summary.summary.verification_status,
-            VerificationStatus::NotRun
-        );
+        match &result.outcome {
+            RunOutcome::Failed(failure) => {
+                assert_eq!(
+                    failure.retry.classification,
+                    super::RetryClassification::Unknown
+                );
+                assert!(failure
+                    .partial_summary
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty()));
+            }
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
         assert_eq!(result.error_message.as_deref(), Some("mock failure"));
     }
 
@@ -1510,11 +1523,8 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.status, RunStatus::TimedOut);
-        assert_eq!(
-            result.retry_classification,
-            super::RetryClassification::Retryable
-        );
+        assert_eq!(result.status, RunPhase::TimedOut);
+        assert!(matches!(result.outcome, RunOutcome::TimedOut { .. }));
         assert_common_lifecycle(&result.status_history);
     }
 
@@ -1535,11 +1545,8 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.status, RunStatus::Cancelled);
-        assert_eq!(
-            result.retry_classification,
-            super::RetryClassification::NonRetryable
-        );
+        assert_eq!(result.status, RunPhase::Cancelled);
+        assert!(matches!(result.outcome, RunOutcome::Cancelled { .. }));
         assert_common_lifecycle(&result.status_history);
     }
 
@@ -1574,15 +1581,12 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.status, RunStatus::Succeeded);
+        assert_eq!(result.status, RunPhase::Succeeded);
         assert_eq!(result.attempts_used, 2);
         assert_eq!(result.retry_attempts, 1);
         assert_eq!(result.max_attempts, 2);
         assert_eq!(result.max_turns, Some(2));
-        assert_eq!(
-            result.retry_classification,
-            super::RetryClassification::NonRetryable
-        );
+        assert!(matches!(result.outcome, RunOutcome::Succeeded(_)));
         assert_eq!(result.error_message, None);
     }
 
@@ -1617,15 +1621,20 @@ mod tests {
             .await
             .expect("dispatch run");
 
-        assert_eq!(result.status, RunStatus::Failed);
+        assert_eq!(result.status, RunPhase::Failed);
         assert_eq!(result.attempts_used, 1);
         assert_eq!(result.retry_attempts, 0);
         assert_eq!(result.max_attempts, 3);
         assert_eq!(result.max_turns, Some(1));
-        assert_eq!(
-            result.retry_classification,
-            super::RetryClassification::Retryable
-        );
+        match &result.outcome {
+            RunOutcome::Failed(failure) => {
+                assert_eq!(
+                    failure.retry.classification,
+                    super::RetryClassification::Retryable
+                );
+            }
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
         assert!(result
             .error_message
             .as_deref()
@@ -1638,7 +1647,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let mut task_spec = sample_task_spec();
@@ -1673,7 +1682,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let mut task_spec = sample_task_spec();
@@ -1695,7 +1704,7 @@ mod tests {
             )
             .await
             .expect("dispatch should pass with plan");
-        assert_eq!(result.status, RunStatus::Succeeded);
+        assert_eq!(result.status, RunPhase::Succeeded);
     }
 
     #[tokio::test]
@@ -1704,7 +1713,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let mut task_spec = sample_task_spec();
@@ -1752,7 +1761,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let mut task_spec = sample_task_spec();
@@ -1789,7 +1798,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let mut task_spec = sample_task_spec();
@@ -1826,7 +1835,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let mut task_spec = sample_task_spec();
@@ -1859,7 +1868,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let task_spec = sample_task_spec();
@@ -1887,7 +1896,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let task_spec = sample_task_spec();
@@ -1919,7 +1928,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let task_spec = sample_task_spec();
@@ -1930,7 +1939,7 @@ mod tests {
             .run(&spec, &task_spec, &hints, ResolvedMemory::default())
             .await
             .expect("readonly+gitworktree should pass in research stage");
-        assert_eq!(result.status, RunStatus::Succeeded);
+        assert_eq!(result.status, RunPhase::Succeeded);
     }
 
     #[tokio::test]
@@ -1942,7 +1951,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let task_spec = sample_task_spec();
@@ -1965,7 +1974,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let task_spec = sample_task_spec();
@@ -1985,7 +1994,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let task_spec = sample_task_spec();
@@ -2009,7 +2018,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let task_spec = sample_task_spec();
@@ -2025,7 +2034,7 @@ mod tests {
             .run(&spec, &task_spec, &hints, ResolvedMemory::default())
             .await
             .expect("plan stage should allow research agent profile");
-        assert_eq!(result.status, RunStatus::Succeeded);
+        assert_eq!(result.status, RunPhase::Succeeded);
     }
 
     #[tokio::test]
@@ -2033,7 +2042,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let task_spec = sample_task_spec();
@@ -2057,7 +2066,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let task_spec = sample_task_spec();
@@ -2073,7 +2082,7 @@ mod tests {
             .run(&spec, &task_spec, &hints, ResolvedMemory::default())
             .await
             .expect("review stage should allow reviewer agent");
-        assert_eq!(result.status, RunStatus::Succeeded);
+        assert_eq!(result.status, RunPhase::Succeeded);
     }
 
     #[tokio::test]
@@ -2102,7 +2111,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let mut task_spec = sample_task_spec();
@@ -2147,7 +2156,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             MockRunner::new(MockRunPlan::Succeeded {
-                summary: success_summary(),
+                envelope: success_summary(),
             }),
         );
         let mut task_spec = sample_task_spec();
@@ -2164,7 +2173,7 @@ mod tests {
             .run(&spec, &task_spec, &hints, ResolvedMemory::default())
             .await
             .expect("parent summary style evidence should satisfy dual review");
-        assert_eq!(result.status, RunStatus::Succeeded);
+        assert_eq!(result.status, RunPhase::Succeeded);
     }
 
     #[test]

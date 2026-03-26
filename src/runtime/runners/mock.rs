@@ -1,7 +1,11 @@
 use crate::{
     error::Result,
+    runtime::outcome::{SuccessOutcome, UsageStats},
     runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
-    runtime::summary::{StructuredSummary, SUMMARY_END_SENTINEL, SUMMARY_START_SENTINEL},
+    runtime::summary::{
+        SummaryEnvelope, SummaryParseStatus, VerificationStatus, SUMMARY_END_SENTINEL,
+        SUMMARY_START_SENTINEL,
+    },
     spec::AgentSpec,
     types::{CompiledContext, TaskSpec, WorkflowHints},
 };
@@ -9,7 +13,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum MockRunPlan {
     Succeeded {
-        summary: StructuredSummary,
+        envelope: SummaryEnvelope,
     },
     SucceededFromRequest,
     Failed {
@@ -42,8 +46,8 @@ impl AgentRunner for MockRunner {
         _compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
         let execution = match &self.plan {
-            MockRunPlan::Succeeded { summary } => {
-                let summary_json = serde_json::to_string_pretty(summary)?;
+            MockRunPlan::Succeeded { envelope } => {
+                let summary_json = serde_json::to_string_pretty(envelope)?;
                 RunnerExecution {
                     terminal_state: RunnerTerminalState::Succeeded,
                     stdout: format!(
@@ -55,7 +59,7 @@ impl AgentRunner for MockRunner {
             }
             MockRunPlan::SucceededFromRequest => {
                 let summary_json = serde_json::to_string_pretty(
-                    &build_mock_summary_from_task_spec(spec, task_spec),
+                    &build_mock_envelope_from_task_spec(spec, task_spec),
                 )?;
                 RunnerExecution {
                     terminal_state: RunnerTerminalState::Succeeded,
@@ -92,14 +96,14 @@ impl AgentRunner for MockRunner {
     }
 }
 
-fn build_mock_summary_from_task_spec(spec: &AgentSpec, task_spec: &TaskSpec) -> StructuredSummary {
+fn build_mock_success_outcome(spec: &AgentSpec, task_spec: &TaskSpec) -> SuccessOutcome {
     let touched_files = task_spec
         .selected_files
         .iter()
         .map(|file| file.path.display().to_string())
         .collect::<Vec<_>>();
 
-    StructuredSummary {
+    SuccessOutcome {
         summary: format!("Mock run completed for task: {}", task_spec.task),
         key_findings: vec![format!(
             "Agent `{}` executed through dispatcher mock runner.",
@@ -110,11 +114,16 @@ fn build_mock_summary_from_task_spec(spec: &AgentSpec, task_spec: &TaskSpec) -> 
         next_steps: vec![
             "Replace mock runner with provider runner for production use.".to_string(),
         ],
-        exit_code: 0,
-        verification_status: crate::runtime::summary::VerificationStatus::Passed,
+        verification: VerificationStatus::Passed,
+        usage: UsageStats::ZERO,
+        parse_status: SummaryParseStatus::Validated,
         touched_files,
         plan_refs: Vec::new(),
     }
+}
+
+fn build_mock_envelope_from_task_spec(spec: &AgentSpec, task_spec: &TaskSpec) -> SummaryEnvelope {
+    SummaryEnvelope::from_success_outcome(build_mock_success_outcome(spec, task_spec), 0, None)
 }
 
 #[cfg(test)]
@@ -123,9 +132,10 @@ mod tests {
 
     use crate::{
         runtime::{
+            outcome::{SuccessOutcome, UsageStats},
             runners::mock::{MockRunPlan, MockRunner},
             runners::{AgentRunner, RunnerTerminalState},
-            summary::{StructuredSummary, VerificationStatus},
+            summary::{SummaryEnvelope, SummaryParseStatus, VerificationStatus},
         },
         spec::{
             core::{AgentSpecCore, Provider},
@@ -172,17 +182,22 @@ mod tests {
     #[tokio::test]
     async fn mock_runner_success_wraps_summary_json() {
         let runner = MockRunner::new(MockRunPlan::Succeeded {
-            summary: StructuredSummary {
-                summary: "ok".to_string(),
-                key_findings: vec!["a".to_string()],
-                artifacts: Vec::new(),
-                open_questions: Vec::new(),
-                next_steps: Vec::new(),
-                exit_code: 0,
-                verification_status: VerificationStatus::Passed,
-                touched_files: Vec::new(),
-                plan_refs: Vec::new(),
-            },
+            envelope: SummaryEnvelope::from_success_outcome(
+                SuccessOutcome {
+                    summary: "ok".to_string(),
+                    key_findings: vec!["a".to_string()],
+                    artifacts: Vec::new(),
+                    open_questions: Vec::new(),
+                    next_steps: Vec::new(),
+                    verification: VerificationStatus::Passed,
+                    usage: UsageStats::ZERO,
+                    parse_status: SummaryParseStatus::Validated,
+                    touched_files: Vec::new(),
+                    plan_refs: Vec::new(),
+                },
+                0,
+                None,
+            ),
         });
 
         let execution = runner

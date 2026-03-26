@@ -3,10 +3,6 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use crate::{
     mcp::state::PolicyValueSource,
     probe::{ProbeStatus, ProviderProbe},
-    runtime::summary::{
-        StructuredSummary, SummaryEnvelope, SummaryParseStatus, VerificationStatus,
-        SUMMARY_CONTRACT_VERSION,
-    },
     spec::{
         runtime_policy::{BackgroundPreference, SpawnPolicy},
         AgentSpec, Provider,
@@ -78,44 +74,6 @@ pub(crate) fn build_capability_notes(probe: &ProviderProbe) -> Vec<String> {
         }
     }
     notes
-}
-
-pub(crate) fn failed_summary(message: String) -> SummaryEnvelope {
-    SummaryEnvelope {
-        contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
-        parse_status: SummaryParseStatus::Invalid,
-        summary: StructuredSummary {
-            summary: "Run failed before structured output was collected.".to_string(),
-            key_findings: vec![message.clone()],
-            artifacts: Vec::new(),
-            open_questions: vec!["Inspect server logs for failure details.".to_string()],
-            next_steps: vec!["Retry the run with corrected configuration.".to_string()],
-            exit_code: 1,
-            verification_status: VerificationStatus::NotRun,
-            touched_files: Vec::new(),
-            plan_refs: Vec::new(),
-        },
-        raw_fallback_text: Some(message),
-    }
-}
-
-pub(crate) fn cancelled_summary(task: String) -> SummaryEnvelope {
-    SummaryEnvelope {
-        contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
-        parse_status: SummaryParseStatus::Degraded,
-        summary: StructuredSummary {
-            summary: format!("Run cancelled before completion for task: {task}"),
-            key_findings: vec!["User requested cancellation".to_string()],
-            artifacts: Vec::new(),
-            open_questions: Vec::new(),
-            next_steps: vec!["Re-run the task if cancellation was accidental.".to_string()],
-            exit_code: 130,
-            verification_status: VerificationStatus::NotRun,
-            touched_files: Vec::new(),
-            plan_refs: Vec::new(),
-        },
-        raw_fallback_text: None,
-    }
 }
 
 pub(crate) fn format_time(value: OffsetDateTime) -> String {

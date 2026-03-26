@@ -8,8 +8,9 @@ use crate::{
         artifacts::sanitize_relative_artifact_path, dto::ArtifactOutput, state::WorkspaceRecord,
     },
     runtime::{
-        dispatcher::RunStatus,
-        summary::{ArtifactKind, SummaryEnvelope},
+        dispatcher::RunPhase,
+        outcome::{RunOutcome, SuccessOutcome},
+        summary::ArtifactKind,
     },
     spec::AgentSpec,
     types::{TaskSpec, WorkflowHints},
@@ -26,10 +27,10 @@ pub(crate) struct ArchiveHookInput<'a> {
     pub spec: &'a AgentSpec,
     pub task_spec: &'a TaskSpec,
     pub hints: &'a WorkflowHints,
-    pub run_status: &'a RunStatus,
+    pub run_status: &'a RunPhase,
     pub handle_id: &'a str,
     pub workspace: &'a WorkspaceRecord,
-    pub summary: &'a SummaryEnvelope,
+    pub outcome: &'a RunOutcome,
 }
 
 pub(crate) fn apply_archive_hook(
@@ -43,7 +44,7 @@ pub(crate) fn apply_archive_hook(
         run_status,
         handle_id,
         workspace,
-        summary,
+        outcome,
     } = input;
     let mut warnings = Vec::new();
     if !should_run_archive_hook(spec, hints, run_status) {
@@ -51,6 +52,9 @@ pub(crate) fn apply_archive_hook(
     }
 
     let Some(workflow) = spec.workflow.as_ref() else {
+        return;
+    };
+    let RunOutcome::Succeeded(success) = outcome else {
         return;
     };
 
@@ -81,7 +85,7 @@ pub(crate) fn apply_archive_hook(
             &format!("{date}-{slug}-{handle_short}-final-summary.md"),
         );
         let final_summary =
-            build_final_summary_markdown(spec, task_spec, hints, summary, handle_id, &date);
+            build_final_summary_markdown(spec, task_spec, hints, success, handle_id, &date);
         if let Err(err) =
             write_repo_text_file(&workspace.source_path, &final_summary_rel, &final_summary)
         {
@@ -101,11 +105,11 @@ pub(crate) fn apply_archive_hook(
     }
 
     let should_write_decision_note = workflow.knowledge_capture.write_decision_note
-        && should_write_decision_note(&workflow.knowledge_capture, task_spec, summary);
+        && should_write_decision_note(&workflow.knowledge_capture, task_spec, success);
     if should_write_decision_note {
         let decision_rel = format!("docs/decisions/{date}-{slug}-{handle_short}-decision-note.md");
         let decision_note =
-            build_decision_note_markdown(spec, task_spec, summary, handle_id, &date);
+            build_decision_note_markdown(spec, task_spec, success, handle_id, &date);
         if let Err(err) =
             write_repo_text_file(&workspace.source_path, &decision_rel, &decision_note)
         {
@@ -133,10 +137,10 @@ pub(crate) fn apply_archive_hook(
             provider: spec.core.provider.as_str().to_string(),
             stage: hints.stage.clone().unwrap_or_else(|| "archive".to_string()),
             task: task_spec.task.clone(),
-            parse_status: format!("{}", summary.parse_status),
-            verification_status: format!("{}", summary.summary.verification_status),
-            touched_files: summary.summary.touched_files.clone(),
-            plan_refs: summary.summary.plan_refs.clone(),
+            parse_status: format!("{}", success.parse_status),
+            verification_status: format!("{}", success.verification),
+            touched_files: success.touched_files.clone(),
+            plan_refs: success.plan_refs.clone(),
             final_summary_path: final_summary_path.clone(),
             decision_note_path: decision_note_path.clone(),
         };
@@ -162,12 +166,8 @@ pub(crate) fn apply_archive_hook(
     }
 }
 
-fn should_run_archive_hook(
-    spec: &AgentSpec,
-    hints: &WorkflowHints,
-    run_status: &RunStatus,
-) -> bool {
-    if !matches!(run_status, RunStatus::Succeeded) {
+fn should_run_archive_hook(spec: &AgentSpec, hints: &WorkflowHints, run_status: &RunPhase) -> bool {
+    if !matches!(run_status, RunPhase::Succeeded) {
         return false;
     }
 
@@ -187,11 +187,11 @@ fn should_run_archive_hook(
 fn should_write_decision_note(
     policy: &crate::spec::workflow::KnowledgeCapturePolicy,
     task_spec: &TaskSpec,
-    summary: &SummaryEnvelope,
+    success: &SuccessOutcome,
 ) -> bool {
     if policy
         .trigger_if_touched_files_gt
-        .is_some_and(|threshold| summary.summary.touched_files.len() > threshold as usize)
+        .is_some_and(|threshold| success.touched_files.len() > threshold as usize)
     {
         return true;
     }
@@ -203,15 +203,14 @@ fn should_write_decision_note(
     );
     let summary_text = format!(
         "{}\n{}\n{}",
-        summary.summary.summary,
-        summary.summary.key_findings.join("\n"),
-        summary.summary.next_steps.join("\n")
+        success.summary,
+        success.key_findings.join("\n"),
+        success.next_steps.join("\n")
     );
     let combined_text = format!("{task_text}\n{summary_text}").to_lowercase();
 
     if policy.trigger_if_new_config
-        && summary
-            .summary
+        && success
             .touched_files
             .iter()
             .any(|file| is_config_or_schema_path(file))
@@ -277,24 +276,24 @@ fn build_final_summary_markdown(
     spec: &AgentSpec,
     task_spec: &TaskSpec,
     hints: &WorkflowHints,
-    summary: &SummaryEnvelope,
+    success: &SuccessOutcome,
     handle_id: &str,
     date: &str,
 ) -> String {
-    let touched_files = markdown_list_or_empty(&summary.summary.touched_files);
-    let plan_refs = markdown_list_or_empty(&summary.summary.plan_refs);
-    let key_findings = markdown_list_or_empty(&summary.summary.key_findings);
-    let open_questions = markdown_list_or_empty(&summary.summary.open_questions);
-    let next_steps = markdown_list_or_empty(&summary.summary.next_steps);
+    let touched_files = markdown_list_or_empty(&success.touched_files);
+    let plan_refs = markdown_list_or_empty(&success.plan_refs);
+    let key_findings = markdown_list_or_empty(&success.key_findings);
+    let open_questions = markdown_list_or_empty(&success.open_questions);
+    let next_steps = markdown_list_or_empty(&success.next_steps);
     format!(
         "# Final Summary\n\nDate: {date}\n\nHandle: `{handle_id}`\n\nAgent: `{agent}` ({provider})\n\nStage: `{stage}`\n\nTask: {task}\n\nVerification: `{verification}`\n\nParse status: `{parse_status}`\n\nSummary:\n\n{summary_text}\n\n## Key findings\n\n{key_findings}\n\n## Touched files\n\n{touched_files}\n\n## Plan refs\n\n{plan_refs}\n\n## Open questions\n\n{open_questions}\n\n## Next steps\n\n{next_steps}\n",
         agent = spec.core.name,
         provider = spec.core.provider.as_str(),
         stage = hints.stage.as_deref().unwrap_or("archive"),
         task = task_spec.task,
-        verification = summary.summary.verification_status,
-        parse_status = summary.parse_status,
-        summary_text = summary.summary.summary,
+        verification = success.verification,
+        parse_status = success.parse_status,
+        summary_text = success.summary,
         key_findings = key_findings,
         touched_files = touched_files,
         plan_refs = plan_refs,
@@ -306,21 +305,21 @@ fn build_final_summary_markdown(
 fn build_decision_note_markdown(
     spec: &AgentSpec,
     task_spec: &TaskSpec,
-    summary: &SummaryEnvelope,
+    success: &SuccessOutcome,
     handle_id: &str,
     date: &str,
 ) -> String {
-    let key_findings = markdown_list_or_empty(&summary.summary.key_findings);
-    let touched_files = markdown_list_or_empty(&summary.summary.touched_files);
+    let key_findings = markdown_list_or_empty(&success.key_findings);
+    let touched_files = markdown_list_or_empty(&success.touched_files);
     format!(
         "# Decision Note\n\nDate: {date}\n\nHandle: `{handle_id}`\n\nAgent: `{agent}` ({provider})\n\nContext:\n\n{task}\n\nDecision:\n\n{summary_text}\n\nEvidence:\n\n{key_findings}\n\nChanged surface:\n\n{touched_files}\n\nFollow-up:\n\n{next_steps}\n",
         agent = spec.core.name,
         provider = spec.core.provider.as_str(),
         task = task_spec.task,
-        summary_text = summary.summary.summary,
+        summary_text = success.summary,
         key_findings = key_findings,
         touched_files = touched_files,
-        next_steps = markdown_list_or_empty(&summary.summary.next_steps),
+        next_steps = markdown_list_or_empty(&success.next_steps),
     )
 }
 
@@ -515,8 +514,9 @@ mod tests {
             state::WorkspaceRecord,
         },
         runtime::{
-            dispatcher::RunStatus,
-            summary::{StructuredSummary, SummaryEnvelope, SummaryParseStatus, VerificationStatus},
+            dispatcher::RunPhase,
+            outcome::{RunOutcome, SuccessOutcome, UsageStats},
+            summary::{SummaryParseStatus, VerificationStatus},
         },
         spec::{
             core::{AgentSpecCore, Provider},
@@ -583,31 +583,27 @@ mod tests {
         }
     }
 
-    fn sample_summary() -> SummaryEnvelope {
-        SummaryEnvelope {
-            contract_version: "mcp-subagent.summary.v2".to_string(),
+    fn sample_outcome() -> RunOutcome {
+        RunOutcome::Succeeded(SuccessOutcome {
+            summary: "Implemented parser fix and config migration".to_string(),
+            key_findings: vec![
+                "Added migration for config key rename".to_string(),
+                "Fixed parser edge case for empty token".to_string(),
+            ],
+            artifacts: Vec::new(),
+            open_questions: Vec::new(),
+            next_steps: vec!["run full integration tests".to_string()],
+            verification: VerificationStatus::Passed,
+            usage: UsageStats::ZERO,
             parse_status: SummaryParseStatus::Validated,
-            summary: StructuredSummary {
-                summary: "Implemented parser fix and config migration".to_string(),
-                key_findings: vec![
-                    "Added migration for config key rename".to_string(),
-                    "Fixed parser edge case for empty token".to_string(),
-                ],
-                artifacts: Vec::new(),
-                open_questions: Vec::new(),
-                next_steps: vec!["run full integration tests".to_string()],
-                exit_code: 0,
-                verification_status: VerificationStatus::Passed,
-                touched_files: vec![
-                    "src/parser.rs".to_string(),
-                    "src/config.rs".to_string(),
-                    "config/default.toml".to_string(),
-                    "docs/migration.md".to_string(),
-                ],
-                plan_refs: vec!["step-1".to_string(), "step-2".to_string()],
-            },
-            raw_fallback_text: None,
-        }
+            touched_files: vec![
+                "src/parser.rs".to_string(),
+                "src/config.rs".to_string(),
+                "config/default.toml".to_string(),
+                "docs/migration.md".to_string(),
+            ],
+            plan_refs: vec!["step-1".to_string(), "step-2".to_string()],
+        })
     }
 
     #[test]
@@ -627,7 +623,7 @@ mod tests {
             lock_key: None,
             lock_keys: Vec::new(),
         };
-        let summary = sample_summary();
+        let outcome = sample_outcome();
         let mut artifact_index: Vec<ArtifactOutput> = Vec::new();
         let mut artifacts = HashMap::new();
 
@@ -640,10 +636,10 @@ mod tests {
                 spec: &spec,
                 task_spec: &task_spec,
                 hints: &hints,
-                run_status: &RunStatus::Succeeded,
+                run_status: &RunPhase::Succeeded,
                 handle_id: &handle_id,
                 workspace: &workspace,
-                summary: &summary,
+                outcome: &outcome,
             },
             &mut collector,
         );
@@ -701,7 +697,7 @@ mod tests {
             lock_key: None,
             lock_keys: Vec::new(),
         };
-        let summary = sample_summary();
+        let outcome = sample_outcome();
         let mut artifact_index: Vec<ArtifactOutput> = Vec::new();
         let mut artifacts = HashMap::new();
 
@@ -714,10 +710,10 @@ mod tests {
                 spec: &spec,
                 task_spec: &task_spec,
                 hints: &hints,
-                run_status: &RunStatus::Succeeded,
+                run_status: &RunPhase::Succeeded,
                 handle_id: "run-1",
                 workspace: &workspace,
-                summary: &summary,
+                outcome: &outcome,
             },
             &mut collector,
         );
@@ -742,7 +738,7 @@ mod tests {
             lock_key: None,
             lock_keys: Vec::new(),
         };
-        let summary = sample_summary();
+        let outcome = sample_outcome();
         let mut artifact_index: Vec<ArtifactOutput> = Vec::new();
         let mut artifacts = HashMap::new();
 
@@ -755,10 +751,10 @@ mod tests {
                 spec: &spec,
                 task_spec: &task_spec,
                 hints: &hints,
-                run_status: &RunStatus::Succeeded,
+                run_status: &RunPhase::Succeeded,
                 handle_id: "run-1",
                 workspace: &workspace,
-                summary: &summary,
+                outcome: &outcome,
             },
             &mut collector,
         );

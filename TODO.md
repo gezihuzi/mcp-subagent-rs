@@ -3147,3 +3147,234 @@
 - 已验证：
   - `cargo test --workspace` 通过（194 + 64 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-120 Refactor-TaskData-HardCut-PersistenceEventFallbackRemoval (Completed 2026-03-26)
+
+任务：继续按“无兼容硬切”清理 `persistence.rs`，删除终态持久化时自动补写“legacy 事件”的兜底逻辑，仅保留运行期 `events.jsonl` 实时写入。  
+验收标准：
+
+1. `persist_run_record` 不再在终态调用 `build_run_events/write_events_file_if_missing` 生成补写事件。
+2. 删除 `RunEventRecord::legacy` 与相关 `legacy` 事件构造路径，统一由 `append_run_event` 生成 runtime 事件记录。
+3. persistence 测试文案不再出现 `legacy task` 等兼容语义命名。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/mcp/persistence.rs`：
+  - 删除终态补写事件分支（`build_run_events/write_events_file_if_missing`）；
+  - 删除 `RunEventRecord::legacy` 与整套补写事件构建函数；
+  - 新增 `RunEventRecord::runtime`，`append_run_event` 统一使用该构造器。
+- 已清理 persistence 测试命名：
+  - `loads_persisted_run_json_with_required_fields` 用例中的 `"legacy task"` 改为 `"sample task"`。
+- 已验证：
+  - `cargo test --workspace` 通过（194 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-121 Refactor-TaskData-HardCut-SummaryEnvelopeOnly (Completed 2026-03-26)
+
+任务：继续按“无兼容硬切”收口 summary 解析链路，关闭对旧 `StructuredSummary` 直读和任意 JSON payload 包装，强制仅接受 `SummaryEnvelope` 合约。  
+验收标准：
+
+1. `src/runtime/summary.rs::parse_json_candidate` 仅解析 `SummaryEnvelope`，不再接受裸 `StructuredSummary`。
+2. 移除“任意 JSON payload 自动 wrap 成摘要”的兼容逻辑。
+3. mock/dispatcher 测试产出的摘要 JSON 同步升级为 `SummaryEnvelope`，不依赖旧格式。
+4. 新增或更新测试覆盖“非合约 JSON 进入 Invalid”行为。
+5. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已升级 `src/runtime/summary.rs`：
+  - `parse_json_candidate` 仅保留 `SummaryEnvelope` 解析；
+  - 删除 `StructuredSummary` 直读分支和 payload wrap 兼容分支；
+  - 更新测试：`marks_invalid_when_json_payload_inside_sentinel_is_not_envelope_contract`。
+- 已升级 `src/runtime/runners/mock.rs`：
+  - mock 成功分支输出由裸 `StructuredSummary` 改为 `SummaryEnvelope(Validated)`。
+- 已升级 `src/runtime/dispatcher.rs` 测试 helper：
+  - `succeeded_execution` 改为写入 `SummaryEnvelope` JSON（非旧结构）。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-122 Refactor-TaskData-HardCut-SummarySentinelRegressionFix (Completed 2026-03-26)
+
+任务：修复 SummaryEnvelope 硬切后的测试回归，使 SuccessOutcome 转换测试与“只有 sentinel 包裹的 envelope 才算 Validated”策略一致。  
+验收标准：
+
+1. `converts_parsed_envelope_to_success_outcome` 使用带 sentinel 的 envelope 输入，不再依赖裸 JSON 直读。
+2. 该测试断言继续验证 `SuccessOutcome` 字段映射（summary/parse_status/verification/touched_files/usage）。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/runtime/summary.rs::converts_parsed_envelope_to_success_outcome`：
+  - 输入改为 `SUMMARY_START_SENTINEL ... SUMMARY_END_SENTINEL` 包裹的 `SummaryEnvelope` JSON；
+  - 保持成功映射断言不变，确保仍验证转换逻辑本身。
+- 已验证：
+  - `cargo test converts_parsed_envelope_to_success_outcome -- --nocapture` 通过（1 passed）。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-123 Refactor-TaskData-HardCut-RetrySourceUnificationAndStrictPersistedState (Completed 2026-03-26)
+
+任务：继续按“无兼容硬切”收口 run 状态模型，移除 `retry_classification` 的 state 冗余副本，统一以 `RunOutcome::Failed.retry` 为唯一来源；并收紧 `run.json` 的 state 读取，不再做旧字段兜底。  
+验收标准：
+
+1. `src/mcp/state.rs` 的 `RunRecord/PersistedRunState` 不再包含 `retry_classification` 字段。
+2. `src/mcp/tools.rs` 与 `src/main.rs` 的 retry 分类解析统一从 `RunOutcome::Failed.retry` 读取，不再回退 state 字段。
+3. `src/mcp/persistence.rs` 读取 `state.created_at/status_history` 不再做 legacy fallback（`created_at` 必填，`status_history` 直接使用持久化值）。
+4. 相关测试完成同步，`cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/mcp/state.rs`：
+  - 删除 `RetryClassificationRecord`；
+  - `RunRecord/PersistedRunState` 移除 `retry_classification` 字段；
+  - `PersistedRunState.created_at` 改为必填时间戳（非 `Option`）。
+- 已更新 `src/mcp/tools.rs`：
+  - 删除 state 侧 retry 映射写回逻辑；
+  - `resolve_retry_classification` 仅从 `RunOutcome::Failed.retry` 读取。
+- 已更新 `src/mcp/persistence.rs`：
+  - 删除 `created_at/status_history` 兼容兜底逻辑；
+  - 删除 `retry_classification` 的落盘/回读路径与测试样例字段。
+- 已更新 `src/main.rs`：
+  - 删除 `StoredRunState.retry_classification` 与相关兜底分支；
+  - `resolve_retry_classification` 仅依赖 failed outcome；
+  - 测试改为断言 failed outcome 路径。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-124 Refactor-TaskData-HardCut-StateSnapshotNamingCleanup (Completed 2026-03-26)
+
+任务：继续按“无兼容硬切”收口状态层命名，移除迁移期 `*Record` 命名残留，统一为快照语义（`PolicySnapshot`、`PersistedRun`），并同步持久化/消费链路字段名。  
+验收标准：
+
+1. `src/mcp/state.rs` 中 `ExecutionPolicyRecord` 重命名为 `PolicySnapshot`。
+2. `src/mcp/state.rs` 中 `PersistedRunRecord` 重命名为 `PersistedRun`，并保持落盘序列化结构正确。
+3. `RunRecord` 与 `PersistedRunState` 的 `execution_policy` 字段改为 `policy`，`server/tools/persistence/main` 全链路同步。
+4. server/persistence 相关测试断言同步到 `state.policy`。
+5. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/mcp/state.rs`：
+  - `ExecutionPolicyRecord -> PolicySnapshot`；
+  - `PersistedRunRecord -> PersistedRun`；
+  - `RunRecord/PersistedRunState` 字段 `execution_policy -> policy`；
+  - `apply_execution_policy_outcome` 入参类型同步为 `Option<PolicySnapshot>`。
+- 已更新 `src/mcp/persistence.rs`：
+  - 读写模型切换为 `PersistedRun`；
+  - 回读赋值从 `state.execution_policy` 改为 `state.policy`；
+  - 测试样例 JSON 字段同步改为 `"policy"`。
+- 已更新 `src/mcp/server.rs` / `src/mcp/tools.rs` / `src/main.rs`：
+  - 类型引用与字段读取统一切换到 `PolicySnapshot`/`policy`；
+  - server 落盘断言改为 `run_obj["state"]["policy"]`。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-125 Refactor-TaskData-HardCut-DispatchEnvelopeRemoval (Completed 2026-03-26)
+
+任务：移除 `mcp/service` 的迁移期包裹命名 `DispatchEnvelope`，改为中性结果载体，避免“旧 dispatch envelope”概念继续泄漏到 tools 链路。  
+验收标准：
+
+1. `src/mcp/service.rs` 不再定义/返回 `DispatchEnvelope`。
+2. `run_dispatch` 返回类型改为新命名结构，并保持字段语义不变（result/workspace/memory_resolution/workspace_cleanup）。
+3. `src/mcp/tools.rs` 的同步/异步执行路径完成新类型解构替换。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/mcp/service.rs`：
+  - `DispatchEnvelope` 重命名为 `RunDispatchData`；
+  - `run_dispatch` 返回类型切换到 `RunDispatchData`。
+- 已更新 `src/mcp/tools.rs`：
+  - `run_agent` 与 `spawn_agent` 路径中的解构类型从 `DispatchEnvelope` 同步改为 `RunDispatchData`。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-126 Refactor-TaskData-HardCut-MainRunJsonStrictDeser (Completed 2026-03-26)
+
+任务：继续执行“旧数据不支持”硬切，将 `main.rs` 对 `run.json` 的反序列化从宽松默认切换为严格字段要求，并同步测试夹具到新结构。  
+验收标准：
+
+1. `StoredTaskSpec/StoredRunState/StoredRunRecord` 不再使用 `#[serde(default)]` 进行整结构兜底反序列化。
+2. `watch` 与全局事件快照相关测试夹具不再写旧扁平 `run.json`（仅 `status/updated_at`），改为新结构 `task_spec + state + outcome + artifact_index + spec_snapshot`。
+3. 全量测试和 clippy 在严格模式下通过。
+完成记录：
+
+- 已更新 `src/main.rs`：
+  - 移除 `StoredTaskSpec/StoredRunState/StoredRunRecord` 的 `#[serde(default)]` 结构级兜底。
+  - 更新测试 `watch_run_timeout_keeps_existing_timeout_semantics` 与
+    `collect_run_event_snapshots_loads_all_handles_and_filters` 的 run.json fixture：
+    从旧扁平字段改为新结构化字段。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-127 Refactor-TaskData-HardCut-SummaryEnvelopeSurfaceAndStructuredSummarySink (Completed 2026-03-26)
+
+任务：按“硬切不兼容”继续收口 summary 层，外部调用链不再直接依赖 `StructuredSummary` 中间结构，统一通过 `SummaryEnvelope` 方法与 `SuccessOutcome` 构造进入。  
+验收标准：
+
+1. `src/runtime/summary.rs` 提供 `SummaryEnvelope::from_success_outcome(...)` 和字段访问方法（summary/verification/parse_status/artifacts 等）。
+2. 生产代码中不再出现 `StructuredSummary` 的直接依赖（仅允许 `summary.rs` 内部实现持有）。
+3. `mock runner` 成功路径改为持有/输出 `SummaryEnvelope`，不再通过 `MockRunPlan::Succeeded { summary: StructuredSummary }` 传递中间层。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/runtime/summary.rs`：
+  - 将 `StructuredSummary` 下沉为模块内部类型；
+  - 新增 `SummaryEnvelope::from_success_outcome(...)`；
+  - 新增访问方法：`parse_status/summary_text/key_findings/artifacts/open_questions/next_steps/exit_code/verification_status/touched_files/plan_refs/raw_fallback_text`。
+- 已更新调用链：
+  - `src/mcp/helpers.rs` 的 `failed_summary/cancelled_summary` 改为 `SuccessOutcome -> SummaryEnvelope::from_success_outcome`；
+  - `src/runtime/runners/mock.rs` 的 `MockRunPlan::Succeeded` 改为携带 `SummaryEnvelope`；
+  - `src/mcp/artifacts.rs`、`src/mcp/archive.rs`、`src/mcp/review.rs`、`src/runtime/dispatcher.rs` 等读取路径改为调用 `SummaryEnvelope` 方法，不再访问嵌套字段实现细节。
+- 已同步测试夹具：
+  - `src/mcp/server.rs`、`src/mcp/archive.rs`、`src/mcp/review.rs`、`src/runtime/dispatcher.rs`、`src/runtime/runners/mock.rs` 改为通过 `SuccessOutcome` 构造 `SummaryEnvelope`。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-128 Refactor-TaskData-HardCut-RunStatusToRunPhaseTypeCut (Completed 2026-03-26)
+
+任务：推进运行阶段语义收口，把 `RunStatus` 类型硬切为 `RunPhase`，统一调度器、状态、MCP 服务与 CLI 侧类型命名。  
+验收标准：
+
+1. 代码中不再保留 `RunStatus` 类型定义和引用，统一使用 `RunPhase`。
+2. `dispatcher` 及其结果模型、`mcp/state|tools|service|persistence`、`main` 与测试链路全部完成类型替换。
+3. 不引入兼容别名（不保留 `type RunStatus = ...`）。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成全仓类型替换：`RunStatus -> RunPhase`（`src/` 内无 `RunStatus` 残留）。
+- 已同步所有引用路径：
+  - `runtime/dispatcher` 调度状态流与测试；
+  - `mcp/state` 运行记录与持久化结构；
+  - `mcp/tools/service/server/persistence` 消费和事件写入；
+  - `main`/CLI 读取与测试断言。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-129 Refactor-TaskData-HardCut-DispatcherOutcomeOnlyConsumerChain (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，删除 dispatcher 结果中的 `SummaryEnvelope/retry_*` 冗余输出，消费链统一基于 `RunOutcome` 读写与产物构建。  
+验收标准：
+
+1. `src/runtime/dispatcher.rs::DispatchRunResult` 不再包含 `summary`、`retry_classification`、`retry_classification_reason` 字段。
+2. `src/mcp/artifacts.rs`、`src/mcp/review.rs`、`src/mcp/archive.rs` 与 `src/mcp/tools.rs` 主链改为直接消费 `RunOutcome`，不再依赖 `SummaryEnvelope` 输入。
+3. 删除由旧桥接遗留且已无调用的辅助函数，不保留 dead code。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/runtime/dispatcher.rs`：
+  - `DispatchRunResult` 删除 `summary/retry_classification/retry_classification_reason`；
+  - 终态测试断言改为直接检查 `result.outcome`。
+- 已更新消费链为 outcome-first：
+  - `src/mcp/artifacts.rs`：`build_runtime_artifacts` 改为接收 `&RunOutcome`，成功态读取声明 artifacts，`summary.json` 直接序列化 outcome；
+  - `src/mcp/review.rs`：`apply_review_evidence_hook` 改为接收 `&RunOutcome` 并仅在 `Succeeded` 时写 evidence；
+  - `src/mcp/archive.rs`：`ArchiveHookInput` 改为携带 `&RunOutcome`，归档/metadata/decision-note 均从 `SuccessOutcome` 读取；
+  - `src/mcp/tools.rs`：同步/异步执行路径均改为把 `dispatch_result.outcome` 传入 artifacts/review/archive。
+- 已删除 `src/mcp/helpers.rs` 中无调用的 `failed_summary/cancelled_summary`，避免 dead code 警告残留。
+- 已同步测试：
+  - `src/runtime/dispatcher.rs`、`src/mcp/server.rs`、`src/mcp/review.rs`、`src/mcp/archive.rs`。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
