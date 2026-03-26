@@ -72,10 +72,8 @@ struct FileConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileServer {
-    #[serde(default)]
     #[serde(rename = "transport")]
     _transport: Option<String>,
-    #[serde(default)]
     log_level: Option<String>,
 }
 
@@ -84,7 +82,6 @@ struct FileServer {
 struct FilePaths {
     #[serde(default)]
     agents_dirs: Vec<PathBuf>,
-    #[serde(default)]
     state_dir: Option<PathBuf>,
 }
 
@@ -267,7 +264,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{merge_layers, resolve_config_path_with, ConfigLayer};
+    use super::{
+        file_layer_from_cfg, load_file_config, merge_layers, resolve_config_path_with, ConfigLayer,
+        FileConfig,
+    };
 
     #[test]
     fn merge_uses_precedence_cli_env_file_defaults() {
@@ -379,5 +379,48 @@ mod tests {
     fn resolve_config_path_falls_back_to_project_relative_without_home() {
         let resolved = resolve_config_path_with(None, None, None, None);
         assert_eq!(resolved, PathBuf::from("./.mcp-subagent/config.toml"));
+    }
+
+    #[test]
+    fn file_config_optional_fields_deserialize_without_default_annotations() {
+        let cfg: FileConfig = toml::from_str(
+            r#"
+[server]
+
+[paths]
+agents_dirs = ["agents"]
+"#,
+        )
+        .expect("file config should parse");
+
+        assert!(cfg.server._transport.is_none());
+        assert!(cfg.server.log_level.is_none());
+        assert_eq!(cfg.paths.agents_dirs, vec![PathBuf::from("agents")]);
+        assert!(cfg.paths.state_dir.is_none());
+    }
+
+    #[test]
+    fn load_file_config_keeps_missing_optional_fields_as_none() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("config.toml");
+        fs::write(
+            &file,
+            r#"
+[server]
+
+[paths]
+agents_dirs = ["team-agents"]
+"#,
+        )
+        .expect("write");
+
+        let cfg = load_file_config(file)
+            .expect("load config")
+            .expect("config should exist");
+        let layer = file_layer_from_cfg(&cfg);
+
+        assert_eq!(layer.agents_dirs, Some(vec![PathBuf::from("team-agents")]));
+        assert!(layer.state_dir.is_none());
+        assert!(layer.log_level.is_none());
     }
 }

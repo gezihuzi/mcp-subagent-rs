@@ -232,7 +232,10 @@ require_plan_if_cross_module = false
         assert!(policy.require_plan_if_new_interface);
         assert!(policy.require_plan_if_migration);
         assert!(policy.require_plan_if_human_approval_point);
-        assert_eq!(policy.require_plan_if_estimated_runtime_minutes_ge, Some(15));
+        assert_eq!(
+            policy.require_plan_if_estimated_runtime_minutes_ge,
+            Some(15)
+        );
     }
 
     #[test]
@@ -267,7 +270,10 @@ update_project_memory = true
         )
         .expect("workflow spec should parse");
 
-        assert_eq!(workflow.require_plan_when.require_plan_if_touched_files_ge, Some(5));
+        assert_eq!(
+            workflow.require_plan_when.require_plan_if_touched_files_ge,
+            Some(5)
+        );
         assert!(workflow.require_plan_when.require_plan_if_cross_module);
         assert!(!workflow.require_plan_when.require_plan_if_parallel_agents);
         assert_eq!(
@@ -276,7 +282,10 @@ update_project_memory = true
                 .require_plan_if_estimated_runtime_minutes_ge,
             Some(15)
         );
-        assert_eq!(workflow.knowledge_capture.trigger_if_touched_files_gt, Some(3));
+        assert_eq!(
+            workflow.knowledge_capture.trigger_if_touched_files_gt,
+            Some(3)
+        );
         assert!(workflow.knowledge_capture.trigger_if_new_config);
         assert!(workflow.knowledge_capture.trigger_if_behavior_change);
         assert!(workflow.knowledge_capture.trigger_if_non_obvious_bugfix);

@@ -96,6 +96,9 @@ instructions = "review"
         assert_eq!(loaded[0].spec.core.name, "reviewer");
         assert!(loaded[0].spec.core.model.is_none());
         assert_eq!(loaded[0].spec.runtime.timeout_secs, 900);
+        assert!(loaded[0].spec.provider_overrides.claude.is_none());
+        assert!(loaded[0].spec.provider_overrides.codex.is_none());
+        assert!(loaded[0].spec.provider_overrides.gemini.is_none());
         assert!(loaded[0].spec.workflow.is_none());
     }
 
@@ -161,10 +164,43 @@ update_project_memory = true
                 .require_plan_if_estimated_runtime_minutes_ge,
             Some(15)
         );
-        assert_eq!(workflow.knowledge_capture.trigger_if_touched_files_gt, Some(3));
+        assert_eq!(
+            workflow.knowledge_capture.trigger_if_touched_files_gt,
+            Some(3)
+        );
         assert!(workflow.knowledge_capture.trigger_if_new_config);
         assert!(workflow.knowledge_capture.trigger_if_behavior_change);
         assert!(workflow.knowledge_capture.trigger_if_non_obvious_bugfix);
         assert!(workflow.knowledge_capture.update_project_memory);
+    }
+
+    #[test]
+    fn loads_partial_runtime_subtables_with_consistent_defaults() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("runtime.agent.toml");
+        let raw = r#"
+[core]
+name = "runtime-builder"
+description = "runtime builder"
+provider = "codex"
+instructions = "build"
+
+[runtime]
+timeout_secs = 30
+
+[runtime.artifact_policy]
+
+[runtime.retry_policy]
+backoff_secs = 0
+"#;
+        fs::write(&file, raw).expect("write file");
+
+        let loaded = load_agent_specs_from_dir(dir.path()).expect("load");
+        let runtime = &loaded[0].spec.runtime;
+
+        assert_eq!(runtime.timeout_secs, 30);
+        assert!(runtime.artifact_policy.emit_summary_json);
+        assert_eq!(runtime.retry_policy.max_attempts, 1);
+        assert_eq!(runtime.retry_policy.backoff_secs, 0);
     }
 }

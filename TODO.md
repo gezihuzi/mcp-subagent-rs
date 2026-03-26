@@ -3671,3 +3671,66 @@
   - `cargo check` 通过。
   - `cargo test --workspace` 通过（199 + 65 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-144 RuntimePolicy-NestedPolicyDefaultAlignment (Completed 2026-03-26)
+
+任务：收口 `runtime` 子策略默认入口，确保 `artifact_policy/retry_policy` 在“整段缺失”和“子表部分填写”两种写法下保持同一默认语义，并用加载链路测试锁定。  
+验收标准：
+
+1. `src/spec/runtime_policy.rs` 中 `artifact_policy`、`retry_policy` 的默认来源显式收口，不依赖隐式 `Default` 推断。
+2. 新增测试覆盖 `runtime.artifact_policy`、`runtime.retry_policy` 的部分 TOML 子表默认值继承行为，并覆盖经 spec 加载链路读取后的结果。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/spec/runtime_policy.rs`：
+  - `RuntimePolicy.artifact_policy/retry_policy` 改为使用显式默认函数 `default_artifact_policy/default_retry_policy`；
+  - 保持 `ArtifactPolicy` 与 `RetryPolicy` 的既有业务默认值不变，仅收口默认来源并减少隐式推断。
+- 已新增测试：
+  - `src/spec/runtime_policy.rs` 增加 `artifact_policy`、`retry_policy` 与完整 `RuntimePolicy` 的部分子表默认值继承测试；
+  - `src/spec/registry.rs` 增加 `loads_partial_runtime_subtables_with_consistent_defaults`，锁定经 spec 加载链路读取后的行为。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（203 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-145 ConfigOptionalSerdeDefaultCleanup (Completed 2026-03-26)
+
+任务：继续清理配置读取层的兼容噪音，移除 `config.rs` 中 `Option` 字段上的冗余 `serde(default)`，同时保留 `server/paths` 这种整段默认语义不变。  
+验收标准：
+
+1. `src/config.rs::FileServer` 与 `FilePaths` 中所有 `Option<T>` 字段不再显式使用 `#[serde(default)]`。
+2. 新增测试覆盖 file config 反序列化与 `load_file_config` 路径，验证缺失可选字段仍按 `Option::None` 处理。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/config.rs`：
+  - 移除 `FileServer._transport/log_level` 与 `FilePaths.state_dir` 上冗余的 `#[serde(default)]`；
+  - 保留 `FileConfig.server/paths` 与 `FilePaths.agents_dirs` 的整段/集合默认语义，不扩大到配置层产品默认值本身。
+- 已新增测试：
+  - `file_config_optional_fields_deserialize_without_default_annotations` 直接覆盖 file config 反序列化；
+  - `load_file_config_keeps_missing_optional_fields_as_none` 覆盖 `load_file_config + file_layer_from_cfg` 读取链路。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（205 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-146 AgentSpec-TopLevelDefaultSourceAlignment (Completed 2026-03-26)
+
+任务：把 `AgentSpec` 顶层保留的产品默认值显式函数化，明确 `runtime/provider_overrides` 是有意保留的默认入口，而不是遗留兼容兜底。  
+验收标准：
+
+1. `src/spec/mod.rs::AgentSpec.runtime/provider_overrides` 改为使用显式默认函数，而不是 bare `#[serde(default)]`。
+2. 新增测试覆盖最小 agent spec 的直接反序列化默认值，并补充 registry 加载路径对 `provider_overrides` 默认状态的断言。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/spec/mod.rs`：
+  - `AgentSpec.runtime/provider_overrides` 改为使用 `default_runtime_policy/default_provider_overrides`；
+  - 明确保留顶层默认入口属于当前产品语义，而不是继续依赖 bare `#[serde(default)]` 的隐式来源。
+- 已新增/更新测试：
+  - `src/spec/mod.rs` 增加 `agent_spec_direct_deserialization_preserves_top_level_defaults`；
+  - `src/spec/registry.rs::loads_agent_specs_and_applies_defaults` 补充 `provider_overrides` 默认状态断言。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（206 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
