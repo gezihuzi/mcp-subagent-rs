@@ -119,4 +119,52 @@ unknown_field = "boom"
             "unexpected error: {err}"
         );
     }
+
+    #[test]
+    fn loads_partial_workflow_subtables_with_consistent_defaults() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("workflow.agent.toml");
+        let raw = r#"
+[core]
+name = "workflow-builder"
+description = "workflow builder"
+provider = "codex"
+instructions = "build"
+
+[workflow]
+enabled = true
+
+[workflow.require_plan_when]
+require_plan_if_cross_module = false
+
+[workflow.knowledge_capture]
+update_project_memory = true
+"#;
+        fs::write(&file, raw).expect("write file");
+
+        let loaded = load_agent_specs_from_dir(dir.path()).expect("load");
+        let workflow = loaded[0]
+            .spec
+            .workflow
+            .as_ref()
+            .expect("workflow should exist");
+
+        assert_eq!(
+            workflow.require_plan_when.require_plan_if_touched_files_ge,
+            Some(5)
+        );
+        assert!(!workflow.require_plan_when.require_plan_if_cross_module);
+        assert!(workflow.require_plan_when.require_plan_if_parallel_agents);
+        assert_eq!(
+            workflow
+                .require_plan_when
+                .require_plan_if_estimated_runtime_minutes_ge,
+            Some(15)
+        );
+        assert_eq!(workflow.knowledge_capture.trigger_if_touched_files_gt, Some(3));
+        assert!(workflow.knowledge_capture.trigger_if_new_config);
+        assert!(workflow.knowledge_capture.trigger_if_behavior_change);
+        assert!(workflow.knowledge_capture.trigger_if_non_obvious_bugfix);
+        assert!(workflow.knowledge_capture.update_project_memory);
+    }
 }

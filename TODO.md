@@ -3650,3 +3650,24 @@
   - `cargo check` 通过。
   - `cargo test --workspace` 通过（197 + 65 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-143 WorkflowSpec-NestedPolicyDefaultAlignment (Completed 2026-03-26)
+
+任务：修正 `workflow` 子策略的默认语义分叉，确保“整个子策略表缺失”和“子策略表存在但只填写部分字段”两种写法得到同一组默认行为。  
+验收标准：
+
+1. `src/spec/workflow.rs::WorkflowGatePolicy` 与 `KnowledgeCapturePolicy` 中应继承业务默认值的缺失字段，在部分反序列化时与各自 `Default` 实现保持一致。
+2. 新增测试覆盖部分 TOML 子表（至少覆盖 `workflow.require_plan_when` 与 `workflow.knowledge_capture`）的默认值继承行为，并覆盖经 spec 加载链路读取的结果。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/spec/workflow.rs`：
+  - 为 `WorkflowGatePolicy.require_plan_if_touched_files_ge/require_plan_if_estimated_runtime_minutes_ge` 与 `KnowledgeCapturePolicy.trigger_if_touched_files_gt` 增加显式业务默认函数；
+  - 为 `require_plan_if_cross_module/parallel_agents/new_interface/migration/human_approval_point` 与 `trigger_if_new_config/behavior_change/non_obvious_bugfix` 改为使用 `default_true()`，让部分子表反序列化与 `Default` 语义一致。
+- 已新增测试：
+  - `src/spec/workflow.rs` 增加部分子表反序列化测试，覆盖 `WorkflowGatePolicy`、`KnowledgeCapturePolicy` 以及完整 `WorkflowSpec` 的嵌套子表继承行为；
+  - `src/spec/registry.rs` 增加 `loads_partial_workflow_subtables_with_consistent_defaults`，锁定经 spec 加载链路读取后的默认值行为。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（199 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
