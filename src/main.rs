@@ -1121,14 +1121,14 @@ fn estimate_path_size(path: &Path) -> std::result::Result<u64, std::io::Error> {
     Ok(0)
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct StoredRunSpecSnapshot {
     name: String,
     provider: String,
     model: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct StoredExecutionPolicy {
     requested_run_mode: Option<String>,
     effective_run_mode: Option<String>,
@@ -1146,21 +1146,21 @@ struct StoredExecutionPolicy {
     retries_used: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct StoredNativeUsage {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     total_tokens: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct StoredRetryInfo {
     classification: String,
     reason: Option<String>,
     attempts_used: u32,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct StoredOutcomeUsage {
     duration_ms: u64,
     input_tokens: Option<u64>,
@@ -1169,7 +1169,7 @@ struct StoredOutcomeUsage {
     provider_exit_code: Option<i32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct StoredSuccessOutcome {
     summary: String,
     key_findings: Vec<String>,
@@ -1182,7 +1182,7 @@ struct StoredSuccessOutcome {
     plan_refs: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct StoredFailureOutcome {
     error: String,
     retry: StoredRetryInfo,
@@ -1237,12 +1237,12 @@ impl StoredRunOutcome {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct StoredTaskSpec {
     task: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct StoredRunState {
     status: String,
     created_at: String,
@@ -1254,7 +1254,7 @@ struct StoredRunState {
     usage: Option<StoredNativeUsage>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct StoredRunRecord {
     task_spec: StoredTaskSpec,
     state: StoredRunState,
@@ -4405,6 +4405,41 @@ mod tests {
         UsageStatsOutput, DEFAULT_BOOTSTRAP_ROOT_RELATIVE, RESULT_CONTRACT_VERSION,
     };
 
+    fn sample_outcome_usage() -> super::StoredOutcomeUsage {
+        super::StoredOutcomeUsage {
+            duration_ms: 0,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            provider_exit_code: None,
+        }
+    }
+
+    fn sample_run_state() -> super::StoredRunState {
+        super::StoredRunState {
+            status: "pending".to_string(),
+            created_at: "2026-03-25T00:00:00Z".to_string(),
+            updated_at: "2026-03-25T00:00:00Z".to_string(),
+            status_history: Vec::new(),
+            error_message: None,
+            policy: None,
+            compiled_context_markdown: None,
+            usage: None,
+        }
+    }
+
+    fn sample_run_record() -> StoredRunRecord {
+        StoredRunRecord {
+            task_spec: super::StoredTaskSpec {
+                task: "review code".to_string(),
+            },
+            state: sample_run_state(),
+            outcome: None,
+            artifact_index: Vec::new(),
+            spec_snapshot: None,
+        }
+    }
+
     #[test]
     fn parses_list_agents_json_flag() {
         let cli = Cli::parse_from(["mcp-subagent", "list-agents", "--json"]);
@@ -4897,14 +4932,14 @@ target/
                     output_tokens: Some(222),
                     total_tokens: Some(333),
                 }),
-                ..super::StoredRunState::default()
+                ..sample_run_state()
             },
             spec_snapshot: Some(StoredRunSpecSnapshot {
                 name: "backend-coder".to_string(),
                 provider: "Codex".to_string(),
                 model: Some("gpt-5.3-codex".to_string()),
             }),
-            ..StoredRunRecord::default()
+            ..sample_run_record()
         };
 
         let usage = super::build_usage_output(dir.path(), "run-native", &record);
@@ -4931,9 +4966,9 @@ target/
                     output_tokens: None,
                     total_tokens: None,
                 }),
-                ..super::StoredRunState::default()
+                ..sample_run_state()
             },
-            ..StoredRunRecord::default()
+            ..sample_run_record()
         };
 
         let usage = super::build_usage_output(dir.path(), "run-mixed", &record);
@@ -4944,7 +4979,7 @@ target/
 
     #[test]
     fn resolve_retry_classification_defaults_unknown_when_missing() {
-        let record = StoredRunRecord::default();
+        let record = sample_run_record();
         let (classification, reason) = super::resolve_retry_classification(&record);
         assert_eq!(classification, "unknown");
         assert_eq!(reason, None);
@@ -4962,10 +4997,10 @@ target/
                         attempts_used: 2,
                     },
                     partial_summary: None,
-                    usage: super::StoredOutcomeUsage::default(),
+                    usage: sample_outcome_usage(),
                 },
             )),
-            ..StoredRunRecord::default()
+            ..sample_run_record()
         };
         let (classification, reason) = super::resolve_retry_classification(&record);
         assert_eq!(classification, "retryable");
@@ -5493,9 +5528,9 @@ target/
                 status: "succeeded".to_string(),
                 created_at: "2026-03-25T00:00:00Z".to_string(),
                 updated_at: "2026-03-25T00:00:08Z".to_string(),
-                ..super::StoredRunState::default()
+                ..sample_run_state()
             },
-            ..StoredRunRecord::default()
+            ..sample_run_record()
         };
         let now = super::parse_rfc3339("2026-03-25T00:00:08Z").expect("parse now");
         let stats = super::build_run_stats_output(dir.path(), "handle-1", &record, now);

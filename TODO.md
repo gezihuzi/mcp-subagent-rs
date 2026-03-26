@@ -3779,3 +3779,24 @@
   - `cargo check` 通过。
   - `cargo test --workspace` 通过（209 + 65 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-149 MainStoredView-DefaultDeriveRemoval (Completed 2026-03-26)
+
+任务：移除 `src/main.rs` 中 CLI 读盘视图模型的 `Default` derive，改为测试侧显式 fixture，避免测试继续依赖半空结构掩盖严格 schema 要求。  
+验收标准：
+
+1. `src/main.rs` 的 `Stored*` 读盘模型不再 derive `Default`。
+2. `src/main.rs` 测试不再使用 `StoredRunRecord::default()` / `StoredRunState::default()` / `StoredOutcomeUsage::default()` 之类的隐式 fixture，而改为显式构造或 helper。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/main.rs`：
+  - `StoredRunSpecSnapshot/StoredExecutionPolicy/StoredNativeUsage/StoredRetryInfo/StoredOutcomeUsage/StoredSuccessOutcome/StoredFailureOutcome/StoredTaskSpec/StoredRunState/StoredRunRecord` 移除 `Default` derive；
+  - 保持线上读盘反序列化逻辑不变，仅收紧测试构造方式。
+- 已更新测试：
+  - 新增 `sample_outcome_usage()/sample_run_state()/sample_run_record()` fixture helper；
+  - 替换 `StoredRunRecord::default()`、`StoredRunState::default()`、`StoredOutcomeUsage::default()` 的使用点，改为显式最小合法结构。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（209 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
