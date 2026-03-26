@@ -1589,7 +1589,8 @@ exit 0
                 CallToolRequestParams::new("spawn_agent").with_arguments(
                     json!({
                         "agent_name": "reviewer",
-                        "task": "cancel me"
+                        "task": "cancel me",
+                        "selected_files": []
                     })
                     .as_object()
                     .expect("object")

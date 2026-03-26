@@ -225,8 +225,6 @@ struct RunEventRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     seq: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    ts: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     level: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     state: Option<String>,
@@ -245,7 +243,6 @@ impl RunEventRecord {
     fn runtime(event: RuntimeEventInput<'_>, seq: u64, timestamp: String) -> Self {
         Self {
             seq: Some(seq),
-            ts: Some(timestamp.clone()),
             level: Some("info".to_string()),
             state: Some(event.state.to_string()),
             phase: Some(event.phase.to_string()),

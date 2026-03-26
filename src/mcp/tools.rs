@@ -273,14 +273,12 @@ fn build_run_view(
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize)]
 struct StoredRunEventLine {
     event: String,
     timestamp: String,
     detail: serde_json::Value,
     seq: Option<u64>,
-    ts: Option<String>,
     state: Option<String>,
     phase: Option<String>,
     source: Option<String>,
@@ -292,11 +290,7 @@ impl StoredRunEventLine {
         RunEventOutput {
             seq: self.seq,
             event: self.event,
-            timestamp: if self.timestamp.is_empty() {
-                self.ts.unwrap_or_default()
-            } else {
-                self.timestamp
-            },
+            timestamp: self.timestamp,
             state: self.state,
             phase: self.phase,
             source: self.source,

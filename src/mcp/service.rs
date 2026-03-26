@@ -10,7 +10,7 @@ use crate::{
     runtime::{
         cleanup::WorkspaceCleanupGuard,
         context::DefaultContextCompiler,
-        dispatcher::{DispatchRunResult, Dispatcher},
+        dispatcher::{Dispatcher, RunExecutionResult},
         memory::resolve_memory_for_task,
         runners::{
             self,
@@ -28,7 +28,7 @@ use serde_json::json;
 
 #[derive(Debug)]
 pub(crate) struct RunDispatchData {
-    pub(crate) result: DispatchRunResult,
+    pub(crate) result: RunExecutionResult,
     pub(crate) workspace: WorkspaceRecord,
     pub(crate) memory_resolution: MemoryResolutionRecord,
     pub(crate) _workspace_cleanup: Option<WorkspaceCleanupGuard>,

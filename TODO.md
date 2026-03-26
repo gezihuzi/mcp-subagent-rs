@@ -3433,3 +3433,147 @@
 - 已验证：
   - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-132 Refactor-TaskData-HardCut-StateSerdeDefaultRemoval (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，收紧 run state 持久化模型反序列化，移除 `mcp/state` 层对旧字段缺失的 `#[serde(default)]` 兜底，确保 `run.json` 严格按新结构读取。  
+验收标准：
+
+1. `src/mcp/state.rs` 中 `PolicySnapshot/WorkspaceRecord/RunSpecSnapshot/ProbeResultRecord/MemoryResolutionRecord/PersistedRunState/PersistedRun` 不再使用迁移期 `#[serde(default)]` 字段兜底。
+2. 删除仅用于旧数据兼容的默认函数（如 `default_delegation_context_snapshot`），快照字段改为必需输入。
+3. 在严格反序列化模式下，`cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/mcp/state.rs`：
+  - 移除上述结构体上与兼容兜底相关的 `#[serde(default)]`；
+  - 删除 `default_delegation_context_snapshot()` 旧兼容默认函数；
+  - 持久化快照字段保持当前新结构严格读写，不再回填缺失字段。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-133 Refactor-TaskData-HardCut-EventSchemaAndCliStrictDeser (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，收紧事件与 CLI 读盘模型的反序列化契约，移除 `ts` 时间戳兼容分支与结构级默认兜底，统一只读当前 schema。  
+验收标准：
+
+1. `src/mcp/persistence.rs` 事件写入模型不再输出 `ts` 兼容字段，仅保留 `timestamp`。
+2. `src/main.rs::RunTimelineEvent` 与 `src/mcp/tools.rs::StoredRunEventLine` 不再使用结构级 `#[serde(default)]`，且不再从 `ts` 回退时间戳。
+3. `src/main.rs` 的 `StoredRunSpecSnapshot/StoredExecutionPolicy/StoredNativeUsage` 去除结构级 `#[serde(default)]`，避免旧缺字段静默回填。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/mcp/persistence.rs`：
+  - `RunEventRecord` 删除 `ts` 字段，`append_run_event` 仅写 `timestamp` 时间戳。
+- 已更新 `src/main.rs`：
+  - 删除 `StoredRunSpecSnapshot/StoredExecutionPolicy/StoredNativeUsage` 的结构级 `#[serde(default)]`；
+  - `RunTimelineEvent` 移除 `#[serde(default)]` 与 `ts` 字段；
+  - `event_time/display_timestamp` 统一改为只读 `timestamp`。
+- 已更新 `src/mcp/tools.rs`：
+  - `StoredRunEventLine` 移除 `#[serde(default)]` 与 `ts` 字段；
+  - `into_output()` 不再走空 `timestamp` 的 `ts` 回退。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-134 Refactor-TaskData-HardCut-DispatchResultAndMainCreatedAtRequired (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，收紧 dispatcher 结果模型与 CLI run.json 读取字段要求，移除默认兜底并强制 `created_at` 必填。  
+验收标准：
+
+1. `src/runtime/dispatcher.rs::DispatchRunResult` 去除迁移期 `#[serde(default)]` 字段兜底（`error_message/attempts_used/retry_attempts/max_attempts/max_turns/native_usage`）。
+2. `src/main.rs::StoredRunState.created_at` 改为必填字符串，不再接受缺失字段。
+3. `main` 侧使用 `created_at` 的统计逻辑与测试构造同步更新，保持行为稳定。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/runtime/dispatcher.rs`：
+  - `DispatchRunResult` 删除兼容期 `#[serde(default)]` 字段标注，严格按当前结果结构反序列化。
+- 已更新 `src/main.rs`：
+  - `StoredRunState.created_at` 从 `Option<String>` 改为 `String`；
+  - `StoredRunRecord::created_at()` 改为返回必填 `&str`；
+  - `build_usage_output/list_runs/build_run_stats_output` 的 created_at 读取与时长计算路径同步到新签名。
+- 已更新 `src/main.rs` 测试：
+  - 相关 fixture 构造从 `created_at: Some(...)` 改为 `created_at: "...".to_string()`。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-135 Refactor-TaskData-HardCut-RuntimeSerdeDefaultCleanup (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，清理 runtime 层残留 `serde(default)`，避免核心运行结构继续依赖兼容兜底。  
+验收标准：
+
+1. `src/runtime/workspace.rs::PreparedWorkspace` 去除 `notes` 字段的 `#[serde(default)]`。
+2. `src/runtime/usage.rs::NativeUsage` 去除 token 字段上的 `#[serde(default)]`。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/runtime/workspace.rs`：
+  - `PreparedWorkspace.notes` 移除 `#[serde(default)]`。
+- 已更新 `src/runtime/usage.rs`：
+  - `NativeUsage.input_tokens/output_tokens/total_tokens` 移除 `#[serde(default)]`。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-136 Refactor-TaskData-HardCut-McpDtoStrictDeser (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，收紧 MCP DTO 的反序列化契约，移除 `mcp/dto.rs` 的 `#[serde(default)]` 兼容兜底。  
+验收标准：
+
+1. `src/mcp/dto.rs` 不再使用 `#[serde(default)]` 字段兜底。
+2. MCP transport roundtrip 与工具链测试在严格 DTO 输入下仍通过（必要时同步补齐请求字段）。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/mcp/dto.rs`：
+  - 移除全部 `#[serde(default)]` 标注，DTO 读取改为严格字段契约。
+- 已修复回归：
+  - `src/mcp/server.rs` 的 `mcp_transport_roundtrip_for_all_tools` 测试中第二次 `spawn_agent` 调用补齐 `selected_files: []`，避免缺字段反序列化失败。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-137 Refactor-TaskData-HardCut-MainCreatedAtNoEmptyFallback (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，移除 main 侧 usage 构建对空 `created_at` 的兼容分支，统一按必填创建时间输出统计。  
+验收标准：
+
+1. `src/main.rs::build_usage_output` 不再把空 `created_at` 视为 `None`。
+2. `started_at/duration_ms` 计算路径统一基于必填 `created_at`。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/main.rs`：
+  - `build_usage_output` 中 `started_at` 由“空值分支”改为直接使用 `Some(record.created_at().to_string())`。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-138 Refactor-TaskData-HardCut-DispatcherResultNamingCleanup (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，清理 dispatcher 结果模型的迁移期命名，移除 `DispatchRunResult` 语义残留。  
+验收标准：
+
+1. `src/runtime/dispatcher.rs` 不再定义 `DispatchRunResult`，统一使用中性结果命名。
+2. `src/mcp/service.rs` 结果类型引用同步到新命名，不保留旧别名。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/runtime/dispatcher.rs`：
+  - `DispatchRunResult` 重命名为 `RunExecutionResult`；
+  - `run/run_with_transition_observer/run_with_observers` 返回类型同步切换。
+- 已更新 `src/mcp/service.rs`：
+  - `RunDispatchData.result` 类型从 `DispatchRunResult` 切到 `RunExecutionResult`；
+  - import 与调用链同步更新。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

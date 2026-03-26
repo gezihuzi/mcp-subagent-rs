@@ -36,7 +36,6 @@ pub struct RunAgentInput {
     pub task: String,
     pub task_brief: Option<String>,
     pub parent_summary: Option<String>,
-    #[serde(default)]
     pub selected_files: Vec<RunAgentSelectedFileInput>,
     pub stage: Option<String>,
     pub plan_ref: Option<String>,
@@ -60,9 +59,7 @@ pub struct ArtifactOutput {
     pub kind: String,
     pub description: String,
     pub media_type: Option<String>,
-    #[serde(default)]
     pub producer: Option<String>,
-    #[serde(default)]
     pub created_at: Option<String>,
 }
 
@@ -114,7 +111,6 @@ pub struct RunView {
     pub task_brief: Option<String>,
     pub phase: String,
     pub terminal: bool,
-    #[serde(default)]
     pub outcome: Option<OutcomeView>,
     pub created_at: String,
     pub updated_at: String,
@@ -122,7 +118,6 @@ pub struct RunView {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ListRunsInput {
-    #[serde(default)]
     pub limit: Option<usize>,
 }
 
@@ -139,7 +134,6 @@ pub struct GetRunResultInput {
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ReadRunLogsInput {
     pub handle_id: String,
-    #[serde(default)]
     pub stream: Option<String>,
 }
 
@@ -153,13 +147,9 @@ pub struct ReadRunLogsOutput {
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct WatchRunInput {
     pub handle_id: String,
-    #[serde(default)]
     pub interval_ms: Option<u64>,
-    #[serde(default)]
     pub timeout_secs: Option<u64>,
-    #[serde(default)]
     pub phase: Option<String>,
-    #[serde(default)]
     pub phase_timeout_secs: Option<u64>,
 }
 
@@ -167,40 +157,28 @@ pub struct WatchRunInput {
 pub struct WatchRunOutput {
     pub run: RunView,
     pub timed_out: bool,
-    #[serde(default)]
     pub phase_timeout_hit: bool,
-    #[serde(default)]
     pub block_reason: Option<String>,
-    #[serde(default)]
     pub advice: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct WatchAgentEventsInput {
     pub handle_id: String,
-    #[serde(default)]
     pub since_seq: Option<u64>,
-    #[serde(default)]
     pub limit: Option<usize>,
-    #[serde(default)]
     pub phase: Option<String>,
-    #[serde(default)]
     pub phase_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct RunEventOutput {
-    #[serde(default)]
     pub seq: Option<u64>,
     pub event: String,
     pub timestamp: String,
-    #[serde(default)]
     pub state: Option<String>,
-    #[serde(default)]
     pub phase: Option<String>,
-    #[serde(default)]
     pub source: Option<String>,
-    #[serde(default)]
     pub message: Option<String>,
     pub detail: serde_json::Value,
 }
@@ -212,17 +190,11 @@ pub struct WatchAgentEventsOutput {
     pub updated_at: String,
     pub terminal: bool,
     pub events: Vec<RunEventOutput>,
-    #[serde(default)]
     pub next_seq: Option<u64>,
-    #[serde(default)]
     pub current_phase: Option<String>,
-    #[serde(default)]
     pub current_phase_age_ms: Option<u64>,
-    #[serde(default)]
     pub phase_timeout_hit: bool,
-    #[serde(default)]
     pub block_reason: Option<String>,
-    #[serde(default)]
     pub advice: Vec<String>,
 }
 
@@ -235,40 +207,23 @@ pub struct GetAgentStatsInput {
 pub struct GetAgentStatsOutput {
     pub handle_id: String,
     pub status: String,
-    #[serde(default)]
     pub state: Option<String>,
-    #[serde(default)]
     pub phase: Option<String>,
-    #[serde(default)]
     pub last_event_at: Option<String>,
-    #[serde(default)]
     pub last_event_age_ms: Option<u64>,
     pub stalled: bool,
-    #[serde(default)]
     pub block_reason: Option<String>,
-    #[serde(default)]
     pub advice: Vec<String>,
-    #[serde(default)]
     pub queue_ms: Option<u64>,
-    #[serde(default)]
     pub provider_probe_ms: Option<u64>,
-    #[serde(default)]
     pub workspace_prepare_ms: Option<u64>,
-    #[serde(default)]
     pub provider_boot_ms: Option<u64>,
-    #[serde(default)]
     pub execution_ms: Option<u64>,
-    #[serde(default)]
     pub first_output_ms: Option<u64>,
-    #[serde(default)]
     pub first_output_warned: bool,
-    #[serde(default)]
     pub first_output_warning_at: Option<String>,
-    #[serde(default)]
     pub current_wait_reason: Option<String>,
-    #[serde(default)]
     pub wait_reasons: Vec<String>,
-    #[serde(default)]
     pub wall_ms: Option<u64>,
     pub usage: RunUsageOutput,
 }

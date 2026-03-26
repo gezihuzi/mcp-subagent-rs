@@ -71,7 +71,7 @@ impl std::fmt::Display for RunPhase {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DispatchRunResult {
+pub struct RunExecutionResult {
     pub handle_id: Uuid,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
@@ -80,21 +80,15 @@ pub struct DispatchRunResult {
     pub provider: Provider,
     pub agent_name: String,
     pub workspace_path: PathBuf,
-    #[serde(default)]
     pub error_message: Option<String>,
-    #[serde(default)]
     pub attempts_used: u32,
-    #[serde(default)]
     pub retry_attempts: u32,
-    #[serde(default)]
     pub max_attempts: u32,
-    #[serde(default)]
     pub max_turns: Option<u32>,
     pub outcome: RunOutcome,
     pub stdout: String,
     pub stderr: String,
     pub compiled_context_markdown: String,
-    #[serde(default)]
     pub native_usage: Option<NativeUsage>,
 }
 
@@ -119,7 +113,7 @@ where
         task_spec: &TaskSpec,
         hints: &WorkflowHints,
         memory: ResolvedMemory,
-    ) -> Result<DispatchRunResult> {
+    ) -> Result<RunExecutionResult> {
         self.run_with_observers(spec, task_spec, hints, memory, |_prev, _next| {}, None)
             .await
     }
@@ -131,7 +125,7 @@ where
         hints: &WorkflowHints,
         memory: ResolvedMemory,
         mut on_transition: F,
-    ) -> Result<DispatchRunResult>
+    ) -> Result<RunExecutionResult>
     where
         F: FnMut(Option<RunPhase>, RunPhase),
     {
@@ -147,7 +141,7 @@ where
         memory: ResolvedMemory,
         mut on_transition: F,
         mut output_observer: Option<&mut dyn RunnerOutputObserver>,
-    ) -> Result<DispatchRunResult>
+    ) -> Result<RunExecutionResult>
     where
         F: FnMut(Option<RunPhase>, RunPhase),
     {
@@ -333,7 +327,7 @@ where
             }),
         };
 
-        Ok(DispatchRunResult {
+        Ok(RunExecutionResult {
             handle_id: tracker.handle_id,
             created_at: tracker.created_at,
             updated_at: tracker.updated_at,

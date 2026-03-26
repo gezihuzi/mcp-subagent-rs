@@ -33,7 +33,6 @@ pub struct PreparedWorkspace {
     pub source_path: PathBuf,
     pub workspace_path: PathBuf,
     pub mode: WorkspaceMode,
-    #[serde(default)]
     pub notes: Vec<String>,
 }
 

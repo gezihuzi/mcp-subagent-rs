@@ -102,15 +102,12 @@ pub(crate) struct PolicySnapshot {
     pub(crate) spawn_policy_source: PolicyValueSource,
     pub(crate) background_preference: String,
     pub(crate) background_preference_source: PolicyValueSource,
-    #[serde(default)]
     pub(crate) max_turns: Option<u32>,
     pub(crate) max_turns_source: PolicyValueSource,
     pub(crate) retry_max_attempts: u32,
     pub(crate) retry_backoff_secs: u64,
     pub(crate) retry_policy_source: PolicyValueSource,
-    #[serde(default)]
     pub(crate) attempts_used: Option<u32>,
-    #[serde(default)]
     pub(crate) retries_used: Option<u32>,
 }
 
@@ -120,11 +117,8 @@ pub(crate) struct WorkspaceRecord {
     pub(crate) mode: String,
     pub(crate) source_path: PathBuf,
     pub(crate) workspace_path: PathBuf,
-    #[serde(default)]
     pub(crate) notes: Vec<String>,
-    #[serde(default)]
     pub(crate) lock_key: Option<String>,
-    #[serde(default)]
     pub(crate) lock_keys: Vec<String>,
 }
 
@@ -133,12 +127,9 @@ pub(crate) struct WorkspaceRecord {
 pub(crate) struct RunSpecSnapshot {
     pub(crate) name: String,
     pub(crate) provider: String,
-    #[serde(default)]
     pub(crate) model: Option<String>,
     pub(crate) context_mode: String,
-    #[serde(default = "default_delegation_context_snapshot")]
     pub(crate) delegation_context: String,
-    #[serde(default)]
     pub(crate) plan_section_selector: Option<String>,
     pub(crate) working_dir_policy: String,
     pub(crate) file_conflict_policy: String,
@@ -153,7 +144,6 @@ pub(crate) struct RunSpecSnapshot {
 pub(crate) struct ProbeResultRecord {
     pub(crate) provider: String,
     pub(crate) executable: PathBuf,
-    #[serde(default)]
     pub(crate) version: Option<String>,
     pub(crate) status: String,
     pub(crate) notes: Vec<String>,
@@ -165,11 +155,8 @@ pub(crate) struct MemoryResolutionRecord {
     pub(crate) project_memory_count: usize,
     pub(crate) additional_memory_count: usize,
     pub(crate) native_passthrough_count: usize,
-    #[serde(default)]
     pub(crate) project_memory_labels: Vec<String>,
-    #[serde(default)]
     pub(crate) additional_memory_labels: Vec<String>,
-    #[serde(default)]
     pub(crate) native_passthrough_paths: Vec<PathBuf>,
 }
 
@@ -182,19 +169,12 @@ pub(crate) struct PersistedRunState {
     #[serde(with = "time::serde::rfc3339")]
     pub(crate) updated_at: OffsetDateTime,
     pub(crate) status_history: Vec<RunPhase>,
-    #[serde(default)]
     pub(crate) error_message: Option<String>,
-    #[serde(default)]
     pub(crate) probe_result: Option<ProbeResultRecord>,
-    #[serde(default)]
     pub(crate) memory_resolution: Option<MemoryResolutionRecord>,
-    #[serde(default)]
     pub(crate) workspace: Option<WorkspaceRecord>,
-    #[serde(default)]
     pub(crate) compiled_context_markdown: Option<String>,
-    #[serde(default)]
     pub(crate) usage: Option<NativeUsage>,
-    #[serde(default)]
     pub(crate) policy: Option<PolicySnapshot>,
 }
 
@@ -204,11 +184,8 @@ pub(crate) struct PersistedRun {
     pub(crate) task_spec: TaskSpec,
     pub(crate) hints: WorkflowHints,
     pub(crate) state: PersistedRunState,
-    #[serde(default)]
     pub(crate) outcome: Option<RunOutcome>,
-    #[serde(default)]
     pub(crate) artifact_index: Vec<ArtifactOutput>,
-    #[serde(default)]
     pub(crate) spec_snapshot: Option<RunSpecSnapshot>,
 }
 
@@ -267,10 +244,6 @@ pub(crate) fn build_probe_result_snapshot(probe: &ProviderProbe) -> ProbeResultR
         status: probe.status.to_string(),
         notes: probe.notes.clone(),
     }
-}
-
-fn default_delegation_context_snapshot() -> String {
-    "minimal".to_string()
 }
 
 pub(crate) fn build_memory_resolution_snapshot(memory: &ResolvedMemory) -> MemoryResolutionRecord {

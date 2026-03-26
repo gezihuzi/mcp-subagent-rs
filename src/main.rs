@@ -1122,7 +1122,6 @@ fn estimate_path_size(path: &Path) -> std::result::Result<u64, std::io::Error> {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
 struct StoredRunSpecSnapshot {
     name: String,
     provider: String,
@@ -1130,7 +1129,6 @@ struct StoredRunSpecSnapshot {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
 struct StoredExecutionPolicy {
     requested_run_mode: Option<String>,
     effective_run_mode: Option<String>,
@@ -1149,7 +1147,6 @@ struct StoredExecutionPolicy {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
 struct StoredNativeUsage {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
@@ -1248,7 +1245,7 @@ struct StoredTaskSpec {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 struct StoredRunState {
     status: String,
-    created_at: Option<String>,
+    created_at: String,
     updated_at: String,
     status_history: Vec<String>,
     error_message: Option<String>,
@@ -1271,8 +1268,8 @@ impl StoredRunRecord {
         self.state.status.as_str()
     }
 
-    fn created_at(&self) -> Option<&str> {
-        self.state.created_at.as_deref()
+    fn created_at(&self) -> &str {
+        self.state.created_at.as_str()
     }
 
     fn updated_at(&self) -> &str {
@@ -1372,13 +1369,11 @@ struct RunLogsOutput {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
 struct RunTimelineEvent {
     event: String,
     timestamp: String,
     detail: serde_json::Value,
     seq: Option<u64>,
-    ts: Option<String>,
     level: Option<String>,
     state: Option<String>,
     phase: Option<String>,
@@ -1386,30 +1381,9 @@ struct RunTimelineEvent {
     message: Option<String>,
 }
 
-impl Default for RunTimelineEvent {
-    fn default() -> Self {
-        Self {
-            event: String::new(),
-            timestamp: String::new(),
-            detail: serde_json::Value::Null,
-            seq: None,
-            ts: None,
-            level: None,
-            state: None,
-            phase: None,
-            source: None,
-            message: None,
-        }
-    }
-}
-
 impl RunTimelineEvent {
     fn display_timestamp(&self) -> &str {
-        if !self.timestamp.is_empty() {
-            self.timestamp.as_str()
-        } else {
-            self.ts.as_deref().unwrap_or("")
-        }
+        self.timestamp.as_str()
     }
 }
 
@@ -1734,10 +1708,7 @@ fn parse_rfc3339(value: &str) -> Option<OffsetDateTime> {
 }
 
 fn event_time(event: &RunTimelineEvent) -> Option<OffsetDateTime> {
-    if !event.timestamp.is_empty() {
-        return parse_rfc3339(&event.timestamp);
-    }
-    parse_rfc3339(event.ts.as_deref()?)
+    parse_rfc3339(&event.timestamp)
 }
 
 fn duration_between(start: Option<OffsetDateTime>, end: Option<OffsetDateTime>) -> Option<u64> {
@@ -2188,7 +2159,7 @@ fn build_usage_output(
     handle_id: &str,
     record: &StoredRunRecord,
 ) -> UsageStatsOutput {
-    let started_at = record.created_at().map(str::to_string);
+    let started_at = Some(record.created_at().to_string());
     let finished_at = if is_terminal_status(record.status()) {
         Some(record.updated_at().to_string())
     } else {
@@ -2346,11 +2317,11 @@ fn list_runs(cfg: RuntimeConfig, limit: usize, json: bool) -> ExitCode {
                     Some((now - ts).whole_milliseconds().max(0) as u64)
                 }
             });
-            let duration_ms = compute_duration_ms(record.created_at(), record.updated_at());
+            let duration_ms = compute_duration_ms(Some(record.created_at()), record.updated_at());
             let elapsed_ms = if is_terminal_status(record.status()) {
                 duration_ms
             } else {
-                let started = record.created_at().and_then(parse_rfc3339);
+                let started = parse_rfc3339(record.created_at());
                 duration_between(started, Some(now))
             };
             let stalled = !is_terminal_status(record.status())
@@ -3453,7 +3424,7 @@ fn build_run_stats_output(
     let usage = build_usage_output(state_dir, handle_id, record);
     let events = load_run_events(state_dir, handle_id).unwrap_or_default();
 
-    let created_at = record.created_at().and_then(parse_rfc3339);
+    let created_at = parse_rfc3339(record.created_at());
     let accepted_at = first_event_time(&events, "run.accepted").or(created_at);
     let probe_started = first_event_time(&events, "provider.probe.started");
     let probe_completed = first_event_time(&events, "provider.probe.completed");
@@ -4921,7 +4892,7 @@ target/
         let record = StoredRunRecord {
             state: super::StoredRunState {
                 status: "succeeded".to_string(),
-                created_at: Some("2026-03-25T00:00:00Z".to_string()),
+                created_at: "2026-03-25T00:00:00Z".to_string(),
                 updated_at: "2026-03-25T00:00:01Z".to_string(),
                 usage: Some(StoredNativeUsage {
                     input_tokens: Some(111),
@@ -4955,7 +4926,7 @@ target/
         let record = StoredRunRecord {
             state: super::StoredRunState {
                 status: "succeeded".to_string(),
-                created_at: Some("2026-03-25T00:00:00Z".to_string()),
+                created_at: "2026-03-25T00:00:00Z".to_string(),
                 updated_at: "2026-03-25T00:00:01Z".to_string(),
                 usage: Some(StoredNativeUsage {
                     input_tokens: Some(50),
@@ -5472,7 +5443,7 @@ target/
         let record = StoredRunRecord {
             state: super::StoredRunState {
                 status: "succeeded".to_string(),
-                created_at: Some("2026-03-25T00:00:00Z".to_string()),
+                created_at: "2026-03-25T00:00:00Z".to_string(),
                 updated_at: "2026-03-25T00:00:08Z".to_string(),
                 ..super::StoredRunState::default()
             },
@@ -5525,7 +5496,6 @@ target/
             timestamp: "2026-03-25T00:00:00Z".to_string(),
             detail: serde_json::json!({}),
             seq: Some(1),
-            ts: None,
             level: None,
             state: Some("running".to_string()),
             phase: Some("waiting_for_auth".to_string()),
@@ -5555,7 +5525,6 @@ target/
                 timestamp: "2026-03-25T00:00:00Z".to_string(),
                 detail: serde_json::json!({}),
                 seq: Some(1),
-                ts: None,
                 level: None,
                 state: Some("running".to_string()),
                 phase: Some("waiting_for_auth".to_string()),
@@ -5575,7 +5544,6 @@ target/
                 timestamp: "2026-03-25T00:00:00Z".to_string(),
                 detail: serde_json::json!({}),
                 seq: Some(1),
-                ts: None,
                 level: None,
                 state: Some("accepted".to_string()),
                 phase: Some("accepted".to_string()),
@@ -5587,7 +5555,6 @@ target/
                 timestamp: "2026-03-25T00:00:01Z".to_string(),
                 detail: serde_json::json!({}),
                 seq: Some(2),
-                ts: None,
                 level: None,
                 state: Some("preparing".to_string()),
                 phase: Some("provider_probe".to_string()),
@@ -5599,7 +5566,6 @@ target/
                 timestamp: "2026-03-25T00:00:02Z".to_string(),
                 detail: serde_json::json!({}),
                 seq: Some(3),
-                ts: None,
                 level: None,
                 state: Some("running".to_string()),
                 phase: Some("running".to_string()),
@@ -5623,7 +5589,6 @@ target/
             timestamp: "2026-03-25T00:00:02Z".to_string(),
             detail: serde_json::json!({}),
             seq: Some(1),
-            ts: None,
             level: None,
             state: Some("succeeded".to_string()),
             phase: Some("completed".to_string()),
@@ -5644,7 +5609,6 @@ target/
             timestamp: "2026-03-25T00:00:02Z".to_string(),
             detail: serde_json::json!({}),
             seq: Some(1),
-            ts: None,
             level: None,
             state: Some("running".to_string()),
             phase: Some("running".to_string()),
@@ -5664,7 +5628,6 @@ target/
                 timestamp: "2026-03-25T00:00:02Z".to_string(),
                 detail: serde_json::json!({}),
                 seq: Some(1),
-                ts: None,
                 level: None,
                 state: Some("running".to_string()),
                 phase: Some("running".to_string()),
@@ -5678,7 +5641,6 @@ target/
                     "synthetic": true,
                 }),
                 seq: Some(2),
-                ts: None,
                 level: None,
                 state: Some("preparing".to_string()),
                 phase: Some("context_compile".to_string()),
@@ -5690,7 +5652,6 @@ target/
                 timestamp: "2026-03-25T00:00:04Z".to_string(),
                 detail: serde_json::json!({}),
                 seq: Some(3),
-                ts: None,
                 level: None,
                 state: Some("succeeded".to_string()),
                 phase: Some("completed".to_string()),
