@@ -3378,3 +3378,26 @@
 - 已验证：
   - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-130 Refactor-TaskData-HardCut-MainOutcomeSurfaceNoSummaryEnvelopeBridge (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，收口 `main.rs` 的 run 结果读取面，移除 `StoredSummaryEnvelope/StoredStructuredSummary` 旧桥接模型，CLI `show/result` 直接基于 `StoredRunOutcome` 读取 parse/sumary 字段。  
+验收标准：
+
+1. `src/main.rs` 不再定义 `StoredSummaryEnvelope` 与 `StoredStructuredSummary`，`StoredRunRecord` 不再通过 `normalized_summary()` 回包旧摘要结构。
+2. `show_run` 与 `read_result` 的 `normalization_status/summary/normalized_result` 均直接来自 `StoredRunOutcome`（成功态字段直接读 `StoredSuccessOutcome`）。
+3. Outcome 子结构反序列化收紧，不再依赖 `#[serde(default)]` 的宽松兜底（`StoredRetryInfo/StoredOutcomeUsage/StoredSuccessOutcome/StoredFailureOutcome`）。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/main.rs`：
+  - 删除 `StoredStructuredSummary`、`StoredSummaryEnvelope` 与 `StoredRunRecord::normalized_summary()`；
+  - `StoredRunOutcome` 新增 `success_outcome()/parse_status()` 访问方法；
+  - `RunResultOutput.normalized_result` 改为 `Option<StoredSuccessOutcome>`；
+  - `show_run/read_result` 改为直接从 `record.outcome` 提取 `parse_status` 与 `summary_text`；
+  - 移除 `SUMMARY_CONTRACT_VERSION` 在 `main.rs` 的桥接依赖。
+- 已收紧 main 侧 outcome 读取模型：
+  - 移除 `StoredRetryInfo/StoredOutcomeUsage/StoredSuccessOutcome/StoredFailureOutcome` 的 `#[serde(default)]` 宽松反序列化。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

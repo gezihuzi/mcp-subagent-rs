@@ -25,9 +25,7 @@ use mcp_subagent::{
         server::McpSubagentServer,
     },
     probe::SystemProviderProber,
-    runtime::{
-        context::validate_default_summary_contract_template, summary::SUMMARY_CONTRACT_VERSION,
-    },
+    runtime::context::validate_default_summary_contract_template,
     spec::registry::load_agent_specs_from_dirs,
 };
 use rmcp::handler::server::wrapper::Parameters;
@@ -1125,28 +1123,6 @@ fn estimate_path_size(path: &Path) -> std::result::Result<u64, std::io::Error> {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
-struct StoredStructuredSummary {
-    summary: String,
-    key_findings: Vec<String>,
-    open_questions: Vec<String>,
-    next_steps: Vec<String>,
-    exit_code: i32,
-    verification_status: String,
-    touched_files: Vec<String>,
-    plan_refs: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
-struct StoredSummaryEnvelope {
-    contract_version: String,
-    parse_status: String,
-    summary: StoredStructuredSummary,
-    raw_fallback_text: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
 struct StoredRunSpecSnapshot {
     name: String,
     provider: String,
@@ -1181,7 +1157,6 @@ struct StoredNativeUsage {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
 struct StoredRetryInfo {
     classification: String,
     reason: Option<String>,
@@ -1189,7 +1164,6 @@ struct StoredRetryInfo {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
 struct StoredOutcomeUsage {
     duration_ms: u64,
     input_tokens: Option<u64>,
@@ -1199,7 +1173,6 @@ struct StoredOutcomeUsage {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
 struct StoredSuccessOutcome {
     summary: String,
     key_findings: Vec<String>,
@@ -1213,7 +1186,6 @@ struct StoredSuccessOutcome {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
 struct StoredFailureOutcome {
     error: String,
     retry: StoredRetryInfo,
@@ -1231,6 +1203,18 @@ enum StoredRunOutcome {
 }
 
 impl StoredRunOutcome {
+    fn success_outcome(&self) -> Option<&StoredSuccessOutcome> {
+        match self {
+            Self::Succeeded(success) => Some(success),
+            Self::Failed(_) | Self::Cancelled { .. } | Self::TimedOut { .. } => None,
+        }
+    }
+
+    fn parse_status(&self) -> Option<&str> {
+        self.success_outcome()
+            .map(|success| success.parse_status.as_str())
+    }
+
     fn usage(&self) -> Option<&StoredOutcomeUsage> {
         match self {
             Self::Succeeded(success) => Some(&success.usage),
@@ -1306,29 +1290,6 @@ impl StoredRunRecord {
     fn task(&self) -> &str {
         self.task_spec.task.as_str()
     }
-
-    fn normalized_summary(&self) -> Option<StoredSummaryEnvelope> {
-        match self.outcome.as_ref()? {
-            StoredRunOutcome::Succeeded(success) => Some(StoredSummaryEnvelope {
-                contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
-                parse_status: success.parse_status.clone(),
-                summary: StoredStructuredSummary {
-                    summary: success.summary.clone(),
-                    key_findings: success.key_findings.clone(),
-                    open_questions: success.open_questions.clone(),
-                    next_steps: success.next_steps.clone(),
-                    exit_code: success.usage.provider_exit_code.unwrap_or_default(),
-                    verification_status: success.verification.clone(),
-                    touched_files: success.touched_files.clone(),
-                    plan_refs: success.plan_refs.clone(),
-                },
-                raw_fallback_text: None,
-            }),
-            StoredRunOutcome::Failed(_)
-            | StoredRunOutcome::Cancelled { .. }
-            | StoredRunOutcome::TimedOut { .. } => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1393,7 +1354,7 @@ struct RunResultOutput {
     normalization_status: String,
     summary: Option<String>,
     native_result: Option<String>,
-    normalized_result: Option<StoredSummaryEnvelope>,
+    normalized_result: Option<StoredSuccessOutcome>,
     provider_exit_code: Option<i32>,
     retries: u32,
     retry_classification: String,
@@ -2462,7 +2423,16 @@ fn show_run(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
     };
     let usage = build_usage_output(&cfg.state_dir, &handle_id, &record);
     let (retry_classification, classification_reason) = resolve_retry_classification(&record);
-    let normalized_summary = record.normalized_summary();
+    let normalization_status = record
+        .outcome
+        .as_ref()
+        .and_then(StoredRunOutcome::parse_status)
+        .map(str::to_string);
+    let summary_text = record
+        .outcome
+        .as_ref()
+        .and_then(StoredRunOutcome::summary_text)
+        .map(str::to_string);
     let view = RunShowOutput {
         handle_id: handle_id.clone(),
         status: record.status().to_string(),
@@ -2476,12 +2446,8 @@ fn show_run(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
             .spec_snapshot
             .as_ref()
             .and_then(|spec| spec.model.clone()),
-        normalization_status: normalized_summary
-            .as_ref()
-            .map(|summary| summary.parse_status.clone()),
-        summary: normalized_summary
-            .as_ref()
-            .map(|summary| summary.summary.summary.clone()),
+        normalization_status,
+        summary: summary_text,
         provider_exit_code: infer_provider_exit_code(&record),
         retries: usage.retries,
         retry_classification,
@@ -2524,7 +2490,22 @@ fn read_result(
                 .and_then(StoredRunOutcome::summary_text)
                 .map(str::to_string)
         });
-    let normalized_result = record.normalized_summary();
+    let normalized_result = record
+        .outcome
+        .as_ref()
+        .and_then(StoredRunOutcome::success_outcome)
+        .cloned();
+    let normalization_status = record
+        .outcome
+        .as_ref()
+        .and_then(StoredRunOutcome::parse_status)
+        .unwrap_or("NotAvailable")
+        .to_string();
+    let summary_text = record
+        .outcome
+        .as_ref()
+        .and_then(StoredRunOutcome::summary_text)
+        .map(str::to_string);
     let usage = build_usage_output(&cfg.state_dir, &handle_id, &record);
     let (retry_classification, classification_reason) = resolve_retry_classification(&record);
     let view = if raw {
@@ -2541,13 +2522,8 @@ fn read_result(
         handle_id: handle_id.clone(),
         status: record.status().to_string(),
         view: view.to_string(),
-        normalization_status: normalized_result
-            .as_ref()
-            .map(|summary| summary.parse_status.clone())
-            .unwrap_or_else(|| "NotAvailable".to_string()),
-        summary: normalized_result
-            .as_ref()
-            .map(|summary| summary.summary.summary.clone()),
+        normalization_status,
+        summary: summary_text.clone(),
         native_result: native_result.clone(),
         normalized_result: normalized_result.clone(),
         provider_exit_code: usage.provider_exit_code,
@@ -2576,8 +2552,8 @@ fn read_result(
         return ExitCode::SUCCESS;
     }
 
-    if let Some(summary) = normalized_result.as_ref() {
-        println!("{}", summary.summary.summary);
+    if let Some(summary) = summary_text.as_deref() {
+        println!("{summary}");
     } else if let Some(raw_text) = native_result {
         println!("{raw_text}");
     }
