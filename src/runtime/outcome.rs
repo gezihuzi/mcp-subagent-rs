@@ -82,7 +82,6 @@ pub struct SuccessOutcome {
     pub verification: VerificationStatus,
     pub usage: UsageStats,
     pub parse_status: SummaryParseStatus,
-    #[serde(default)]
     pub plan_refs: Vec<String>,
 }
 
@@ -107,7 +106,6 @@ pub struct FailureOutcome {
 #[serde(deny_unknown_fields)]
 pub struct RetryInfo {
     pub classification: RetryClassification,
-    #[serde(default)]
     pub reason: Option<String>,
     pub attempts_used: u32,
 }
@@ -120,13 +118,9 @@ pub struct RetryInfo {
 #[serde(deny_unknown_fields)]
 pub struct UsageStats {
     pub duration_ms: u64,
-    #[serde(default)]
     pub input_tokens: Option<u64>,
-    #[serde(default)]
     pub output_tokens: Option<u64>,
-    #[serde(default)]
     pub total_tokens: Option<u64>,
-    #[serde(default)]
     pub provider_exit_code: Option<i32>,
 }
 

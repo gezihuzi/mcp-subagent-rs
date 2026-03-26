@@ -33,7 +33,6 @@ pub struct ArtifactRef {
     pub path: PathBuf,
     pub kind: ArtifactKind,
     pub description: String,
-    #[serde(default)]
     pub media_type: Option<String>,
 }
 
@@ -62,7 +61,6 @@ pub struct ProviderSummary {
     pub next_steps: Vec<String>,
     pub verification: VerificationStatus,
     pub touched_files: Vec<String>,
-    #[serde(default)]
     pub plan_refs: Vec<String>,
 }
 
@@ -84,7 +82,6 @@ impl std::fmt::Display for SummaryParseStatus {
 pub struct ParsedSummary {
     parse_status: SummaryParseStatus,
     summary: ProviderSummary,
-    #[serde(default)]
     raw_fallback_text: Option<String>,
 }
 
