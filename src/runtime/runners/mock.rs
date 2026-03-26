@@ -1,11 +1,13 @@
 use crate::{
     error::Result,
-    runtime::outcome::{SuccessOutcome, UsageStats},
-    runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
-    runtime::summary::{
-        SummaryEnvelope, SummaryParseStatus, VerificationStatus, SUMMARY_END_SENTINEL,
-        SUMMARY_START_SENTINEL,
+    runtime::{
+        outcome::{SuccessOutcome, UsageStats},
+        summary::{
+            ProviderSummary, SummaryParseStatus, VerificationStatus, SUMMARY_END_SENTINEL,
+            SUMMARY_START_SENTINEL,
+        },
     },
+    runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
     spec::AgentSpec,
     types::{CompiledContext, TaskSpec, WorkflowHints},
 };
@@ -13,7 +15,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum MockRunPlan {
     Succeeded {
-        envelope: SummaryEnvelope,
+        envelope: ProviderSummary,
     },
     SucceededFromRequest,
     Failed {
@@ -122,8 +124,18 @@ fn build_mock_success_outcome(spec: &AgentSpec, task_spec: &TaskSpec) -> Success
     }
 }
 
-fn build_mock_envelope_from_task_spec(spec: &AgentSpec, task_spec: &TaskSpec) -> SummaryEnvelope {
-    SummaryEnvelope::from_success_outcome(build_mock_success_outcome(spec, task_spec), 0, None)
+fn build_mock_envelope_from_task_spec(spec: &AgentSpec, task_spec: &TaskSpec) -> ProviderSummary {
+    let success = build_mock_success_outcome(spec, task_spec);
+    ProviderSummary {
+        summary: success.summary,
+        key_findings: success.key_findings,
+        artifacts: success.artifacts,
+        open_questions: success.open_questions,
+        next_steps: success.next_steps,
+        verification: success.verification,
+        touched_files: success.touched_files,
+        plan_refs: success.plan_refs,
+    }
 }
 
 #[cfg(test)]
@@ -132,10 +144,9 @@ mod tests {
 
     use crate::{
         runtime::{
-            outcome::{SuccessOutcome, UsageStats},
             runners::mock::{MockRunPlan, MockRunner},
             runners::{AgentRunner, RunnerTerminalState},
-            summary::{SummaryEnvelope, SummaryParseStatus, VerificationStatus},
+            summary::{ProviderSummary, VerificationStatus},
         },
         spec::{
             core::{AgentSpecCore, Provider},
@@ -182,22 +193,16 @@ mod tests {
     #[tokio::test]
     async fn mock_runner_success_wraps_summary_json() {
         let runner = MockRunner::new(MockRunPlan::Succeeded {
-            envelope: SummaryEnvelope::from_success_outcome(
-                SuccessOutcome {
-                    summary: "ok".to_string(),
-                    key_findings: vec!["a".to_string()],
-                    artifacts: Vec::new(),
-                    open_questions: Vec::new(),
-                    next_steps: Vec::new(),
-                    verification: VerificationStatus::Passed,
-                    usage: UsageStats::ZERO,
-                    parse_status: SummaryParseStatus::Validated,
-                    touched_files: Vec::new(),
-                    plan_refs: Vec::new(),
-                },
-                0,
-                None,
-            ),
+            envelope: ProviderSummary {
+                summary: "ok".to_string(),
+                key_findings: vec!["a".to_string()],
+                artifacts: Vec::new(),
+                open_questions: Vec::new(),
+                next_steps: Vec::new(),
+                verification: VerificationStatus::Passed,
+                touched_files: Vec::new(),
+                plan_refs: Vec::new(),
+            },
         });
 
         let execution = runner

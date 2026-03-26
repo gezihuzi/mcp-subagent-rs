@@ -3401,3 +3401,35 @@
 - 已验证：
   - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-131 Refactor-TaskData-HardCut-RuntimeSummaryContractNoEnvelope (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，移除 runtime 输入契约中的 `SummaryEnvelope`，改为 `ProviderSummary`（模型输出）+ `ParsedSummary`（runtime 解析结果）双层模型，`dispatcher/context/runners` 全链路切换。  
+验收标准：
+
+1. `src/runtime/summary.rs` 不再定义/导出 `SummaryEnvelope`、`parse_summary_envelope`、`SUMMARY_CONTRACT_VERSION`。
+2. `ContextCompiler::parse_summary` 返回类型改为新解析模型（非 `SummaryEnvelope`），模板契约文本同步为 `ProviderSummary`。
+3. `dispatcher` 不再依赖 `summary.exit_code`，`provider_exit_code` 由 runtime 终态推断；成功/失败 outcome 仍保持行为一致。
+4. `codex/claude/mock` runner 的 schema/输出夹具和 `mcp/server` 文案同步去 `SummaryEnvelope` 命名。
+5. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已重写 `src/runtime/summary.rs`：
+  - 新增 `ProviderSummary`（provider 输出契约）与 `ParsedSummary`（parse_status + raw_fallback + summary）；
+  - 新增 `parse_summary_contract`，删除 `SummaryEnvelope` 与 `parse_summary_envelope`；
+  - 保留并复用 `SummaryParseStatus/ArtifactRef/VerificationStatus`，`to_success_outcome` 桥接改为基于 `ParsedSummary`。
+- 已更新 `src/runtime/context.rs`：
+  - `ContextCompiler::parse_summary` 返回 `ParsedSummary`；
+  - 提示词契约和模板校验从 `SummaryEnvelope` 改为 `ProviderSummary`。
+- 已更新 `src/runtime/dispatcher.rs`：
+  - 解析输入改为 `ParsedSummary`；
+  - 删除对 `summary.exit_code` 的依赖，新增 `infer_provider_exit_code(RunnerTerminalState)`；
+  - outcome 构建保持原语义（成功/失败/取消/超时）。
+- 已更新 runner 与文案：
+  - `src/runtime/runners/codex.rs`、`src/runtime/runners/claude.rs` schema 目标改为 `ProviderSummary`；
+  - `src/runtime/runners/mock.rs` 成功计划载荷改为 `ProviderSummary`；
+  - `src/runtime/runners/codex.rs`、`src/runtime/runners/claude.rs`、`src/runtime/runners/gemini.rs`、`src/runtime/runners/ollama.rs` 测试夹具去除 `exit_code` 字段，和新契约保持一致；
+  - `src/mcp/server.rs` 固定指引文本改为 `ProviderSummary`。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

@@ -14,7 +14,7 @@ use crate::{
         context::ContextCompiler,
         outcome::{FailureOutcome, RetryClassification, RetryInfo, RunOutcome, UsageStats},
         runners::{AgentRunner, RunnerOutputObserver, RunnerTerminalState},
-        summary::{SummaryEnvelope, SummaryParseStatus},
+        summary::{ParsedSummary, SummaryParseStatus},
         usage::NativeUsage,
     },
     spec::{
@@ -219,17 +219,17 @@ where
             previous_status = tracker.status.clone();
             tracker.transition(RunPhase::ParsingSummary);
             on_transition(Some(previous_status), RunPhase::ParsingSummary);
-            let summary_envelope = self
+            let parsed_summary = self
                 .compiler
                 .parse_summary(&execution.stdout, &execution.stderr)?;
             let attempt_assessment =
-                assess_attempt_outcome(&execution, &summary_envelope, &spec.runtime.parse_policy);
+                assess_attempt_outcome(&execution, &parsed_summary, &spec.runtime.parse_policy);
 
             let retry_exhausted = attempt >= attempt_budget;
             let can_retry = attempt_assessment.retryable && !retry_exhausted;
 
             final_execution = Some(execution);
-            final_summary = Some(summary_envelope);
+            final_summary = Some(parsed_summary);
             final_status = attempt_assessment.status;
             final_error_message = attempt_assessment.error_message;
             final_retry_classification = attempt_assessment.retry_classification;
@@ -268,9 +268,9 @@ where
                 "dispatcher did not collect runner execution".to_string(),
             )
         })?;
-        let summary_envelope = final_summary.ok_or_else(|| {
+        let parsed_summary = final_summary.ok_or_else(|| {
             McpSubagentError::SpecValidation(
-                "dispatcher did not collect summary envelope".to_string(),
+                "dispatcher did not collect parsed summary".to_string(),
             )
         })?;
 
@@ -295,12 +295,10 @@ where
             input_tokens: native_usage.as_ref().and_then(|u| u.input_tokens),
             output_tokens: native_usage.as_ref().and_then(|u| u.output_tokens),
             total_tokens: native_usage.as_ref().and_then(|u| u.total_tokens),
-            provider_exit_code: Some(summary_envelope.exit_code()),
+            provider_exit_code: Some(infer_provider_exit_code(&execution.terminal_state)),
         };
         let outcome = match tracker.status {
-            RunPhase::Succeeded => {
-                RunOutcome::Succeeded(summary_envelope.to_success_outcome(usage))
-            }
+            RunPhase::Succeeded => RunOutcome::Succeeded(parsed_summary.to_success_outcome(usage)),
             RunPhase::Failed => RunOutcome::Failed(FailureOutcome {
                 error: tracker
                     .error_message
@@ -311,7 +309,7 @@ where
                     reason: final_retry_classification_reason,
                     attempts_used: tracker.attempts_used,
                 },
-                partial_summary: Some(summary_envelope.summary_text().to_string()),
+                partial_summary: Some(parsed_summary.summary_text().to_string()),
                 usage,
             }),
             RunPhase::TimedOut => RunOutcome::TimedOut {
@@ -369,15 +367,12 @@ struct AttemptAssessment {
 
 fn assess_attempt_outcome(
     execution: &crate::runtime::runners::RunnerExecution,
-    summary_envelope: &SummaryEnvelope,
+    summary: &ParsedSummary,
     parse_policy: &ParsePolicy,
 ) -> AttemptAssessment {
     match &execution.terminal_state {
         RunnerTerminalState::Succeeded => {
-            if matches!(
-                summary_envelope.parse_status(),
-                SummaryParseStatus::Validated
-            ) {
+            if matches!(summary.parse_status(), SummaryParseStatus::Validated) {
                 AttemptAssessment {
                     status: RunPhase::Succeeded,
                     error_message: None,
@@ -399,12 +394,12 @@ fn assess_attempt_outcome(
                     } else {
                         Some(format!(
                             "structured summary parse status is {}",
-                            summary_envelope.parse_status()
+                            summary.parse_status()
                         ))
                     },
                     retryable: !matches!(parse_policy, ParsePolicy::BestEffort)
                         && matches!(
-                            summary_envelope.parse_status(),
+                            summary.parse_status(),
                             SummaryParseStatus::Invalid | SummaryParseStatus::Degraded
                         ),
                     retry_classification: if matches!(parse_policy, ParsePolicy::BestEffort) {
@@ -416,12 +411,12 @@ fn assess_attempt_outcome(
                         if matches!(parse_policy, ParsePolicy::BestEffort) {
                             format!(
                                 "parse_status={} accepted by best_effort policy",
-                                summary_envelope.parse_status()
+                                summary.parse_status()
                             )
                         } else {
                             format!(
                                 "parse_status={} requires retry under strict policy",
-                                summary_envelope.parse_status()
+                                summary.parse_status()
                             )
                         },
                     ),
@@ -452,6 +447,15 @@ fn assess_attempt_outcome(
             retry_classification: RetryClassification::NonRetryable,
             retry_classification_reason: Some("runner cancelled by user request".to_string()),
         },
+    }
+}
+
+fn infer_provider_exit_code(terminal_state: &RunnerTerminalState) -> i32 {
+    match terminal_state {
+        RunnerTerminalState::Succeeded => 0,
+        RunnerTerminalState::Failed { .. } => 1,
+        RunnerTerminalState::TimedOut => 124,
+        RunnerTerminalState::Cancelled => 130,
     }
 }
 
@@ -1074,13 +1078,13 @@ mod tests {
         runtime::{
             context::DefaultContextCompiler,
             dispatcher::{Dispatcher, RunPhase},
-            outcome::{RunOutcome, SuccessOutcome, UsageStats},
+            outcome::RunOutcome,
             runners::{
                 mock::{MockRunPlan, MockRunner},
                 AgentRunner, RunnerExecution, RunnerTerminalState,
             },
             summary::{
-                SummaryEnvelope, SummaryParseStatus, VerificationStatus, SUMMARY_END_SENTINEL,
+                ProviderSummary, SummaryParseStatus, VerificationStatus, SUMMARY_END_SENTINEL,
                 SUMMARY_START_SENTINEL,
             },
         },
@@ -1172,26 +1176,20 @@ mod tests {
         }
     }
 
-    fn success_summary() -> SummaryEnvelope {
-        SummaryEnvelope::from_success_outcome(
-            SuccessOutcome {
-                summary: "ok".to_string(),
-                key_findings: vec!["one".to_string()],
-                artifacts: Vec::new(),
-                open_questions: Vec::new(),
-                next_steps: Vec::new(),
-                verification: VerificationStatus::Passed,
-                usage: UsageStats::ZERO,
-                parse_status: SummaryParseStatus::Validated,
-                touched_files: vec!["src/parser.rs".to_string()],
-                plan_refs: vec!["step-1".to_string()],
-            },
-            0,
-            None,
-        )
+    fn success_summary() -> ProviderSummary {
+        ProviderSummary {
+            summary: "ok".to_string(),
+            key_findings: vec!["one".to_string()],
+            artifacts: Vec::new(),
+            open_questions: Vec::new(),
+            next_steps: Vec::new(),
+            verification: VerificationStatus::Passed,
+            touched_files: vec!["src/parser.rs".to_string()],
+            plan_refs: vec!["step-1".to_string()],
+        }
     }
 
-    fn succeeded_execution(summary: SummaryEnvelope) -> RunnerExecution {
+    fn succeeded_execution(summary: ProviderSummary) -> RunnerExecution {
         let summary_json = serde_json::to_string_pretty(&summary).expect("serialize summary");
         RunnerExecution {
             terminal_state: RunnerTerminalState::Succeeded,

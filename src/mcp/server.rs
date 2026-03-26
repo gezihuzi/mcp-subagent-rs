@@ -145,7 +145,7 @@ impl McpSubagentServer {
             task: input.task,
             task_brief: input.task_brief,
             acceptance_criteria: vec![
-                "Return sentinel-wrapped SummaryEnvelope JSON.".to_string(),
+                "Return sentinel-wrapped ProviderSummary JSON.".to_string(),
                 "Keep findings concise and actionable.".to_string(),
             ],
             selected_files: input

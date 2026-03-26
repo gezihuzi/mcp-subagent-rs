@@ -3,7 +3,7 @@ use std::fmt::Write;
 use crate::{
     error::{McpSubagentError, Result},
     runtime::summary::{
-        parse_summary_envelope, SummaryEnvelope, SUMMARY_END_SENTINEL, SUMMARY_START_SENTINEL,
+        parse_summary_contract, ParsedSummary, SUMMARY_END_SENTINEL, SUMMARY_START_SENTINEL,
     },
     spec::{
         core::{AgentSpecCore, Provider},
@@ -36,7 +36,7 @@ pub trait ContextCompiler: Send + Sync {
         memory: ResolvedMemory,
     ) -> Result<CompiledContext>;
 
-    fn parse_summary(&self, raw_stdout: &str, raw_stderr: &str) -> Result<SummaryEnvelope>;
+    fn parse_summary(&self, raw_stdout: &str, raw_stderr: &str) -> Result<ParsedSummary>;
 }
 
 #[derive(Debug, Default)]
@@ -148,7 +148,7 @@ impl ContextCompiler for DefaultContextCompiler {
         };
 
         let response_contract = format!(
-            "Return a machine-readable JSON block only inside sentinels. The JSON must match SummaryEnvelope.\n{}\n{{...valid json...}}\n{}",
+            "Return a machine-readable JSON block only inside sentinels. The JSON must match ProviderSummary.\n{}\n{{...valid json...}}\n{}",
             SUMMARY_START_SENTINEL, SUMMARY_END_SENTINEL
         );
 
@@ -173,8 +173,8 @@ impl ContextCompiler for DefaultContextCompiler {
         })
     }
 
-    fn parse_summary(&self, raw_stdout: &str, raw_stderr: &str) -> Result<SummaryEnvelope> {
-        Ok(parse_summary_envelope(raw_stdout, raw_stderr))
+    fn parse_summary(&self, raw_stdout: &str, raw_stderr: &str) -> Result<ParsedSummary> {
+        Ok(parse_summary_contract(raw_stdout, raw_stderr))
     }
 }
 
@@ -195,9 +195,9 @@ pub fn validate_compiled_prompt_template(injected_prompt: &str) -> Result<()> {
         ));
     }
 
-    if !injected_prompt.contains("SummaryEnvelope") {
+    if !injected_prompt.contains("ProviderSummary") {
         return Err(McpSubagentError::SpecValidation(
-            "summary contract template must reference SummaryEnvelope JSON contract".to_string(),
+            "summary contract template must reference ProviderSummary JSON contract".to_string(),
         ));
     }
 
@@ -228,7 +228,7 @@ pub fn validate_default_summary_contract_template() -> Result<()> {
         task_brief: Some("Validate summary contract".to_string()),
         acceptance_criteria: vec![
             "Keep fixed sections in compiled template".to_string(),
-            "Keep sentinel-wrapped SummaryEnvelope JSON contract".to_string(),
+            "Keep sentinel-wrapped ProviderSummary JSON contract".to_string(),
         ],
         selected_files: Vec::new(),
         working_dir: ".".into(),

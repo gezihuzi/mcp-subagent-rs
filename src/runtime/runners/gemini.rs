@@ -541,7 +541,6 @@ cat <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": ["next"],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": ["src/lib.rs"]
 }
@@ -603,7 +602,6 @@ cat <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": [],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": []
 }
@@ -692,7 +690,6 @@ cat <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": [],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": []
 }
@@ -824,7 +821,6 @@ cat <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": [],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": []
 }
@@ -886,7 +882,6 @@ cat <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": [],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": []
 }

@@ -240,7 +240,7 @@ fn compose_prompt(compiled: &CompiledContext) -> String {
 }
 
 fn build_codex_output_schema_json() -> Result<String> {
-    let schema = schemars::schema_for!(crate::runtime::summary::SummaryEnvelope);
+    let schema = schemars::schema_for!(crate::runtime::summary::ProviderSummary);
     let mut schema_value = serde_json::to_value(schema).map_err(McpSubagentError::Json)?;
     normalize_openai_strict_schema(&mut schema_value);
     serde_json::to_string_pretty(&schema_value).map_err(McpSubagentError::Json)
@@ -450,7 +450,6 @@ cat >"$output_file" <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": ["next"],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": ["src/lib.rs"]
 }
@@ -517,7 +516,6 @@ cat >"$output_file" <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": ["next"],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": ["src/lib.rs"],
   "plan_refs": []
@@ -620,7 +618,6 @@ cat >"$output_file" <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": [],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": [],
   "plan_refs": []

@@ -50,7 +50,7 @@ impl ClaudeRunner {
             "mcp-subagent-summary-schema-{}.json",
             uuid::Uuid::now_v7()
         ));
-        let schema = schemars::schema_for!(crate::runtime::summary::SummaryEnvelope);
+        let schema = schemars::schema_for!(crate::runtime::summary::ProviderSummary);
         let schema_json = serde_json::to_string_pretty(&schema).map_err(McpSubagentError::Json)?;
         fs::write(&schema_file, schema_json).map_err(McpSubagentError::Io)?;
         let timeout = Duration::from_secs(spec.runtime.timeout_secs.max(1));
@@ -350,7 +350,6 @@ cat <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": ["next"],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": ["src/lib.rs"]
 }
@@ -410,7 +409,6 @@ cat <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": ["next"],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": ["src/lib.rs"],
   "plan_refs": []
@@ -500,7 +498,6 @@ cat <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": [],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": []
 }
@@ -674,7 +671,6 @@ cat <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": [],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": []
 }
