@@ -63,9 +63,9 @@ struct ConfigLayer {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
-    #[serde(default)]
+    #[serde(default = "default_file_server")]
     server: FileServer,
-    #[serde(default)]
+    #[serde(default = "default_file_paths")]
     paths: FilePaths,
 }
 
@@ -80,9 +80,21 @@ struct FileServer {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FilePaths {
-    #[serde(default)]
+    #[serde(default = "default_path_vec")]
     agents_dirs: Vec<PathBuf>,
     state_dir: Option<PathBuf>,
+}
+
+fn default_file_server() -> FileServer {
+    FileServer::default()
+}
+
+fn default_file_paths() -> FilePaths {
+    FilePaths::default()
+}
+
+fn default_path_vec() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 fn resolve_config_path(cli_path: Option<&PathBuf>) -> PathBuf {
@@ -379,6 +391,16 @@ mod tests {
     fn resolve_config_path_falls_back_to_project_relative_without_home() {
         let resolved = resolve_config_path_with(None, None, None, None);
         assert_eq!(resolved, PathBuf::from("./.mcp-subagent/config.toml"));
+    }
+
+    #[test]
+    fn file_config_direct_deserialization_preserves_section_defaults() {
+        let cfg: FileConfig = toml::from_str("").expect("file config should parse");
+
+        assert!(cfg.server._transport.is_none());
+        assert!(cfg.server.log_level.is_none());
+        assert!(cfg.paths.agents_dirs.is_empty());
+        assert!(cfg.paths.state_dir.is_none());
     }
 
     #[test]

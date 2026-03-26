@@ -95,6 +95,11 @@ instructions = "review"
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].spec.core.name, "reviewer");
         assert!(loaded[0].spec.core.model.is_none());
+        assert!(loaded[0].spec.core.allowed_tools.is_empty());
+        assert!(loaded[0].spec.core.disallowed_tools.is_empty());
+        assert!(loaded[0].spec.core.skills.is_empty());
+        assert!(loaded[0].spec.core.tags.is_empty());
+        assert!(loaded[0].spec.core.metadata.is_empty());
         assert_eq!(loaded[0].spec.runtime.timeout_secs, 900);
         assert!(loaded[0].spec.provider_overrides.claude.is_none());
         assert!(loaded[0].spec.provider_overrides.codex.is_none());

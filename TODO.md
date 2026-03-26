@@ -3734,3 +3734,48 @@
   - `cargo check` 通过。
   - `cargo test --workspace` 通过（206 + 65 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-147 AgentSpecCore-CollectionDefaultSourceAlignment (Completed 2026-03-26)
+
+任务：把 `AgentSpecCore` 中保留的集合默认值显式函数化，明确 `allowed_tools/disallowed_tools/skills/tags/metadata` 的空集合属于当前产品语义，而不是 bare `serde(default)` 的隐式行为。  
+验收标准：
+
+1. `src/spec/core.rs::AgentSpecCore` 的集合字段改为使用显式默认函数，而不是 bare `#[serde(default)]`。
+2. 新增测试覆盖最小 core/agent spec 反序列化时这些集合字段的默认值，并补充 registry 加载路径断言。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/spec/core.rs`：
+  - `allowed_tools/disallowed_tools/skills/tags` 改为使用 `default_string_vec()`；
+  - `metadata` 改为使用 `default_metadata()`，显式表达空 map 是有意默认值。
+- 已新增/更新测试：
+  - `src/spec/core.rs` 增加 `agent_spec_core_direct_deserialization_preserves_collection_defaults`；
+  - `src/spec/registry.rs::loads_agent_specs_and_applies_defaults` 补充 core 集合字段默认状态断言。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（207 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-148 WorkflowConfig-RemainingDefaultSourceAlignment (Completed 2026-03-26)
+
+任务：完成 `workflow/config` 层剩余 bare `serde(default)` 的显式默认来源统一，明确这些字段是保留的产品默认，而不是隐式派生行为。  
+验收标准：
+
+1. `src/spec/workflow.rs` 与 `src/config.rs` 中剩余 bare `#[serde(default)]` 改为显式默认函数。
+2. 新增或更新测试，覆盖 `WorkflowSpec` 与 `FileConfig` 在缺省字段下的直接反序列化默认值，并保持加载链路行为稳定。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/spec/workflow.rs`：
+  - `ReviewPolicy.require_style_review` 与 `KnowledgeCapturePolicy.update_project_memory` 改为使用 `default_false()`；
+  - `WorkflowSpec.require_plan_when/active_plan/review_policy/knowledge_capture/archive_policy/allowed_stages` 改为使用显式默认函数，和各自 `Default` 实现来源统一。
+- 已更新 `src/config.rs`：
+  - `FileConfig.server/paths` 改为 `default_file_server/default_file_paths`；
+  - `FilePaths.agents_dirs` 改为 `default_path_vec()`。
+- 已新增测试：
+  - `src/spec/workflow.rs` 增加 `workflow_spec_direct_deserialization_preserves_remaining_defaults`；
+  - `src/config.rs` 增加 `file_config_direct_deserialization_preserves_section_defaults`。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（209 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
