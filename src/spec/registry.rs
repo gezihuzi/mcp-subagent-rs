@@ -94,7 +94,9 @@ instructions = "review"
         let loaded = load_agent_specs_from_dir(dir.path()).expect("load");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].spec.core.name, "reviewer");
+        assert!(loaded[0].spec.core.model.is_none());
         assert_eq!(loaded[0].spec.runtime.timeout_secs, 900);
+        assert!(loaded[0].spec.workflow.is_none());
     }
 
     #[test]

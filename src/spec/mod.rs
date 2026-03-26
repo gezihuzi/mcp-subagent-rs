@@ -19,6 +19,5 @@ pub struct AgentSpec {
     pub runtime: RuntimePolicy,
     #[serde(default)]
     pub provider_overrides: ProviderOverrides,
-    #[serde(default)]
     pub workflow: Option<WorkflowSpec>,
 }

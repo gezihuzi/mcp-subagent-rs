@@ -30,7 +30,6 @@ pub struct AgentSpecCore {
     pub name: String,
     pub description: String,
     pub provider: Provider,
-    #[serde(default)]
     pub model: Option<String>,
     pub instructions: String,
     #[serde(default)]

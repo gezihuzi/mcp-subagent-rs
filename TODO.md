@@ -3629,3 +3629,24 @@
 - 已验证：
   - `cargo test --workspace` 通过（193 + 65 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-142 Refactor-TaskData-HardCut-SpecOptionalSerdeDefaultCleanup (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，清理 `spec` 层对 `Option` 字段的冗余 `serde(default)` 兼容标注，移除不必要的迁移期噪音，同时保持真正的业务默认值不变。  
+验收标准：
+
+1. `src/spec/mod.rs`、`src/spec/core.rs`、`src/spec/provider_overrides.rs`、`src/spec/runtime_policy.rs`、`src/spec/workflow.rs` 中所有 `Option<T>` 字段不再显式使用 `#[serde(default)]`。
+2. spec 加载/校验链路在缺失可选字段时仍按 Serde 原生 `Option` 语义工作，必要处补测试锁定行为。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/spec/mod.rs`、`src/spec/core.rs`、`src/spec/provider_overrides.rs`、`src/spec/runtime_policy.rs`、`src/spec/workflow.rs`：
+  - 移除 `workflow/model/plan_section_selector/max_turns` 及各 provider/workflow 子策略中 `Option` 字段上的冗余 `#[serde(default)]`；
+  - 保留 `runtime/workflow` 中承载产品默认语义的非 `Option` 字段默认值，不扩大本轮硬切范围。
+- 已新增/更新测试：
+  - `src/spec/provider_overrides.rs`、`src/spec/runtime_policy.rs`、`src/spec/workflow.rs` 新增反序列化测试，锁定缺失可选字段仍按 `Option::None` 解析；
+  - `src/spec/registry.rs` 的 `loads_agent_specs_and_applies_defaults` 增加 `model/workflow` 缺失字段断言。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（197 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

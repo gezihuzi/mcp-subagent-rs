@@ -160,7 +160,6 @@ pub struct RuntimePolicy {
     pub context_mode: ContextMode,
     #[serde(default = "default_delegation_context")]
     pub delegation_context: DelegationContextPolicy,
-    #[serde(default)]
     pub plan_section_selector: Option<String>,
     #[serde(default = "default_memory_sources")]
     pub memory_sources: Vec<MemorySource>,
@@ -174,7 +173,6 @@ pub struct RuntimePolicy {
     pub sandbox: SandboxPolicy,
     #[serde(default = "default_approval_policy")]
     pub approval: ApprovalPolicy,
-    #[serde(default)]
     pub max_turns: Option<u32>,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
@@ -316,5 +314,13 @@ mod tests {
             runtime.memory_sources,
             vec![MemorySource::AutoProjectMemory]
         );
+    }
+
+    #[test]
+    fn runtime_policy_option_fields_deserialize_without_default_annotations() {
+        let runtime: RuntimePolicy = toml::from_str("").expect("runtime policy should parse");
+
+        assert!(runtime.plan_section_selector.is_none());
+        assert!(runtime.max_turns.is_none());
     }
 }

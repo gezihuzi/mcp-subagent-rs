@@ -13,7 +13,6 @@ pub enum WorkflowStageKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowGatePolicy {
-    #[serde(default)]
     pub require_plan_if_touched_files_ge: Option<u32>,
     #[serde(default)]
     pub require_plan_if_cross_module: bool,
@@ -25,7 +24,6 @@ pub struct WorkflowGatePolicy {
     pub require_plan_if_migration: bool,
     #[serde(default)]
     pub require_plan_if_human_approval_point: bool,
-    #[serde(default)]
     pub require_plan_if_estimated_runtime_minutes_ge: Option<u32>,
 }
 
@@ -88,7 +86,6 @@ impl Default for ReviewPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeCapturePolicy {
-    #[serde(default)]
     pub trigger_if_touched_files_gt: Option<u32>,
     #[serde(default)]
     pub trigger_if_new_config: bool,
@@ -198,4 +195,44 @@ fn default_workflow_stages() -> Vec<WorkflowStageKind> {
 
 fn default_max_runtime_depth() -> u8 {
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KnowledgeCapturePolicy, WorkflowGatePolicy};
+
+    #[test]
+    fn workflow_gate_policy_option_fields_deserialize_without_default_annotations() {
+        let policy: WorkflowGatePolicy = toml::from_str(
+            r#"
+require_plan_if_cross_module = true
+require_plan_if_parallel_agents = true
+require_plan_if_new_interface = true
+require_plan_if_migration = true
+require_plan_if_human_approval_point = true
+"#,
+        )
+        .expect("workflow gate policy should parse");
+
+        assert!(policy.require_plan_if_touched_files_ge.is_none());
+        assert!(policy
+            .require_plan_if_estimated_runtime_minutes_ge
+            .is_none());
+    }
+
+    #[test]
+    fn knowledge_capture_option_fields_deserialize_without_default_annotations() {
+        let policy: KnowledgeCapturePolicy = toml::from_str(
+            r#"
+trigger_if_new_config = true
+trigger_if_behavior_change = true
+trigger_if_non_obvious_bugfix = true
+write_decision_note = true
+update_project_memory = false
+"#,
+        )
+        .expect("knowledge capture policy should parse");
+
+        assert!(policy.trigger_if_touched_files_gt.is_none());
+    }
 }
