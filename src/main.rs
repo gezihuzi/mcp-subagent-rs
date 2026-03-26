@@ -1578,10 +1578,8 @@ fn list_run_records(
             continue;
         }
         let handle_id = entry.file_name().to_string_lossy().to_string();
-        let record = match load_run_record(state_dir, &handle_id) {
-            Ok(record) => record,
-            Err(_) => continue,
-        };
+        let record = load_run_record(state_dir, &handle_id)
+            .map_err(|err| format!("failed to load run `{handle_id}`: {err}"))?;
         runs.push((handle_id, record));
     }
     runs.sort_by_key(|(_, record)| parse_rfc3339(record.updated_at()));
@@ -5417,6 +5415,56 @@ target/
         assert_eq!(snapshots.len(), 2);
         assert!(snapshots.iter().all(|snapshot| snapshot.events.len() == 1
             && snapshot.events[0].event == "provider.first_output"));
+    }
+
+    #[test]
+    fn list_run_records_fails_when_any_run_json_is_invalid() {
+        let dir = tempdir().expect("tempdir");
+
+        let valid_run_dir = dir.path().join("runs").join("handle-valid");
+        fs::create_dir_all(&valid_run_dir).expect("mkdir valid run");
+        fs::write(
+            valid_run_dir.join("run.json"),
+            serde_json::json!({
+                "task_spec": {
+                    "task": "valid fixture",
+                    "task_brief": null,
+                    "acceptance_criteria": [],
+                    "selected_files": [],
+                    "working_dir": "."
+                },
+                "state": {
+                    "status": "running",
+                    "created_at": "2026-03-25T00:00:00Z",
+                    "updated_at": "2026-03-25T00:00:00Z",
+                    "status_history": ["received", "running"],
+                    "error_message": null,
+                    "policy": null,
+                    "compiled_context_markdown": null,
+                    "usage": null
+                },
+                "outcome": null,
+                "artifact_index": [],
+                "spec_snapshot": null
+            })
+            .to_string(),
+        )
+        .expect("write valid run");
+
+        let invalid_run_dir = dir.path().join("runs").join("handle-invalid");
+        fs::create_dir_all(&invalid_run_dir).expect("mkdir invalid run");
+        fs::write(
+            invalid_run_dir.join("run.json"),
+            serde_json::json!({
+                "status": "running",
+                "updated_at": "2026-03-25T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .expect("write invalid run");
+
+        let err = super::list_run_records(dir.path()).expect_err("should fail on invalid run json");
+        assert!(err.contains("handle-invalid"), "unexpected error: {err}");
     }
 
     #[test]

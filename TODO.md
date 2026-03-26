@@ -3577,3 +3577,55 @@
   - `cargo check` 通过。
   - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-139 Refactor-TaskData-HardCut-TypesSerdeDefaultCleanup (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，收紧 `types.rs` 的序列化契约，移除迁移期 `serde(default)` 兜底。  
+验收标准：
+
+1. `src/types.rs` 中 `SelectedFile/TaskSpec/WorkflowHints/MemorySnippet/ResolvedMemory/ContextSourceRef/CompiledContext` 不再使用 `#[serde(default)]` 字段兜底。
+2. 运行链路与测试夹具在严格类型契约下保持通过。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/types.rs`：
+  - 删除上述结构上的 `#[serde(default)]` 标注，收紧为当前 schema 字段约束。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-140 Refactor-TaskData-HardCut-ProbeSerdeDefaultCleanup (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，收紧 provider probe 结果结构，移除 `probe` 层迁移期 `serde(default)` 兜底。  
+验收标准：
+
+1. `src/probe/mod.rs::ProviderProbe` 不再使用 `#[serde(default)]` 字段兜底。
+2. probe 读取与状态链路在严格结构下保持行为不变。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/probe/mod.rs`：
+  - `ProviderProbe.version/validated_flags/notes` 移除 `#[serde(default)]`。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-141 Refactor-TaskData-HardCut-MainListRunNoSilentCompatSkip (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，移除 CLI `list` 路径对不兼容 `run.json` 的静默跳过，改为显式失败。  
+验收标准：
+
+1. `src/main.rs::list_run_records` 不再对 `load_run_record` 错误使用 `continue` 静默忽略。
+2. 新增测试覆盖“任一 run.json 不兼容时返回错误”行为。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/main.rs`：
+  - `list_run_records` 读取 run 记录失败时改为返回错误（附带 handle_id），不再吞掉不兼容数据。
+- 已新增测试：
+  - `list_run_records_fails_when_any_run_json_is_invalid`，验证混合 valid/invalid runs 时会失败并报出非法 handle。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

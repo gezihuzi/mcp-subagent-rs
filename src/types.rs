@@ -14,9 +14,7 @@ pub enum RunMode {
 #[serde(deny_unknown_fields)]
 pub struct SelectedFile {
     pub path: PathBuf,
-    #[serde(default)]
     pub rationale: Option<String>,
-    #[serde(default)]
     pub content: Option<String>,
 }
 
@@ -28,11 +26,8 @@ pub struct SelectedFile {
 #[serde(deny_unknown_fields)]
 pub struct TaskSpec {
     pub task: String,
-    #[serde(default)]
     pub task_brief: Option<String>,
-    #[serde(default)]
     pub acceptance_criteria: Vec<String>,
-    #[serde(default)]
     pub selected_files: Vec<SelectedFile>,
     pub working_dir: PathBuf,
 }
@@ -44,13 +39,9 @@ pub struct TaskSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowHints {
-    #[serde(default)]
     pub stage: Option<String>,
-    #[serde(default)]
     pub plan_ref: Option<String>,
-    #[serde(default)]
     pub parent_summary: Option<String>,
-    #[serde(default)]
     pub run_mode: RunMode,
 }
 
@@ -70,18 +61,14 @@ impl Default for WorkflowHints {
 pub struct MemorySnippet {
     pub label: String,
     pub content: String,
-    #[serde(default)]
     pub source_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedMemory {
-    #[serde(default)]
     pub project_memories: Vec<MemorySnippet>,
-    #[serde(default)]
     pub additional_memories: Vec<MemorySnippet>,
-    #[serde(default)]
     pub native_passthrough_paths: Vec<PathBuf>,
 }
 
@@ -97,7 +84,6 @@ pub enum InjectionMode {
 #[serde(deny_unknown_fields)]
 pub struct ContextSourceRef {
     pub label: String,
-    #[serde(default)]
     pub path: Option<PathBuf>,
     pub injection_mode: InjectionMode,
 }
@@ -107,6 +93,5 @@ pub struct ContextSourceRef {
 pub struct CompiledContext {
     pub system_prefix: String,
     pub injected_prompt: String,
-    #[serde(default)]
     pub source_manifest: Vec<ContextSourceRef>,
 }

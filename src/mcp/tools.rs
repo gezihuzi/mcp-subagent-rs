@@ -1031,20 +1031,17 @@ impl McpSubagentServer {
 
         let limit = input.limit.unwrap_or(50).max(1);
         let now = OffsetDateTime::now_utc();
-        let runs = rows
-            .into_iter()
-            .take(limit)
-            .map(|(handle_id, record)| {
-                let events = load_run_events(self.state_dir(), &handle_id).unwrap_or_default();
-                let runtime = build_event_runtime_snapshot(
-                    &record.status,
-                    &events,
-                    now,
-                    record.error_message.as_deref(),
-                );
-                build_run_view(handle_id, &record, Some(&runtime))
-            })
-            .collect();
+        let mut runs = Vec::new();
+        for (handle_id, record) in rows.into_iter().take(limit) {
+            let events = load_run_events(self.state_dir(), &handle_id)?;
+            let runtime = build_event_runtime_snapshot(
+                &record.status,
+                &events,
+                now,
+                record.error_message.as_deref(),
+            );
+            runs.push(build_run_view(handle_id, &record, Some(&runtime)));
+        }
 
         Ok(Json(ListRunsOutput { runs }))
     }
