@@ -165,6 +165,15 @@ cargo run --quiet -- init --preset codex-primary-builder --root-dir "$BOOTSTRAP_
 printf 'drifted = true\n' >"$BOOTSTRAP_BACKEND"
 printf 'custom = true\n' >"$BOOTSTRAP_CUSTOM"
 
+echo "[smoke-v08] doctor detects generated-root drift"
+cargo run --quiet -- \
+  --agents-dir "$BOOTSTRAP_ROOT/agents" \
+  --state-dir "$BOOTSTRAP_ROOT/.mcp-subagent/state" \
+  doctor --json >"$TMP_DIR/doctor_bootstrap_drift.json"
+grep -Eq '"refresh_commands"[[:space:]]*:' "$TMP_DIR/doctor_bootstrap_drift.json"
+grep -Fq "\"bootstrap_root\": \"$BOOTSTRAP_ROOT\"" "$TMP_DIR/doctor_bootstrap_drift.json"
+grep -Fq "mcp-subagent init --refresh-bootstrap --root-dir '$BOOTSTRAP_ROOT'" "$TMP_DIR/doctor_bootstrap_drift.json"
+
 echo "[smoke-v08] refresh bootstrap root"
 cargo run --quiet -- init --root-dir "$BOOTSTRAP_ROOT" --refresh-bootstrap --json >"$TMP_DIR/refresh_bootstrap.json"
 grep -Eq '"preset"[[:space:]]*:[[:space:]]*"refresh-bootstrap"' "$TMP_DIR/refresh_bootstrap.json"

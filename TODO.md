@@ -3946,3 +3946,14 @@
   - `bash scripts/smoke_v08.sh` 通过。
   - `cargo test --workspace` 通过（218 + 71 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-156 V1.0-P2-GeneratedRootManifestAndExactRepairCommand
+
+任务：为 `init` 生成的 root 增加稳定标识，并让 `doctor` 在检测到 drift 时输出精确 repair command，避免 drift 检测继续硬编码在默认 `.mcp-subagent/bootstrap/agents` 路径上。  
+验收标准：
+
+1. `init` 生成的 root 写入轻量 manifest；`init --refresh-bootstrap` 会保留或补写该标识，使后续诊断可识别非默认 `--root-dir` 场景。
+2. `doctor` 的 bootstrap drift 检测改成“manifest 优先 + 旧默认路径兼容 fallback”，并在 JSON / 文本输出中给出精确 `refresh_command`，使用显式 `--root-dir`。
+3. 回归覆盖至少包含：自定义 `--root-dir` 生成 root 的 drift 能被 `doctor` 识别并给出精确 repair command；旧默认 bootstrap 路径的 drift 检测保持兼容。
+4. `scripts/smoke_v08.sh` 至少补一条 `doctor -> refresh_command -> refresh` 的真实链路断言。
+5. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Component, Path, PathBuf},
 };
 
@@ -7,6 +7,7 @@ use glob::glob;
 use serde::Serialize;
 
 use crate::{
+    connect::shell_escape_path,
     init::{builtin_agent_template, preset_catalog_version},
     probe::{ProviderProbe, ProviderProber},
     spec::{
@@ -85,14 +86,17 @@ pub struct KnowledgeLayoutHealth {
 pub struct BootstrapCatalogHealth {
     pub catalog_version: String,
     pub drifted_templates: Vec<BootstrapTemplateDrift>,
+    pub refresh_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BootstrapTemplateDrift {
     pub path: PathBuf,
+    pub bootstrap_root: PathBuf,
     pub template_name: String,
     pub reason: String,
     pub legacy_active_plan: bool,
+    pub refresh_command: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -239,6 +243,13 @@ fn build_doctor_health(
             .iter()
             .filter(|entry| entry.legacy_active_plan)
             .count();
+        let suggestion = match bootstrap_catalog.refresh_commands.as_slice() {
+            [command] => format!(
+                "Review drifted generated-root templates first; if the drift is accidental, run `{command}` to resync built-in templates while preserving custom agents. Doctor only reports drift and will not overwrite files."
+            ),
+            [] => "Review drifted generated-root templates first; if the drift is accidental, resync that generated root with `mcp-subagent init --refresh-bootstrap --root-dir <generated-root>`. Doctor only reports drift and will not overwrite files.".to_string(),
+            _ => "Review drifted generated-root templates first; if the drift is accidental, run the matching `refresh_command` listed under `bootstrap_catalog.drifted_templates`. Doctor only reports drift and will not overwrite files.".to_string(),
+        };
         let message = if legacy_active_plan_count > 0 {
             format!(
                 "{} drifted bootstrap template(s) detected; {} still reference legacy active_plan injection",
@@ -256,9 +267,7 @@ fn build_doctor_health(
             level: "warning".to_string(),
             code: "bootstrap_template_drift".to_string(),
             message,
-            suggestion: Some(
-                "Review .mcp-subagent/bootstrap/agents drift first; if it is accidental, run `mcp-subagent init --refresh-bootstrap` from project root to resync built-in templates while preserving custom agents. Doctor only reports drift and will not overwrite files.".to_string(),
-            ),
+            suggestion: Some(suggestion),
         });
     }
 
@@ -651,16 +660,21 @@ fn build_bootstrap_catalog_health(loaded_specs: &[LoadedAgentSpec]) -> Bootstrap
         .iter()
         .filter_map(analyze_bootstrap_template_drift)
         .collect::<Vec<_>>();
+    let refresh_commands = drifted_templates
+        .iter()
+        .map(|entry| entry.refresh_command.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     BootstrapCatalogHealth {
         catalog_version: preset_catalog_version().to_string(),
         drifted_templates,
+        refresh_commands,
     }
 }
 
 fn analyze_bootstrap_template_drift(loaded: &LoadedAgentSpec) -> Option<BootstrapTemplateDrift> {
-    if !is_generated_bootstrap_agent_path(&loaded.path) {
-        return None;
-    }
+    let bootstrap_root = generated_root_for_agent_path(&loaded.path)?;
     let file_name = loaded.path.file_name()?.to_str()?;
     let expected = builtin_agent_template(file_name)?;
     let actual = std::fs::read_to_string(&loaded.path).ok()?;
@@ -676,14 +690,28 @@ fn analyze_bootstrap_template_drift(loaded: &LoadedAgentSpec) -> Option<Bootstra
     };
     Some(BootstrapTemplateDrift {
         path: loaded.path.clone(),
+        bootstrap_root: bootstrap_root.clone(),
         template_name: file_name.to_string(),
         reason: reason.to_string(),
         legacy_active_plan,
+        refresh_command: build_refresh_bootstrap_command(&bootstrap_root),
     })
 }
 
-fn is_generated_bootstrap_agent_path(path: &Path) -> bool {
-    let components = path
+fn generated_root_for_agent_path(path: &Path) -> Option<PathBuf> {
+    let agents_dir = path.parent()?;
+    if agents_dir.file_name().and_then(|name| name.to_str()) != Some("agents") {
+        return None;
+    }
+    let root = agents_dir.parent()?;
+    if crate::init::load_generated_root_manifest(root).is_some() || is_legacy_generated_root(root) {
+        return Some(root.to_path_buf());
+    }
+    None
+}
+
+fn is_legacy_generated_root(root: &Path) -> bool {
+    let components = root
         .components()
         .filter_map(|component| match component {
             Component::Normal(value) => value.to_str(),
@@ -691,8 +719,15 @@ fn is_generated_bootstrap_agent_path(path: &Path) -> bool {
         })
         .collect::<Vec<_>>();
     components
-        .windows(3)
-        .any(|window| window == [".mcp-subagent", "bootstrap", "agents"])
+        .windows(2)
+        .any(|window| window == [".mcp-subagent", "bootstrap"])
+}
+
+fn build_refresh_bootstrap_command(root: &Path) -> String {
+    format!(
+        "mcp-subagent init --refresh-bootstrap --root-dir {}",
+        shell_escape_path(root)
+    )
 }
 
 #[derive(Debug, Default)]
@@ -1042,12 +1077,22 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
         out.push_str("  drifted_templates:\n");
         for drift in &report.bootstrap_catalog.drifted_templates {
             out.push_str(&format!(
-                "    - path: {}\n      template_name: {}\n      reason: {}\n      legacy_active_plan: {}\n",
+                "    - path: {}\n      bootstrap_root: {}\n      template_name: {}\n      reason: {}\n      legacy_active_plan: {}\n      refresh_command: {}\n",
                 drift.path.display(),
+                drift.bootstrap_root.display(),
                 drift.template_name,
                 drift.reason,
                 drift.legacy_active_plan,
+                drift.refresh_command,
             ));
+        }
+    }
+    if report.bootstrap_catalog.refresh_commands.is_empty() {
+        out.push_str("  refresh_commands: []\n");
+    } else {
+        out.push_str("  refresh_commands:\n");
+        for command in &report.bootstrap_catalog.refresh_commands {
+            out.push_str(&format!("    - {command}\n"));
         }
     }
 
@@ -1077,7 +1122,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::probe::{ProbeStatus, ProviderCapabilities, ProviderProbe, ProviderProber};
+    use crate::{
+        init::{init_workspace, InitPreset},
+        probe::{ProbeStatus, ProviderCapabilities, ProviderProbe, ProviderProber},
+    };
 
     use super::{
         build_doctor_report, build_doctor_report_for_cwd, build_doctor_report_for_cwd_with_home,
@@ -1425,10 +1473,17 @@ max_runtime_depth = 1
 
         assert_eq!(report.bootstrap_catalog.catalog_version, "v0.9.0");
         assert_eq!(report.bootstrap_catalog.drifted_templates.len(), 1);
+        assert_eq!(report.bootstrap_catalog.refresh_commands.len(), 1);
         let drift = &report.bootstrap_catalog.drifted_templates[0];
+        assert_eq!(
+            drift.bootstrap_root,
+            temp.path().join(".mcp-subagent/bootstrap")
+        );
         assert_eq!(drift.template_name, "backend-coder.agent.toml");
         assert!(drift.legacy_active_plan);
         assert!(drift.reason.contains("legacy active_plan"));
+        assert!(drift.refresh_command.contains("--refresh-bootstrap"));
+        assert!(drift.refresh_command.contains("--root-dir"));
         assert!(
             report
                 .issues
@@ -1453,6 +1508,55 @@ max_runtime_depth = 1
         let rendered = render_doctor_report(&report);
         assert!(rendered.contains("bootstrap_catalog"));
         assert!(rendered.contains("backend-coder.agent.toml"));
+        assert!(rendered.contains("bootstrap_root:"));
+        assert!(rendered.contains("refresh_command:"));
         assert!(rendered.contains("legacy_active_plan: true"));
+    }
+
+    #[test]
+    fn doctor_detects_drift_for_generated_custom_root_and_emits_exact_refresh_command() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("custom-bootstrap-root");
+        init_workspace(&root, InitPreset::CodexPrimaryBuilder, false).expect("init root");
+        let backend_path = root.join("agents/backend-coder.agent.toml");
+        let drifted = fs::read_to_string(&backend_path)
+            .expect("read backend template")
+            .replacen(
+                "memory_sources = [\"auto_project_memory\"]",
+                "memory_sources = [\"auto_project_memory\", \"active_plan\"]",
+                1,
+            );
+        fs::write(&backend_path, drifted).expect("write drifted builtin");
+
+        let report = build_doctor_report_for_cwd(
+            temp.path().to_path_buf(),
+            vec![root.join("agents")],
+            root.join(".mcp-subagent/state"),
+            &FakeProber::default(),
+        );
+
+        assert_eq!(report.bootstrap_catalog.drifted_templates.len(), 1);
+        let drift = &report.bootstrap_catalog.drifted_templates[0];
+        assert_eq!(drift.bootstrap_root, root);
+        assert_eq!(
+            drift.refresh_command,
+            format!(
+                "mcp-subagent init --refresh-bootstrap --root-dir '{}'",
+                drift.bootstrap_root.display()
+            )
+        );
+        assert_eq!(
+            report.bootstrap_catalog.refresh_commands,
+            vec![drift.refresh_command.clone()]
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .find(|issue| issue.code == "bootstrap_template_drift")
+                .and_then(|issue| issue.suggestion.as_deref())
+                .is_some_and(|suggestion| suggestion.contains(&drift.refresh_command)),
+            "expected exact refresh command in issue suggestion"
+        );
     }
 }

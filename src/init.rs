@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     connect::{
@@ -15,6 +15,8 @@ use crate::{
 };
 
 const PRESET_CATALOG_VERSION: &str = "v0.9.0";
+const GENERATED_ROOT_MANIFEST_RELATIVE: &str = ".mcp-subagent/generated-root.toml";
+const GENERATED_ROOT_MANIFEST_KIND: &str = "mcp-subagent-generated-root";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitPreset {
@@ -51,6 +53,55 @@ pub struct InitReport {
     pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct GeneratedRootManifest {
+    pub kind: String,
+    pub catalog_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+}
+
+pub(crate) fn generated_root_manifest_path(root: &Path) -> PathBuf {
+    root.join(GENERATED_ROOT_MANIFEST_RELATIVE)
+}
+
+pub(crate) fn load_generated_root_manifest(root: &Path) -> Option<GeneratedRootManifest> {
+    let raw = fs::read_to_string(generated_root_manifest_path(root)).ok()?;
+    let manifest = toml::from_str::<GeneratedRootManifest>(&raw).ok()?;
+    (manifest.kind == GENERATED_ROOT_MANIFEST_KIND).then_some(manifest)
+}
+
+fn generated_root_manifest_template(preset: Option<&str>) -> String {
+    let mut raw = format!(
+        "kind = \"{GENERATED_ROOT_MANIFEST_KIND}\"\ncatalog_version = \"{PRESET_CATALOG_VERSION}\"\n"
+    );
+    if let Some(preset) = preset {
+        raw.push_str(&format!("preset = \"{preset}\"\n"));
+    }
+    raw
+}
+
+fn sync_generated_root_manifest(
+    root: &Path,
+    preset: Option<&str>,
+) -> Result<(PathBuf, bool, bool)> {
+    let path = generated_root_manifest_path(root);
+    let content = generated_root_manifest_template(preset);
+    let existed = path.exists();
+    let changed = if existed {
+        fs::read_to_string(&path)? != content
+    } else {
+        true
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if changed {
+        fs::write(&path, content)?;
+    }
+    Ok((path, !existed, existed && changed))
+}
+
 pub fn init_workspace(root: &Path, preset: InitPreset, force: bool) -> Result<InitReport> {
     init_with_preset(root, preset, force)
 }
@@ -70,6 +121,7 @@ pub fn refresh_bootstrap_workspace(root: &Path) -> Result<InitReport> {
     }
 
     let mut builtin_template_paths = Vec::new();
+    let mut created_files = Vec::new();
     let mut overwritten_files = Vec::new();
     let mut preserved_custom_agent_count = 0usize;
     let mut entries = fs::read_dir(&agents_dir)?.collect::<std::io::Result<Vec<_>>>()?;
@@ -109,6 +161,17 @@ pub fn refresh_bootstrap_workspace(root: &Path) -> Result<InitReport> {
         .into());
     }
 
+    let manifest_preset = load_generated_root_manifest(&root)
+        .and_then(|manifest| manifest.preset)
+        .or_else(|| detect_preset_from_generated_agents(&builtin_template_paths));
+    let (manifest_path, created_manifest, overwritten_manifest) =
+        sync_generated_root_manifest(&root, manifest_preset.as_deref())?;
+    if created_manifest {
+        created_files.push(manifest_path);
+    } else if overwritten_manifest {
+        overwritten_files.push(manifest_path);
+    }
+
     let state_dir = root.join(".mcp-subagent/state");
     let mut notes = if overwritten_files.is_empty() {
         vec![format!(
@@ -144,7 +207,7 @@ pub fn refresh_bootstrap_workspace(root: &Path) -> Result<InitReport> {
         preset_catalog_version: PRESET_CATALOG_VERSION.to_string(),
         root,
         agents_dir,
-        created_files: Vec::new(),
+        created_files,
         overwritten_files,
         generated_agent_count: builtin_template_paths.len(),
         notes,
@@ -157,9 +220,15 @@ fn init_with_preset(root: &Path, preset: InitPreset, force: bool) -> Result<Init
     let config_path = root.join(".mcp-subagent/config.toml");
     let readme_path = root.join("README.mcp-subagent.md");
     let plan_path = root.join("PLAN.md");
+    let manifest_path = generated_root_manifest_path(&root);
     let agent_templates = preset_agent_templates(preset);
 
-    let mut files = vec![plan_path.clone(), config_path.clone(), readme_path.clone()];
+    let mut files = vec![
+        plan_path.clone(),
+        config_path.clone(),
+        readme_path.clone(),
+        manifest_path.clone(),
+    ];
     files.extend(
         agent_templates
             .iter()
@@ -191,6 +260,7 @@ fn init_with_preset(root: &Path, preset: InitPreset, force: bool) -> Result<Init
 
     write(&plan_path, &plan_template())?;
     write(&config_path, &config_template())?;
+    sync_generated_root_manifest(&root, Some(preset.as_str()))?;
     let cwd = std::env::current_dir()?;
     let binary = std::env::current_exe()?;
     let connect_paths = resolve_connect_snippet_paths(
@@ -303,6 +373,34 @@ pub(crate) fn builtin_agent_template(file_name: &str) -> Option<&'static str> {
     }
 }
 
+fn detect_preset_from_generated_agents(paths: &[PathBuf]) -> Option<String> {
+    let mut file_names = paths
+        .iter()
+        .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+        .collect::<Vec<_>>();
+    file_names.sort_unstable();
+
+    for preset in [
+        InitPreset::ClaudeOpusSupervisor,
+        InitPreset::ClaudeOpusSupervisorMinimal,
+        InitPreset::CodexPrimaryBuilder,
+        InitPreset::GeminiFrontendTeam,
+        InitPreset::LocalOllamaFallback,
+        InitPreset::MinimalSingleProvider,
+    ] {
+        let mut expected = preset_agent_templates(preset)
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        expected.sort_unstable();
+        if expected == file_names {
+            return Some(preset.as_str().to_string());
+        }
+    }
+
+    None
+}
+
 fn write(path: &Path, content: &str) -> Result<()> {
     fs::write(path, content)?;
     Ok(())
@@ -401,7 +499,8 @@ by default.
 Gemini read-only research presets keep `working_dir_policy = "auto"`; on the stable scratch path,
 runtime will keep the override visible by downgrading `native_discovery = "isolated"` to `minimal`.
 If `doctor` reports bootstrap template drift, review those local edits first; if the drift is
-accidental, run `mcp-subagent init --refresh-bootstrap` from project root to resync built-in
+accidental, run the exact `refresh_command` emitted by `doctor` (or use
+`mcp-subagent init --refresh-bootstrap --root-dir <generated-root>`) to resync built-in
 templates while preserving custom agents. Default `init` still will not overwrite files silently.
 
 ## MCP Integration (stdio)
@@ -721,7 +820,10 @@ mod tests {
 
     use crate::connect::{build_connect_snippet, resolve_connect_snippet_paths, ConnectHost};
 
-    use super::{init_workspace, refresh_bootstrap_workspace, InitPreset};
+    use super::{
+        generated_root_manifest_path, init_workspace, load_generated_root_manifest,
+        refresh_bootstrap_workspace, InitPreset,
+    };
 
     #[test]
     fn init_creates_preset_files_and_valid_specs() {
@@ -734,7 +836,14 @@ mod tests {
         assert!(dir.path().join("agents").exists());
         assert!(dir.path().join("PLAN.md").exists());
         assert!(dir.path().join(".mcp-subagent/config.toml").exists());
+        assert!(generated_root_manifest_path(dir.path()).exists());
         assert!(dir.path().join("README.mcp-subagent.md").exists());
+        assert_eq!(
+            load_generated_root_manifest(dir.path())
+                .and_then(|manifest| manifest.preset)
+                .as_deref(),
+            Some("claude-opus-supervisor")
+        );
     }
 
     #[test]
@@ -911,6 +1020,40 @@ mod tests {
                 .any(|note| note.contains("Preserved 1 custom agent file")),
             "expected preserved custom agent note: {:?}",
             report.notes
+        );
+        assert_eq!(
+            load_generated_root_manifest(dir.path())
+                .and_then(|manifest| manifest.preset)
+                .as_deref(),
+            Some("codex-primary-builder")
+        );
+    }
+
+    #[test]
+    fn refresh_bootstrap_backfills_manifest_for_legacy_root() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("agents")).expect("create agents");
+        fs::write(
+            dir.path().join("agents/backend-coder.agent.toml"),
+            super::builtin_agent_template("backend-coder.agent.toml").expect("builtin template"),
+        )
+        .expect("write builtin template");
+        assert!(
+            !generated_root_manifest_path(dir.path()).exists(),
+            "legacy root should start without manifest"
+        );
+
+        let report = refresh_bootstrap_workspace(dir.path()).expect("refresh succeeds");
+        assert!(
+            report
+                .created_files
+                .iter()
+                .any(|path| path == &generated_root_manifest_path(dir.path())),
+            "expected refresh to create generated-root manifest"
+        );
+        assert!(
+            load_generated_root_manifest(dir.path()).is_some(),
+            "expected generated-root manifest after refresh"
         );
     }
 
