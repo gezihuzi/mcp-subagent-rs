@@ -6,6 +6,13 @@
 
 ## Execution Strategy (v0.10 Current)
 
+### Batch V1.0-P5 - Project Bridge Repair Path（已完成）
+
+目标：把 `doctor.project_bridge.repair_command` 从“借 `--refresh-bootstrap` 顺带修”收口成真正的 bridge-only 修复路径，让已有 generated root 的项目桥接可以独立补齐或覆盖，而不去触碰 bootstrap 模板内容。
+依赖顺序：`T-159(Completed)`。
+回滚策略：仅新增显式 bridge-only repair 入口，并把 `doctor` repair command 改指向该入口；默认 `init`、`refresh-bootstrap`、`--sync-project-config` 的现有语义保持不变，必要时可单独回退新 flag 与 repair command。
+风险与控制：若 bridge-only repair 对 root 合法性校验过松，可能把任意目录误当 generated root；通过要求 `--root-dir`、校验 manifest/legacy generated-root 形态、并保留 `agents/` 目录与 spec 加载校验，避免误指向普通目录。
+
 ### Batch V1.0-P4 - Project Bridge Diagnostics（已完成）
 
 目标：把 `init --sync-project-config` 和 generated-root/refresh 路径补成真正可观察的 doctor 诊断面，让项目根能直接看见 bridge config 是否存在、当前指向哪个 root、是否位于项目内/项目外，以及该执行哪条精确 repair command，而不再靠猜 `config.toml` 或重复试错命令。

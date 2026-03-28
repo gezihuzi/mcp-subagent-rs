@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use glob::glob;
@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::{
     connect::shell_escape_path,
-    init::{builtin_agent_template, preset_catalog_version},
+    init::{builtin_agent_template, is_generated_root, preset_catalog_version},
     probe::{ProviderProbe, ProviderProber},
     spec::{
         registry::{load_agent_specs_from_dirs, LoadedAgentSpec},
@@ -967,7 +967,7 @@ fn generated_root_for_agent_path(path: &Path) -> Option<PathBuf> {
         return None;
     }
     let root = agents_dir.parent()?;
-    if crate::init::load_generated_root_manifest(root).is_some() || is_legacy_generated_root(root) {
+    if is_generated_root(root) {
         return Some(root.to_path_buf());
     }
     None
@@ -984,23 +984,10 @@ fn infer_generated_root_from_paths(agents_dirs: &[PathBuf], state_dir: &Path) ->
     if state_dir != root.join(".mcp-subagent/state") {
         return None;
     }
-    if crate::init::load_generated_root_manifest(root).is_some() || is_legacy_generated_root(root) {
+    if is_generated_root(root) {
         return Some(root.to_path_buf());
     }
     None
-}
-
-fn is_legacy_generated_root(root: &Path) -> bool {
-    let components = root
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => value.to_str(),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    components
-        .windows(2)
-        .any(|window| window == [".mcp-subagent", "bootstrap"])
 }
 
 fn classify_root_scope(cwd: &Path, root: &Path) -> String {
@@ -1021,7 +1008,7 @@ fn build_refresh_bootstrap_command(root: &Path) -> String {
 fn build_sync_project_bridge_command(root: &Path, force: bool) -> String {
     let force_suffix = if force { " --force" } else { "" };
     format!(
-        "mcp-subagent init --refresh-bootstrap --root-dir {} --sync-project-config{}",
+        "mcp-subagent init --root-dir {} --sync-project-config-only{}",
         shell_escape_path(root),
         force_suffix
     )
@@ -1843,7 +1830,7 @@ state_dir = "./.mcp-subagent/bootstrap/.mcp-subagent/state"
             Some("project_external")
         );
         let expected = format!(
-            "mcp-subagent init --refresh-bootstrap --root-dir '{}' --sync-project-config",
+            "mcp-subagent init --root-dir '{}' --sync-project-config-only",
             root.display()
         );
         assert_eq!(
@@ -1887,7 +1874,7 @@ enabled = false
                 .project_bridge
                 .repair_command
                 .as_deref()
-                .is_some_and(|command| command.contains("--sync-project-config --force")),
+                .is_some_and(|command| command.contains("--sync-project-config-only --force")),
             "expected --force repair command"
         );
     }

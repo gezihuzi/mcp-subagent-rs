@@ -4012,3 +4012,25 @@
   - `bash scripts/smoke_v08.sh` 通过。
   - `cargo test --workspace` 通过（224 + 75 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-159 V1.0-P5-ProjectBridgeRepairPath (Completed 2026-03-28)
+
+任务：增加 bridge-only repair 入口，让已有 generated root 的项目桥接可以单独同步，不再借 `--refresh-bootstrap` 顺带修改 bootstrap 模板。
+验收标准：
+
+1. CLI `init` 新增显式 bridge-only repair flag；要求 `--root-dir <generated-root>`，只修项目根 bridge config / gitignore，不重写 root 下的 preset 文件。
+2. bridge-only repair 会校验目标 root 确实是 generated root（manifest 或 legacy bootstrap 形态），并保留已有 `agents/` + spec 加载校验；非法 root 会明确报错。
+3. `doctor.project_bridge.repair_command` 切换到新的 bridge-only repair 命令；缺失 bridge 不带 `--force`，需要覆盖现有 project config 的场景显式带 `--force`。
+4. 回归至少覆盖：bridge-only repair 不修改 drifted builtin agent、reject 非 generated root、doctor repair command 已更新；`scripts/smoke_v08.sh` 需走一条 `doctor missing -> bridge-only repair -> doctor synced` 链路。
+5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - `init` 新增显式 `--sync-project-config-only`，要求配合 `--root-dir <generated-root>` 使用，只修项目根 bridge config / gitignore，不重写 bootstrap 模板。
+  - `sync-project-config-only` 会校验目标 root 确实是 generated root（manifest 或 legacy `.mcp-subagent/bootstrap` 形态），并继续走 `agents/` + spec 加载校验；非法 root 会明确报错。
+  - `doctor.project_bridge.repair_command` 已切到新的 bridge-only repair 命令：缺失 bridge 时不给 `--force`，需要覆盖现有 project config 的场景显式带 `--force`。
+  - `README.md`、`scripts/smoke_v08.sh` 和 CLI 解析/单测已同步更新；smoke 现在真实覆盖 `doctor missing -> sync-project-config-only -> doctor synced` 链路。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（227 + 77 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

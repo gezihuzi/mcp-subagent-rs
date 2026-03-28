@@ -19,7 +19,7 @@ Rust implementation of an MCP subagent runtime aligned to the technical design b
 mcp-subagent mcp [AGENTS_DIR]
 mcp-subagent doctor [AGENTS_DIR] [--json]
 mcp-subagent validate [AGENTS_DIR]
-mcp-subagent init [--preset claude-opus-supervisor-minimal|claude-opus-supervisor|codex-primary-builder|gemini-frontend-team|local-ollama-fallback|minimal-single-provider] [--root-dir ... | --in-place] [--force] [--refresh-bootstrap] [--sync-project-config] [--json]
+mcp-subagent init [--preset claude-opus-supervisor-minimal|claude-opus-supervisor|codex-primary-builder|gemini-frontend-team|local-ollama-fallback|minimal-single-provider] [--root-dir ... | --in-place] [--force] [--refresh-bootstrap] [--sync-project-config] [--sync-project-config-only] [--json]
 mcp-subagent connect --host claude|codex|gemini [--run-host]
 mcp-subagent connect-snippet --host claude|codex|gemini
 mcp-subagent clean [--all] [--dry-run] [--json]
@@ -48,7 +48,7 @@ Result output also exposes retry observability fields: `retry_classification` an
 `show` renders a compact colorized view in interactive terminals; set `NO_COLOR=1` or use `--json` for plain machine-readable output.
 
 `doctor --json` includes `ambient_isolation` diagnostics (per-provider `native_discovery` profile and workspace-visible skill conflict detection).
-It now also includes `project_bridge` diagnostics: whether `./.mcp-subagent/config.toml` exists, which `agents_dir/state_dir` it points to, whether that root is internal or external to the current project, and the exact repair command when the bridge is missing or drifted.
+It now also includes `project_bridge` diagnostics: whether `./.mcp-subagent/config.toml` exists, which `agents_dir/state_dir` it points to, whether that root is internal or external to the current project, and the exact bridge-only repair command when the bridge is missing or drifted.
 
 ## MCP Transport
 
@@ -134,7 +134,7 @@ mcp-subagent connect --host claude
 ```
 
 If you explicitly want old in-place behavior, run `init --in-place`.
-If you intentionally place bootstrap files somewhere else, add `--sync-project-config` once so the current project root points at that custom root without repeating `--agents-dir/--state-dir`.
+If you intentionally place bootstrap files somewhere else, add `--sync-project-config` once so the current project root points at that custom root without repeating `--agents-dir/--state-dir`. If the custom root already exists and you only need to repair the project bridge later, use `--sync-project-config-only`.
 
 If you only want to print and inspect the host command without executing it, use:
 

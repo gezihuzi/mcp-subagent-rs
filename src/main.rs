@@ -15,7 +15,10 @@ use mcp_subagent::{
         resolve_connect_snippet_paths, ConnectHost, ConnectInvocation,
     },
     doctor::{build_doctor_report, render_doctor_report},
-    init::{init_workspace, refresh_bootstrap_workspace, InitPreset, InitReport},
+    init::{
+        init_workspace, refresh_bootstrap_workspace, sync_project_bridge_workspace, InitPreset,
+        InitReport,
+    },
     logging::{init_logging, LoggingGuard},
     mcp::{
         dto::{
@@ -92,6 +95,8 @@ enum Commands {
         refresh_bootstrap: bool,
         #[arg(long)]
         sync_project_config: bool,
+        #[arg(long, requires = "root_dir")]
+        sync_project_config_only: bool,
         #[arg(long)]
         json: bool,
     },
@@ -427,18 +432,20 @@ async fn main() -> ExitCode {
             force,
             refresh_bootstrap,
             sync_project_config,
+            sync_project_config_only,
             json,
         } => {
             info!("starting command: init");
-            init_command(
+            init_command(InitCommandOptions {
                 preset,
                 root_dir,
                 in_place,
                 force,
                 refresh_bootstrap,
                 sync_project_config,
+                sync_project_config_only,
                 json,
-            )
+            })
         }
         Commands::ConnectSnippet { host } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -3745,23 +3752,38 @@ async fn watch_run(
     }
 }
 
-fn init_command(
-    preset: InitPresetArg,
-    root_dir: Option<PathBuf>,
-    in_place: bool,
-    force: bool,
-    refresh_bootstrap: bool,
-    sync_project_config: bool,
-    json: bool,
-) -> ExitCode {
+fn init_command(options: InitCommandOptions) -> ExitCode {
+    let InitCommandOptions {
+        preset,
+        root_dir,
+        in_place,
+        force,
+        refresh_bootstrap,
+        sync_project_config,
+        sync_project_config_only,
+        json,
+    } = options;
     if refresh_bootstrap && in_place {
         eprintln!(
             "init failed: --refresh-bootstrap cannot be combined with --in-place; run from project root or pass --root-dir <bootstrap-root>"
         );
         return ExitCode::from(1);
     }
+    if sync_project_config_only && in_place {
+        eprintln!(
+            "init failed: --sync-project-config-only requires --root-dir <generated-root> and cannot be combined with --in-place"
+        );
+        return ExitCode::from(1);
+    }
+    if sync_project_config_only && refresh_bootstrap {
+        eprintln!(
+            "init failed: --sync-project-config-only cannot be combined with --refresh-bootstrap"
+        );
+        return ExitCode::from(1);
+    }
     let use_default_bootstrap_root = root_dir.is_none() && !in_place;
-    let sync_project_bridge = use_default_bootstrap_root || sync_project_config;
+    let sync_project_bridge =
+        use_default_bootstrap_root || sync_project_config || sync_project_config_only;
     let cwd = match std::env::current_dir() {
         Ok(path) => path,
         Err(err) => {
@@ -3776,7 +3798,9 @@ fn init_command(
             return ExitCode::from(1);
         }
     };
-    let result = if refresh_bootstrap {
+    let result = if sync_project_config_only {
+        sync_project_bridge_workspace(&root)
+    } else if refresh_bootstrap {
         refresh_bootstrap_workspace(&root)
     } else {
         init_workspace(&root, preset.into(), force)
@@ -3847,6 +3871,17 @@ fn init_command(
             ExitCode::from(1)
         }
     }
+}
+
+struct InitCommandOptions {
+    preset: InitPresetArg,
+    root_dir: Option<PathBuf>,
+    in_place: bool,
+    force: bool,
+    refresh_bootstrap: bool,
+    sync_project_config: bool,
+    sync_project_config_only: bool,
+    json: bool,
 }
 
 fn resolve_init_root(
@@ -4901,6 +4936,7 @@ mod tests {
                 force,
                 refresh_bootstrap,
                 sync_project_config,
+                sync_project_config_only,
                 json,
                 ..
             } => {
@@ -4909,6 +4945,7 @@ mod tests {
                 assert!(force);
                 assert!(!refresh_bootstrap);
                 assert!(!sync_project_config);
+                assert!(!sync_project_config_only);
                 assert!(json);
             }
             other => panic!("unexpected command: {other:?}"),
@@ -4923,11 +4960,13 @@ mod tests {
                 preset,
                 refresh_bootstrap,
                 sync_project_config,
+                sync_project_config_only,
                 ..
             } => {
                 assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisorMinimal));
                 assert!(!refresh_bootstrap);
                 assert!(!sync_project_config);
+                assert!(!sync_project_config_only);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -4947,12 +4986,14 @@ mod tests {
                 in_place,
                 refresh_bootstrap,
                 sync_project_config,
+                sync_project_config_only,
                 ..
             } => {
                 assert!(matches!(preset, InitPresetArg::MinimalSingleProvider));
                 assert!(!in_place);
                 assert!(!refresh_bootstrap);
                 assert!(!sync_project_config);
+                assert!(!sync_project_config_only);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -4966,11 +5007,13 @@ mod tests {
                 preset,
                 refresh_bootstrap,
                 sync_project_config,
+                sync_project_config_only,
                 ..
             } => {
                 assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisorMinimal));
                 assert!(refresh_bootstrap);
                 assert!(!sync_project_config);
+                assert!(!sync_project_config_only);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -4983,10 +5026,36 @@ mod tests {
             Commands::Init {
                 preset,
                 sync_project_config,
+                sync_project_config_only,
                 ..
             } => {
                 assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisorMinimal));
                 assert!(sync_project_config);
+                assert!(!sync_project_config_only);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_init_sync_project_config_only_flag() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "init",
+            "--root-dir",
+            "tmp/bootstrap",
+            "--sync-project-config-only",
+        ]);
+        match cli.command {
+            Commands::Init {
+                preset,
+                sync_project_config,
+                sync_project_config_only,
+                ..
+            } => {
+                assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisorMinimal));
+                assert!(!sync_project_config);
+                assert!(sync_project_config_only);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -4999,6 +5068,15 @@ mod tests {
         assert!(
             result.is_err(),
             "init should reject --in-place with --root-dir"
+        );
+    }
+
+    #[test]
+    fn init_rejects_sync_project_config_only_without_root_dir() {
+        let result = Cli::try_parse_from(["mcp-subagent", "init", "--sync-project-config-only"]);
+        assert!(
+            result.is_err(),
+            "init should require --root-dir with --sync-project-config-only"
         );
     }
 

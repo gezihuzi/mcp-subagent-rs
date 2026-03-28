@@ -210,13 +210,13 @@ if [[ -e "$SYNC_PROJECT/.mcp-subagent/config.toml" ]]; then
 fi
 grep -Eq '"project_bridge"[[:space:]]*:' "$TMP_DIR/custom_root_doctor_missing.json"
 grep -Eq '"status"[[:space:]]*:[[:space:]]*"missing"' "$TMP_DIR/custom_root_doctor_missing.json"
-grep -Eq '"repair_command"[[:space:]]*:[[:space:]]*"mcp-subagent init --refresh-bootstrap --root-dir .* --sync-project-config"' "$TMP_DIR/custom_root_doctor_missing.json"
+grep -Eq '"repair_command"[[:space:]]*:[[:space:]]*"mcp-subagent init --root-dir .* --sync-project-config-only"' "$TMP_DIR/custom_root_doctor_missing.json"
 
-echo "[smoke-v08] custom root with sync writes project config"
+echo "[smoke-v08] custom root bridge-only repair writes project config"
 (
   cd "$SYNC_PROJECT"
   cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- \
-    init --preset codex-primary-builder --root-dir "$SYNC_ROOT" --sync-project-config --force --json >"$TMP_DIR/init_custom_root_sync.json"
+    init --root-dir "$SYNC_ROOT" --sync-project-config-only --json >"$TMP_DIR/init_custom_root_sync.json"
   cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- validate >"$TMP_DIR/sync_project_validate.txt"
   cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- doctor --json >"$TMP_DIR/sync_project_doctor.json"
 )

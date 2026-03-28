@@ -106,6 +106,56 @@ pub fn init_workspace(root: &Path, preset: InitPreset, force: bool) -> Result<In
     init_with_preset(root, preset, force)
 }
 
+pub fn sync_project_bridge_workspace(root: &Path) -> Result<InitReport> {
+    let root = root.to_path_buf();
+    let agents_dir = root.join("agents");
+    if !agents_dir.is_dir() {
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "generated-root agents directory not found: {} (pass --root-dir <generated-root>)",
+                agents_dir.display()
+            ),
+        )
+        .into());
+    }
+    if !is_generated_root(&root) {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "root does not look like a generated mcp-subagent workspace: {}",
+                root.display()
+            ),
+        )
+        .into());
+    }
+
+    let generated = load_agent_specs_from_dirs(std::slice::from_ref(&agents_dir))?;
+    let state_dir = root.join(".mcp-subagent/state");
+    Ok(InitReport {
+        preset: "sync-project-config-only".to_string(),
+        preset_catalog_version: PRESET_CATALOG_VERSION.to_string(),
+        root: root.clone(),
+        agents_dir: agents_dir.clone(),
+        created_files: Vec::new(),
+        overwritten_files: Vec::new(),
+        generated_agent_count: generated.len(),
+        notes: vec![
+            "Validated existing generated root; bootstrap templates were not rewritten."
+                .to_string(),
+            format!(
+                "Run `mcp-subagent validate --agents-dir {}` to verify existing specs.",
+                agents_dir.display()
+            ),
+            format!(
+                "Run `mcp-subagent doctor --agents-dir {} --state-dir {}` to inspect provider readiness.",
+                agents_dir.display(),
+                state_dir.display()
+            ),
+        ],
+    })
+}
+
 pub fn refresh_bootstrap_workspace(root: &Path) -> Result<InitReport> {
     let root = root.to_path_buf();
     let agents_dir = root.join("agents");
@@ -358,6 +408,10 @@ pub(crate) fn preset_catalog_version() -> &'static str {
     PRESET_CATALOG_VERSION
 }
 
+pub fn is_generated_root(root: &Path) -> bool {
+    load_generated_root_manifest(root).is_some() || is_legacy_generated_root(root)
+}
+
 pub(crate) fn builtin_agent_template(file_name: &str) -> Option<&'static str> {
     match file_name {
         "fast-researcher.agent.toml" => Some(FAST_RESEARCHER_AGENT),
@@ -399,6 +453,16 @@ fn detect_preset_from_generated_agents(paths: &[PathBuf]) -> Option<String> {
     }
 
     None
+}
+
+fn is_legacy_generated_root(root: &Path) -> bool {
+    let components = root
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    components
+        .windows(2)
+        .any(|window| window == [".mcp-subagent", "bootstrap"])
 }
 
 fn write(path: &Path, content: &str) -> Result<()> {
@@ -821,8 +885,9 @@ mod tests {
     use crate::connect::{build_connect_snippet, resolve_connect_snippet_paths, ConnectHost};
 
     use super::{
-        generated_root_manifest_path, init_workspace, load_generated_root_manifest,
-        refresh_bootstrap_workspace, InitPreset,
+        generated_root_manifest_path, init_workspace, is_generated_root,
+        load_generated_root_manifest, refresh_bootstrap_workspace, sync_project_bridge_workspace,
+        InitPreset,
     };
 
     #[test]
@@ -1087,5 +1152,74 @@ instructions = "custom"
             ),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn sync_project_bridge_validates_generated_root_without_rewriting_templates() {
+        let dir = tempdir().expect("tempdir");
+        init_workspace(dir.path(), InitPreset::CodexPrimaryBuilder, false).expect("init succeeds");
+
+        let backend_path = dir.path().join("agents/backend-coder.agent.toml");
+        let drifted = fs::read_to_string(&backend_path)
+            .expect("read backend")
+            .replacen(
+                "memory_sources = [\"auto_project_memory\"]",
+                "memory_sources = [\"auto_project_memory\", \"active_plan\"]",
+                1,
+            );
+        fs::write(&backend_path, &drifted).expect("write drifted builtin");
+
+        let report = sync_project_bridge_workspace(dir.path()).expect("sync-only succeeds");
+
+        assert_eq!(report.preset, "sync-project-config-only");
+        assert!(report.created_files.is_empty());
+        assert!(report.overwritten_files.is_empty());
+        assert_eq!(report.generated_agent_count, 3);
+        assert_eq!(
+            fs::read_to_string(&backend_path).expect("read backend after sync-only"),
+            drifted
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("bootstrap templates were not rewritten")),
+            "expected non-rewrite note: {:?}",
+            report.notes
+        );
+    }
+
+    #[test]
+    fn sync_project_bridge_rejects_non_generated_root() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("agents")).expect("create agents");
+        fs::write(
+            dir.path().join("agents/custom.agent.toml"),
+            r#"[core]
+name = "custom-agent"
+description = "custom"
+provider = "mock"
+instructions = "custom"
+"#,
+        )
+        .expect("write custom agent");
+
+        let err = sync_project_bridge_workspace(dir.path()).expect_err("must reject");
+        assert!(
+            matches!(
+                err,
+                crate::error::McpSubagentError::Io(ref io) if io.kind() == ErrorKind::InvalidInput
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn generated_root_detection_accepts_legacy_bootstrap_shape() {
+        let dir = tempdir().expect("tempdir");
+        let legacy_root = dir.path().join(".mcp-subagent/bootstrap");
+        fs::create_dir_all(legacy_root.join("agents")).expect("create agents");
+
+        assert!(is_generated_root(&legacy_root));
     }
 }
