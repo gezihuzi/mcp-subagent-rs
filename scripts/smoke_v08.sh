@@ -162,8 +162,14 @@ extract_handle_id() {
 
 echo "[smoke-v08] init bootstrap root"
 cargo run --quiet -- init --preset codex-primary-builder --root-dir "$BOOTSTRAP_ROOT" --json >"$TMP_DIR/init_bootstrap.json"
-printf 'drifted = true\n' >"$BOOTSTRAP_BACKEND"
-printf 'custom = true\n' >"$BOOTSTRAP_CUSTOM"
+perl -0pi -e 's/memory_sources = \["auto_project_memory"\]/memory_sources = ["auto_project_memory", "active_plan"]/g' "$BOOTSTRAP_BACKEND"
+cat >"$BOOTSTRAP_CUSTOM" <<'TOML'
+[core]
+name = "custom-agent"
+description = "custom agent preserved during refresh"
+provider = "mock"
+instructions = "custom"
+TOML
 
 echo "[smoke-v08] doctor detects generated-root drift"
 cargo run --quiet -- \
@@ -183,7 +189,7 @@ if grep -Fq 'active_plan' "$BOOTSTRAP_BACKEND"; then
   echo "[smoke-v08] refresh bootstrap left legacy active_plan behind"
   exit 1
 fi
-grep -Eq 'custom = true' "$BOOTSTRAP_CUSTOM"
+grep -Fq 'name = "custom-agent"' "$BOOTSTRAP_CUSTOM"
 
 echo "[smoke-v08] validate"
 run_cmd validate >"$TMP_DIR/validate.txt"

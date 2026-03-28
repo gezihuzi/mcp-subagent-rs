@@ -6,10 +6,10 @@
 
 ## Execution Strategy (v0.10 Current)
 
-### Batch V1.0-P2 - Generated Root Manifest + Exact Repair Command（当前优先）
+### Batch V1.0-P2 - Generated Root Manifest + Exact Repair Command（已完成）
 
 目标：把 bootstrap drift 的识别与修复从“默认 `.mcp-subagent/bootstrap` 路径可用”推广到任意 `init` 生成的 root，并让 `doctor` 输出精确可执行的 repair command，而不是只给泛泛建议。这样 `init --root-dir <custom-root>` 场景下的 drift 也能被稳定识别、稳定修复。
-依赖顺序：`T-156`。
+依赖顺序：`T-156(Completed)`。
 回滚策略：仅新增 generated-root manifest、diagnostic surface 和 repair command 输出；保留对旧默认 bootstrap 路径的兼容探测，不改 runtime 主执行链，也不要求用户立即迁移已有 root。
 风险与控制：若 manifest 识别过宽，可能误把普通 `agents/` 目录当成 generated root；通过“manifest 优先 + 旧默认路径兼容 fallback”的双通道识别控制误报。repair command 统一输出显式 `--root-dir`，避免 cwd 依赖与文案歧义。
 

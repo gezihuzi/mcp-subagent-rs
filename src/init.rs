@@ -982,7 +982,10 @@ mod tests {
         assert!(readme.contains("memory_sources = [\"auto_project_memory\"]"));
         assert!(readme.contains("do not inject `active_plan`"));
         assert!(readme.contains("`doctor` reports bootstrap template drift"));
-        assert!(readme.contains("`mcp-subagent init --refresh-bootstrap`"));
+        assert!(readme.contains("exact `refresh_command` emitted by `doctor`"));
+        assert!(
+            readme.contains("`mcp-subagent init --refresh-bootstrap --root-dir <generated-root>`")
+        );
         assert!(readme.contains("preserving custom agents"));
         assert!(readme.contains("Default `init` still will not overwrite files silently"));
     }
@@ -995,7 +998,16 @@ mod tests {
         let backend_path = dir.path().join("agents/backend-coder.agent.toml");
         let custom_path = dir.path().join("agents/custom.agent.toml");
         fs::write(&backend_path, "drifted = true\n").expect("write drifted builtin");
-        fs::write(&custom_path, "custom = true\n").expect("write custom agent");
+        fs::write(
+            &custom_path,
+            r#"[core]
+name = "custom-agent"
+description = "custom agent preserved during refresh"
+provider = "mock"
+instructions = "custom"
+"#,
+        )
+        .expect("write custom agent");
 
         let report = refresh_bootstrap_workspace(dir.path()).expect("refresh succeeds");
         let backend = fs::read_to_string(&backend_path).expect("read refreshed builtin");
@@ -1003,7 +1015,7 @@ mod tests {
 
         assert!(backend.contains("provider = \"codex\""));
         assert!(backend.contains("memory_sources = [\"auto_project_memory\"]"));
-        assert_eq!(custom, "custom = true\n");
+        assert!(custom.contains("name = \"custom-agent\""));
         assert!(report.created_files.is_empty());
         assert!(
             report
