@@ -3908,3 +3908,22 @@
 - 已验证：
   - `cargo test --workspace` 通过（216 + 69 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-154 V1.0-P0-StreamStatusReleaseRegression (Completed 2026-03-28)
+
+任务：为刚完成的 `--stream` 与 `status` 能力补齐发布切口回归，覆盖稳定 JSON contract、真实 smoke 链路，以及 `PLAN.md` 中历史“当前优先”标记的清理。  
+验收标准：
+
+1. `src/main.rs` 新增 `status --json` 稳定字段断言，至少锁定 `status/state/phase/stalled/block_reason/current_wait_reason/wait_reasons/advice`。
+2. `scripts/smoke_v08.sh` 新增至少一条真实 `--stream` 链路断言，并验证 `status --json` 中新增诊断字段存在。
+3. `PLAN.md` 收口为单一真实“当前优先”批次，不再保留历史批次的误导性“当前优先”标记。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+- 已完成：
+  - 在 `src/main.rs` 新增 `status_json_schema_contains_stable_fields`，锁定 `status/state/phase/stalled/block_reason/current_wait_reason/wait_reasons/advice` 以及整条 `status --json` 稳定 contract 的关键字段。
+  - 在 `scripts/smoke_v08.sh` 新增 `status --json` 诊断字段存在性断言，并补上 `run codex_runner --json --stream` 的真实 smoke 链路，覆盖 `accepted/stream/final_status` 三段输出。
+  - `PLAN.md` 已清理历史批次的误导性“当前优先”标记，本批次完成后计划面不再残留伪当前优先状态。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（216 + 70 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

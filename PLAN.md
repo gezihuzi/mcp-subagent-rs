@@ -6,6 +6,13 @@
 
 ## Execution Strategy (v0.10 Current)
 
+### Batch V1.0-P0 - Release Cutpoint + Stream/Status Regression（已完成）
+
+目标：在 `V0.10-P1` 能力已完成的前提下，补齐发布切口上仍然缺失的两类保证：其一是 `status --json` 的稳定 contract 断言，其二是 `run/spawn/submit --stream` 至少有一条真实 smoke 链路覆盖，不让 CLI 表面能力只停留在单元测试层。与此同时清理 `PLAN.md` 中遗留的历史“当前优先”标记，保证计划面只保留一个真实当前批次。
+依赖顺序：`T-154(Completed)`。
+回滚策略：仅新增测试、smoke 和计划/文档收口，不变更 runtime 主执行链；若 smoke 断言过严，可回退脚本和测试而不影响功能面。
+风险与控制：stream smoke 依赖 fake provider 输出路径，断言需聚焦稳定信号而不是具体时序；通过选择 `--json --stream` 的 wrapper 行和 `status --json` 的稳定字段，降低 flaky 风险。
+
 ### Batch V0.10-P0 - Spawn Accepted-only + Runtime Transparency（已完成）
 
 目标：先消除“spawn 黑盒卡住”与“运行中不可观察”两类核心体验问题。首个切片先完成 `spawn` accepted-only 语义（同步路径不做 provider probe），随后补事件流/心跳/watch/stats，并补 `block_reason + logs --follow + waiting/watchdog events + stats phase splits + phase_progress view + phase filter/timeout + MCP phase watchdog + watch advice` 让阻塞可解释。
@@ -22,7 +29,7 @@
 
 ## Execution Strategy (v0.9 Current)
 
-### Batch V0.9-P0 - Delegation Minimal + Native-first（当前优先）
+### Batch V0.9-P0 - Delegation Minimal + Native-first
 
 目标：先完成默认策略收口和失败语义修正：`memory_sources` 默认去掉 `ActivePlan`、新增 `delegation_context/native_discovery/output_mode/parse_policy`、`parse_policy=best_effort` 下 provider 成功不因归一化失败判 hard fail、补 `submit` 命令别名。
 依赖顺序：`T-072 -> T-073 -> T-074`。
@@ -45,7 +52,7 @@
 
 ## Execution Strategy (v0.8 Current)
 
-### Batch V0.8-P0 - First Success Path（当前优先）
+### Batch V0.8-P0 - First Success Path
 
 目标：完成 `connect-snippet + init README + smoke_v08/CI + release docs/changelog/version + real examples/onboarding + CI reliability fixes + summary parsing robustness` 收口，让用户首次接入、发布切点和示例落地都可复制可验证。
 依赖顺序：`T-059 -> T-060 -> T-061 -> T-062 -> T-064 -> T-065 -> T-066 -> T-067 -> T-068 -> T-069 -> T-070 -> T-071`。
@@ -54,7 +61,7 @@
 
 ## Execution Strategy (Module Batches)
 
-### Batch A - Runtime 可直接操作（当前优先）
+### Batch A - Runtime 可直接操作
 
 目标：先补齐本地 CLI 命令面与 summary envelope 主路径，让开发与调试不依赖 MCP Host，且结构化输出可稳定吸收。
 依赖顺序：`T-029 -> T-030`。

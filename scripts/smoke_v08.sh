@@ -195,6 +195,10 @@ if [[ -z "$SPAWN_HANDLE" ]]; then
 fi
 run_cmd status "$SPAWN_HANDLE" --json >"$TMP_DIR/status_async.json"
 grep -Eq '"status"[[:space:]]*:[[:space:]]*"(running|succeeded|failed|cancelled|timed_out)"' "$TMP_DIR/status_async.json"
+grep -Eq '"stalled"[[:space:]]*:' "$TMP_DIR/status_async.json"
+grep -Eq '"block_reason"[[:space:]]*:' "$TMP_DIR/status_async.json"
+grep -Eq '"wait_reasons"[[:space:]]*:' "$TMP_DIR/status_async.json"
+grep -Eq '"advice"[[:space:]]*:' "$TMP_DIR/status_async.json"
 
 echo "[smoke-v08] run review runner + read review evidence artifact"
 run_cmd run review_runner \
@@ -212,6 +216,14 @@ grep -Eq '"dual_review_satisfied"[[:space:]]*:[[:space:]]*true' "$TMP_DIR/review
 echo "[smoke-v08] run codex via fake runner (must pass)"
 run_cmd run codex_runner --task "smoke codex fake run" --working-dir "$WORK_DIR" --json >"$TMP_DIR/run_codex.json"
 grep -Eq '"status"[[:space:]]*:[[:space:]]*"succeeded"' "$TMP_DIR/run_codex.json"
+
+echo "[smoke-v08] run codex via fake runner --stream (must pass)"
+run_cmd run codex_runner --task "smoke codex fake stream run" --working-dir "$WORK_DIR" --json --stream >"$TMP_DIR/run_codex_stream.jsonl"
+grep -Fq '"kind":"accepted"' "$TMP_DIR/run_codex_stream.jsonl"
+grep -Fq '"kind":"stream"' "$TMP_DIR/run_codex_stream.jsonl"
+grep -Fq '"stream":"stdout"' "$TMP_DIR/run_codex_stream.jsonl"
+grep -Fq '"kind":"final_status"' "$TMP_DIR/run_codex_stream.jsonl"
+grep -Fq '"status":"succeeded"' "$TMP_DIR/run_codex_stream.jsonl"
 
 echo "[smoke-v08] connect snippets"
 for host in claude codex gemini; do

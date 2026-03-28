@@ -5244,6 +5244,55 @@ target/
     }
 
     #[test]
+    fn status_json_schema_contains_stable_fields() {
+        let output = super::RunStatusOutput {
+            handle_id: "h-1".to_string(),
+            agent_name: "backend-coder".to_string(),
+            task_brief: Some("implement feature".to_string()),
+            status: "running".to_string(),
+            state: Some("running".to_string()),
+            phase: "provider_boot".to_string(),
+            terminal: false,
+            created_at: "2026-03-28T00:00:00Z".to_string(),
+            updated_at: "2026-03-28T00:00:05Z".to_string(),
+            stalled: true,
+            block_reason: Some("waiting_for_trust".to_string()),
+            last_event_at: Some("2026-03-28T00:00:05Z".to_string()),
+            last_event_age_ms: Some(9000),
+            current_wait_reason: Some("provider.first_output.warning".to_string()),
+            wait_reasons: vec!["provider.first_output.warning".to_string()],
+            advice: vec!["approve trust once".to_string()],
+            outcome: None,
+        };
+        let value = serde_json::to_value(&output).expect("serialize output");
+
+        for key in [
+            "handle_id",
+            "agent_name",
+            "task_brief",
+            "status",
+            "state",
+            "phase",
+            "terminal",
+            "created_at",
+            "updated_at",
+            "stalled",
+            "block_reason",
+            "last_event_at",
+            "last_event_age_ms",
+            "current_wait_reason",
+            "wait_reasons",
+            "advice",
+            "outcome",
+        ] {
+            assert!(
+                value.get(key).is_some(),
+                "missing key `{key}` in status json: {value}"
+            );
+        }
+    }
+
+    #[test]
     fn build_usage_output_prefers_native_tokens() {
         let dir = tempdir().expect("tempdir");
         let record = StoredRunRecord {
