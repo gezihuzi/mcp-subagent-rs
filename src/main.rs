@@ -3766,7 +3766,7 @@ fn init_command(options: InitCommandOptions) -> ExitCode {
     } = options;
     if refresh_bootstrap && in_place {
         eprintln!(
-            "init failed: --refresh-bootstrap cannot be combined with --in-place; run from project root or pass --root-dir <bootstrap-root>"
+            "init failed: --refresh-bootstrap cannot be combined with --in-place; run from project root or pass --root-dir <generated-root>"
         );
         return ExitCode::from(1);
     }
@@ -3834,7 +3834,7 @@ fn init_command(options: InitCommandOptions) -> ExitCode {
                         ));
                     }
                     Ok((path, false)) => report.notes.push(format!(
-                        "Using existing project config `{}` (preserved).",
+                        "Using existing project bridge config `{}` (preserved).",
                         path.display()
                     )),
                     Err(err) => {
@@ -5340,7 +5340,7 @@ target/
             overwritten_files: Vec::new(),
             generated_agent_count: 0,
             notes: vec![format!(
-                "Using existing project config `{}` (preserved).",
+                "Using existing project bridge config `{}` (preserved).",
                 project_root.join(PROJECT_BRIDGE_CONFIG_RELATIVE).display()
             )],
         };

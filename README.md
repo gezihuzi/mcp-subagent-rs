@@ -49,6 +49,7 @@ Result output also exposes retry observability fields: `retry_classification` an
 
 `doctor --json` includes `ambient_isolation` diagnostics (per-provider `native_discovery` profile and workspace-visible skill conflict detection).
 It now also includes `project_bridge` diagnostics: whether `./.mcp-subagent/config.toml` exists, which `agents_dir/state_dir` it points to, whether that root is internal or external to the current project, and the exact bridge-only repair command when the bridge is missing or drifted.
+For generated-root template drift, use `bootstrap_catalog.refresh_commands`; for project bridge drift/missing, use `project_bridge.repair_command`.
 
 ## MCP Transport
 
@@ -118,12 +119,12 @@ Run one command for minimal local acceptance:
 
 ## Quick Onboarding (Happy Path)
 
-Default `init` writes to an isolated bootstrap root (`./.mcp-subagent/bootstrap`) to avoid clobbering existing repo files.
-It also writes a project bridge config at `./.mcp-subagent/config.toml`, so running from project root auto-resolves bootstrap `agents_dir/state_dir`.
-For bootstrap mode, `init` also patches project `.gitignore` idempotently to ignore runtime artifacts.
+Default `init` writes to an isolated generated root (`./.mcp-subagent/bootstrap`) to avoid clobbering existing repo files.
+It also writes a project bridge config at `./.mcp-subagent/config.toml`, so running from project root auto-resolves generated-root `agents_dir/state_dir`.
+For the default generated-root path, `init` also patches project `.gitignore` idempotently to ignore runtime artifacts.
 Generated presets use the current runtime terms `context_mode`, `delegation_context`, `memory_sources`, and `working_dir_policy`.
 Built-in templates keep `memory_sources = ["auto_project_memory"]` and do not inject `active_plan` by default.
-If `doctor` reports bootstrap template drift, review those local files first; if the drift is accidental, run the exact `refresh_command` emitted by `doctor` (or `mcp-subagent init --refresh-bootstrap --root-dir <generated-root>`) to resync built-in templates while preserving custom agents. Default `init` still will not overwrite files silently.
+If `doctor` reports generated-root template drift, review those local files first; if the drift is accidental, run the exact `refresh_command` emitted by `doctor`. From project root you can usually run `mcp-subagent init --refresh-bootstrap`; from another cwd, pass `--root-dir <generated-root>`. Default `init` still will not overwrite files silently.
 Use this fixed order for first-time setup:
 
 ```bash
@@ -134,7 +135,7 @@ mcp-subagent connect --host claude
 ```
 
 If you explicitly want old in-place behavior, run `init --in-place`.
-If you intentionally place bootstrap files somewhere else, add `--sync-project-config` once so the current project root points at that custom root without repeating `--agents-dir/--state-dir`. If the custom root already exists and you only need to repair the project bridge later, use `--sync-project-config-only`.
+If you intentionally place the generated root somewhere else, add `--sync-project-config` once so the current project root points at that custom root without repeating `--agents-dir/--state-dir`. If that generated root already exists and you only need to repair the project bridge later, use the bridge-only repair path `--sync-project-config-only`.
 
 If you only want to print and inspect the host command without executing it, use:
 
@@ -154,7 +155,7 @@ mcp-subagent connect --host claude
 mcp-subagent list-agents
 ```
 
-Custom bootstrap root with project bridge sync:
+Custom generated root with project bridge sync:
 
 ```bash
 mcp-subagent init --root-dir ../shared/mcp-subagent-bootstrap --sync-project-config
@@ -162,10 +163,20 @@ mcp-subagent validate
 mcp-subagent doctor --json
 ```
 
-If you only want to repair drifted built-in bootstrap templates without clobbering custom agents, run:
+If you only want to repair generated-root template drift without clobbering custom agents, run:
 
 ```bash
+# from the project root that already points at this generated root
 mcp-subagent init --refresh-bootstrap
+
+# from another cwd
+mcp-subagent init --refresh-bootstrap --root-dir <generated-root>
+```
+
+If you only need to repair project bridge drift or a missing project bridge config for an existing generated root, run the bridge-only repair command:
+
+```bash
+mcp-subagent init --root-dir <generated-root> --sync-project-config-only
 ```
 
 If you use a different host:

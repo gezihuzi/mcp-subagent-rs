@@ -6,6 +6,13 @@
 
 ## Execution Strategy (v0.10 Current)
 
+### Batch V1.0-P8 - Bridge Contract Freeze（已完成）
+
+目标：冻结 `generated root / project bridge / bridge-only repair` 这条外部契约，统一 README、generated README、`doctor` advice/issue 文案、`init` notes/error wording，并补一条面向发布的端到端回归，把 `drift -> refresh-bootstrap -> sync-project-config-only -> lexical cwd` 串成单条可复验故事。
+依赖顺序：`T-162(Completed)`。
+回滚策略：仅收口用户可见文案、修复建议与 smoke，不改 runtime/bridge 主逻辑；若文案收紧引发兼容顾虑，可单独回退 wording 与 smoke，而不影响既有功能链。
+风险与控制：若术语冻结不彻底，会继续出现 README、CLI note、doctor advice 各说各话；通过统一到 `generated root`、`project bridge config`、`bridge-only repair` 三个固定词汇，并让 smoke 直接覆盖完整修复故事，降低二次漂移。
+
 ### Batch V1.0-P7 - Lexical Cwd Path Stability（已完成）
 
 目标：消除 CLI 在 symlink/project alias 场景下把 shell 里的词法路径无故折成物理路径的输出漂移，让 `init --json`、`doctor --json`、generated README connect snippets 等面向用户或 host 的路径，优先保留当前 shell 的 `PWD` 词法形式，而不是回退成 `/private/...` 这类底层真实路径。

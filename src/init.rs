@@ -164,7 +164,7 @@ pub fn refresh_bootstrap_workspace(root: &Path) -> Result<InitReport> {
         return Err(Error::new(
             ErrorKind::NotFound,
             format!(
-                "bootstrap agents directory not found: {} (run `mcp-subagent init` first or pass --root-dir <bootstrap-root>)",
+                "generated-root agents directory not found: {} (run `mcp-subagent init` first or pass --root-dir <generated-root>)",
                 agents_dir.display()
             ),
         )
@@ -563,12 +563,13 @@ Built-in templates keep `memory_sources = ["auto_project_memory"]` and do not in
 by default.
 Gemini read-only research presets keep `working_dir_policy = "auto"`; on the stable scratch path,
 runtime will keep the override visible by downgrading `native_discovery = "isolated"` to `minimal`.
-If `doctor` reports bootstrap template drift, review those local edits first; if the drift is
-accidental, run the exact `refresh_command` emitted by `doctor` (or use
-`mcp-subagent init --refresh-bootstrap --root-dir <generated-root>`) to resync built-in
-templates while preserving custom agents. Default `init` still will not overwrite files silently.
-If you only need to repair the project bridge for an existing generated root, use
-`mcp-subagent init --root-dir <generated-root> --sync-project-config-only`.
+If `doctor` reports generated-root template drift, review those local edits first; if the drift is
+accidental, run the exact `refresh_command` emitted by `doctor`. From project root you can
+usually run `mcp-subagent init --refresh-bootstrap`; from another cwd, pass
+`--root-dir <generated-root>` to resync built-in templates while preserving custom agents.
+Default `init` still will not overwrite files silently.
+If you only need to repair the project bridge for an existing generated root, use the
+bridge-only repair command `mcp-subagent init --root-dir <generated-root> --sync-project-config-only`.
 
 ## MCP Integration (stdio)
 
@@ -1050,14 +1051,14 @@ mod tests {
         assert!(readme.contains("`memory_sources`, and `working_dir_policy`."));
         assert!(readme.contains("memory_sources = [\"auto_project_memory\"]"));
         assert!(readme.contains("do not inject `active_plan`"));
-        assert!(readme.contains("`doctor` reports bootstrap template drift"));
+        assert!(readme.contains("`doctor` reports generated-root template drift"));
         assert!(readme.contains("exact `refresh_command` emitted by `doctor`"));
-        assert!(
-            readme.contains("`mcp-subagent init --refresh-bootstrap --root-dir <generated-root>`")
-        );
+        assert!(readme.contains("`mcp-subagent init --refresh-bootstrap`"));
+        assert!(readme.contains("`--root-dir <generated-root>`"));
         assert!(readme.contains(
             "`mcp-subagent init --root-dir <generated-root> --sync-project-config-only`"
         ));
+        assert!(readme.contains("bridge-only repair command"));
         assert!(readme.contains("preserving custom agents"));
         assert!(readme.contains("Default `init` still will not overwrite files silently"));
     }

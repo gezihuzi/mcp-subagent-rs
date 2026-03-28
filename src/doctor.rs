@@ -267,8 +267,9 @@ fn build_doctor_health(
         "unconfigured" if project_bridge.repair_command.is_some() => issues.push(DoctorIssue {
             level: "warning".to_string(),
             code: "project_bridge_unconfigured".to_string(),
-            message: "project config exists but does not declare [paths].agents_dirs/state_dir"
-                .to_string(),
+            message:
+                "project bridge config exists but does not declare [paths].agents_dirs/state_dir"
+                    .to_string(),
             suggestion: project_bridge.repair_command.clone(),
         }),
         "invalid" => issues.push(DoctorIssue {
@@ -474,7 +475,7 @@ fn build_project_bridge_health(
                 .as_ref()
                 .map(|root| build_sync_project_bridge_command(root, true)),
             warnings: vec![
-                "project config exists but does not declare [paths].agents_dirs/state_dir"
+                "project bridge config exists but does not declare [paths].agents_dirs/state_dir"
                     .to_string(),
             ],
         },
@@ -1838,12 +1839,21 @@ state_dir = "./.mcp-subagent/bootstrap/.mcp-subagent/state"
             report.project_bridge.repair_command.as_deref(),
             Some(expected.as_str())
         );
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "project_bridge_missing")
+            .expect("missing project bridge issue");
+        assert_eq!(
+            issue.message,
+            "project bridge config is missing for the current generated root"
+        );
         assert!(
-            report
-                .issues
-                .iter()
-                .any(|issue| issue.code == "project_bridge_missing"),
-            "expected project_bridge_missing warning"
+            issue
+                .suggestion
+                .as_deref()
+                .is_some_and(|value| value == expected),
+            "expected exact bridge-only repair command"
         );
     }
 
@@ -1870,6 +1880,15 @@ enabled = false
         );
 
         assert_eq!(report.project_bridge.status, "unconfigured");
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "project_bridge_unconfigured")
+            .expect("unconfigured project bridge issue");
+        assert_eq!(
+            issue.message,
+            "project bridge config exists but does not declare [paths].agents_dirs/state_dir"
+        );
         assert!(
             report
                 .project_bridge

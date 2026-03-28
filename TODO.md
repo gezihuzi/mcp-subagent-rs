@@ -4077,3 +4077,25 @@
   - `bash scripts/smoke_v08.sh` 通过。
   - `cargo test --workspace` 通过（230 + 80 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-162 V1.0-P8-BridgeContractFreeze (Completed 2026-03-28)
+
+任务：冻结 `generated root / project bridge / bridge-only repair` 这条外部契约，统一 README、generated README、`doctor` advice/issue 文案、`init` notes/error wording，并补一条端到端发布故事回归。
+验收标准：
+
+1. README、generated README、`doctor` issue/advice、`init` notes/error message 在这条链路上统一使用 `generated root`、`project bridge config`、`bridge-only repair` 这组术语，不再混入模糊 `project config` 或旧 `<bootstrap-root>` 提示。
+2. README 明确区分两条修复路径：template drift 走 `refresh-bootstrap`，project bridge 问题走 `sync-project-config-only`；且同时说明“在项目根可直接跑 / 在其他目录传 `--root-dir <generated-root>`”的语义。
+3. 回归至少覆盖一条完整故事：drifted generated root 被 `doctor` 同时报出 refresh 与 bridge repair 路径，执行 `refresh-bootstrap` 后 drift 消失，再执行 `sync-project-config-only` 后 project bridge synced，且 symlink cwd 下输出仍保留 lexical path。
+4. 现有 bridge/runtime 行为不变，本轮只收口文案、建议与回归，不新增配置项或主逻辑分支。
+5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - README、generated README、`doctor` issue 文案、`init` notes/error wording 已统一收口到 `generated root`、`project bridge config`、`bridge-only repair` 这组固定术语，不再混用模糊 `project config` 或旧 `<bootstrap-root>` 提示。
+  - README 现在明确区分两条修复路径：generated-root template drift 走 `refresh-bootstrap`，project bridge drift/missing 走 `sync-project-config-only`，并写清了“项目根可直接跑 / 其他 cwd 传 `--root-dir <generated-root>`”的使用语义。
+  - `src/doctor.rs` 已补更严格的文案断言，`src/init.rs` 的 generated README 回归也同步锁住新说法；`src/main.rs` 的 preserved note 已统一成 `project bridge config`。
+  - `scripts/smoke_v08.sh` 新增完整发布故事回归：`drift -> refresh-bootstrap -> sync-project-config-only -> lexical cwd`，同时断言 refresh command、bridge-only repair command、synced bridge 和 lexical cwd 保持一致。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（230 + 80 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

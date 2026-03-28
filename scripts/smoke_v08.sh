@@ -151,12 +151,16 @@ BOOTSTRAP_CUSTOM="$BOOTSTRAP_ROOT/agents/custom.agent.toml"
 BOOTSTRAP_PROJECT="$TMP_DIR/project-bootstrap-default"
 LEXICAL_PROJECT_TARGET="$TMP_DIR/project-lexical-target"
 LEXICAL_PROJECT_LINK="$TMP_DIR/project-lexical-link"
+RELEASE_PROJECT_TARGET="$TMP_DIR/project-release-target"
+RELEASE_PROJECT_LINK="$TMP_DIR/project-release-link"
+RELEASE_ROOT="$TMP_DIR/release-generated-root"
 SYNC_PROJECT="$TMP_DIR/project-sync"
 SYNC_ROOT="$TMP_DIR/custom-root-sync"
 SYNC_PROJECT_INIT="$TMP_DIR/project-sync-during-init"
 SYNC_INIT_ROOT="$TMP_DIR/custom-root-sync-during-init"
-mkdir -p "$BOOTSTRAP_PROJECT" "$LEXICAL_PROJECT_TARGET" "$SYNC_PROJECT" "$SYNC_PROJECT_INIT"
+mkdir -p "$BOOTSTRAP_PROJECT" "$LEXICAL_PROJECT_TARGET" "$RELEASE_PROJECT_TARGET" "$SYNC_PROJECT" "$SYNC_PROJECT_INIT"
 ln -s "$LEXICAL_PROJECT_TARGET" "$LEXICAL_PROJECT_LINK"
+ln -s "$RELEASE_PROJECT_TARGET" "$RELEASE_PROJECT_LINK"
 
 run_cmd() {
   cargo run --quiet -- \
@@ -265,6 +269,45 @@ if [[ -e "$SYNC_PROJECT/.gitignore" ]]; then
   echo "[smoke-v08] external custom-root sync should not write project .gitignore"
   exit 1
 fi
+
+echo "[smoke-v08] release story: drift -> refresh -> bridge repair under lexical cwd"
+cargo run --quiet -- init --preset codex-primary-builder --root-dir "$RELEASE_ROOT" --json >"$TMP_DIR/release_story_init_root.json"
+perl -0pi -e 's/memory_sources = \["auto_project_memory"\]/memory_sources = ["auto_project_memory", "active_plan"]/g' "$RELEASE_ROOT/agents/backend-coder.agent.toml"
+(
+  cd "$RELEASE_PROJECT_LINK"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- \
+    --agents-dir "$RELEASE_ROOT/agents" \
+    --state-dir "$RELEASE_ROOT/.mcp-subagent/state" \
+    doctor --json >"$TMP_DIR/release_story_doctor_missing.json"
+)
+grep -Fq "mcp-subagent init --refresh-bootstrap --root-dir '$RELEASE_ROOT'" "$TMP_DIR/release_story_doctor_missing.json"
+grep -Fq "mcp-subagent init --root-dir '$RELEASE_ROOT' --sync-project-config-only" "$TMP_DIR/release_story_doctor_missing.json"
+grep -Fq "\"cwd\": \"$RELEASE_PROJECT_LINK\"" "$TMP_DIR/release_story_doctor_missing.json"
+
+cargo run --quiet -- init --root-dir "$RELEASE_ROOT" --refresh-bootstrap --json >"$TMP_DIR/release_story_refresh.json"
+if grep -Fq 'active_plan' "$RELEASE_ROOT/agents/backend-coder.agent.toml"; then
+  echo "[smoke-v08] release story refresh left legacy active_plan behind"
+  exit 1
+fi
+(
+  cd "$RELEASE_PROJECT_LINK"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- \
+    --agents-dir "$RELEASE_ROOT/agents" \
+    --state-dir "$RELEASE_ROOT/.mcp-subagent/state" \
+    doctor --json >"$TMP_DIR/release_story_doctor_refreshed.json"
+)
+grep -Eq '"drifted_templates"[[:space:]]*:[[:space:]]*\[\]' "$TMP_DIR/release_story_doctor_refreshed.json"
+
+(
+  cd "$RELEASE_PROJECT_LINK"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- \
+    init --root-dir "$RELEASE_ROOT" --sync-project-config-only --json >"$TMP_DIR/release_story_sync.json"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- doctor --json >"$TMP_DIR/release_story_doctor_synced.json"
+)
+grep -Fq "\"cwd\": \"$RELEASE_PROJECT_LINK\"" "$TMP_DIR/release_story_doctor_synced.json"
+grep -Eq '"status"[[:space:]]*:[[:space:]]*"synced"' "$TMP_DIR/release_story_doctor_synced.json"
+grep -Fq "\"config_path\": \"$RELEASE_PROJECT_LINK/.mcp-subagent/config.toml\"" "$TMP_DIR/release_story_doctor_synced.json"
+grep -Eq '"repair_command"[[:space:]]*:[[:space:]]*null' "$TMP_DIR/release_story_doctor_synced.json"
 
 echo "[smoke-v08] validate"
 run_cmd validate >"$TMP_DIR/validate.txt"
