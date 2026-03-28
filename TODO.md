@@ -3800,3 +3800,111 @@
   - `cargo check` 通过。
   - `cargo test --workspace` 通过（209 + 65 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-150 V1.0-PlanTodo-TermAlignment (Completed 2026-03-28)
+
+任务：将下一轮 v1.0 收口文档改写为当前仓库术语版，只保留真实待做的三条小步任务：`summary` parser bridge、bootstrap/preset 漂移治理、CLI stream/status 能力暴露；明确不引入当前仓库中不存在的新状态名、新持久化主文件或新配置术语。  
+验收标准：
+
+1. `PLAN.md` 的 v0.10 当前优先批次改写为现有代码术语，不再出现 `RunStatus`、`meta.json` 主存储、`context_injection_level`、`delegation_profile`、`FailedButNativeAvailable` 等仓库中不存在的命名。
+2. `TODO.md` 新增后续执行任务，顺序固定为 `parser bridge -> bootstrap/preset/context slimming -> CLI stream/status exposure`，并为每条任务补齐验收标准。
+3. 文档明确区分“已落地能力”和“待补齐能力”：`ps` 已输出 `stalled/block_reason`，`watch` 已消费 heartbeat/event cursor，`run/spawn` 仍未显式暴露 `--stream`。
+完成记录：
+
+- 已更新 `PLAN.md`：
+  - 将 `Batch V0.10-P0` 标记为已完成；
+  - 新增 `Batch V0.10-P1 - Parser Bridge + Bootstrap Drift Guard + CLI Exposure`，并使用当前仓库术语描述优先级、回滚策略与风险控制。
+- 已更新 `TODO.md`：
+  - 新增 `T-151/T-152/T-153` 三条后续任务，全部使用现有代码中的真实命名。
+- 已对照当前实现自检：
+  - `src/runtime/summary.rs`
+  - `src/main.rs`
+  - `src/init.rs`
+  - `src/runtime/workspace.rs`
+  - `src/mcp/tools.rs`
+- 未运行 `cargo`；本次仅修改计划/任务文档，无 Rust 代码变更。
+
+## T-151 V0.10-P1-SummaryParserBridgeHardening (Completed 2026-03-28)
+
+任务：强化 `src/runtime/summary.rs` 与 provider runner 桥接，在不破坏 strict 语义的前提下收口裸 `ProviderSummary` JSON、占位 sentinel 污染和纯文本 fallback，让 provider 成功时的 native-first 行为更稳。  
+验收标准：
+
+1. `parse_summary_contract` 在 `best_effort` 主路径下可识别 `stdout` 中未包 sentinel 的合法 `ProviderSummary` JSON，并避免 `stderr` 中 prompt 占位 sentinel（如 `{...valid json...}`）抢占结果。
+2. provider 执行成功但归一化不完整时，run 终态继续保持当前 native-first 语义；`parse_status`、`summary.json/stdout.txt/stderr.txt` 与 `result/show` 输出不回退到旧 hard-fail 行为。
+3. 新增测试覆盖：
+   - 裸 `ProviderSummary` JSON；
+   - placeholder sentinel + 后续真实 JSON；
+   - provider 成功 + 纯文本 fallback；
+   - strict/best_effort 分支差异。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/runtime/summary.rs`：
+  - `parse_summary_contract` 现在会在 sentinel 主路径之后继续尝试提取裸 `ProviderSummary` JSON；
+  - 新增 placeholder sentinel 过滤，`{...valid json...}` 不再作为无效 summary 抢占解析结果；
+  - 新增 JSON object candidate 扫描，用于处理 prompt 回显后追加的真实 JSON、以及 back-to-back JSON 输出。
+- 已保持当前 native-first 语义不变：
+  - 合法裸 `ProviderSummary` JSON 仍记为 `parse_status=Degraded`，不会伪装成 `Validated`；
+  - `best_effort` 下 provider 成功继续走 succeeded + degraded；
+  - `strict` 下同样场景仍保持 failed + retryable 行为。
+- 已新增测试：
+  - `src/runtime/summary.rs`
+    - `parses_late_raw_json_after_placeholder_sentinel`
+    - `ignores_placeholder_sentinel_in_stderr_when_stdout_is_plain_text`
+    - `parses_first_valid_provider_summary_from_back_to_back_json_objects`
+  - `src/runtime/dispatcher.rs`
+    - `dispatch_best_effort_succeeds_when_summary_is_bare_provider_json`
+    - `dispatch_strict_fails_when_summary_is_bare_provider_json`
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（213 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-152 V0.10-P1-BootstrapPresetDriftAndContextSlimming (Completed 2026-03-28)
+
+任务：治理 bootstrap preset 漂移，并收口 research-only 路径的上下文注入，避免旧生成物或过量 `memory_sources` 再次把 `active_plan` / skills 等噪音注入到简单任务。  
+验收标准：
+
+1. `init` 生成的 preset 模板与 README 示例统一使用当前代码术语：`delegation_context/context_mode/memory_sources/working_dir_policy`；不得引入不存在的新配置名。
+2. research-only + minimal delegation 路径保持当前轻量默认：不默认注入 `active_plan`，Gemini `working_dir_policy=auto` 继续命中 `StableScratch`，且 stable scratch 的 `native_discovery` override 行为保持可见。
+3. 为已存在 workspace 的 bootstrap 漂移补充至少一种可见治理手段：校验、doctor 提示、或明确的再生成说明；不得静默覆盖用户文件。
+4. 新增测试或文档断言，锁定最小 preset 不含 `active_plan`，并覆盖 README/模板示例与当前默认行为一致。
+5. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已在 `src/init.rs` 暴露内建模板索引，供诊断层按当前 catalog 版本比对 bootstrap 生成物；内建 preset 仍统一保持 `memory_sources = ["auto_project_memory"]`，未恢复任何默认 `active_plan` 注入。
+- 已在 `src/doctor.rs` 新增 `bootstrap_catalog` 诊断段，`doctor` 现在会显式报告 `.mcp-subagent/bootstrap/agents` 下与当前内建模板漂移的文件，并标记是否仍带有 legacy `active_plan` 注入；只提示，不静默覆盖。
+- 已更新生成的 `README.mcp-subagent.md` 模板和顶层 `README.md`，明确当前 runtime 术语、轻量默认上下文、Gemini `StableScratch` 行为，以及发现 drift 后应通过有意再生成来同步，而不是自动改写。
+- 已新增测试：
+  - `src/init.rs`
+    - `generated_presets_do_not_default_to_active_plan_memory`
+    - `init_readme_documents_current_runtime_terms_and_drift_guidance`
+  - `src/doctor.rs`
+    - `doctor_reports_bootstrap_template_drift_without_overwriting`
+- 已验证：
+  - `cargo test --workspace` 通过（216 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-153 V0.10-P1-CLIStreamAndStatusExposure (Completed 2026-03-28)
+
+任务：把已存在的流式输出、heartbeat 和阻塞诊断能力显式暴露到 CLI，补齐 `run/spawn/submit` 的 `--stream` 入口，并让 `status` 面向终端用户输出和 `ps/stats/watch` 保持同级诊断信息。  
+验收标准：
+
+1. `run`、`spawn`、`submit` 支持显式 `--stream` flag；开启后复用现有 stdout/stderr delta 路径，不改变默认非流式行为。
+2. `status` 文本和 JSON 输出补齐当前关键诊断字段，至少包括 `block_reason` 与 `stalled`，并保持与现有 MCP/CLI 字段语义一致。
+3. README 与 CLI 示例更新，明确 `--stream` 用法以及与 `watch/logs/events --follow` 的关系；不得误写为当前仓库中不存在的配置项或状态名。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已在 `src/main.rs` 为 `run`、`spawn`、`submit` 增加显式 `--stream` flag；其中 `run --stream` 复用现有 async spawn + `logs --follow` 路径，把 `provider.stdout.delta` / `provider.stderr.delta` / event / phase progress 直接暴露到终端，不改变默认非流式行为。
+- 已新增 CLI 侧 `RunStatusOutput` 组合视图，`status` 现在会合并 `get_agent_status` 与 `get_agent_stats`，文本和 JSON 都补齐 `status/state/phase/stalled/block_reason/current_wait_reason/wait_reasons/advice`，并保留终态摘要/错误信息。
+- 已更新 `README.md` 示例，补充 `run --stream`、`submit --stream` 用法，并明确它与 `status`、`watch`、`logs/events --follow` 的关系。
+- 已新增测试：
+  - `src/main.rs`
+    - `parses_run_command_with_stream_flag`
+    - `parses_spawn_command_with_stream_flag`
+    - `parses_submit_command_with_stream_flag`
+    - `build_run_status_output_carries_stall_and_block_reason`
+- 已验证：
+  - `cargo test --workspace` 通过（216 + 69 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

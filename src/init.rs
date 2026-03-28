@@ -188,6 +188,25 @@ fn preset_agent_templates(preset: InitPreset) -> Vec<(&'static str, &'static str
     }
 }
 
+pub(crate) fn preset_catalog_version() -> &'static str {
+    PRESET_CATALOG_VERSION
+}
+
+pub(crate) fn builtin_agent_template(file_name: &str) -> Option<&'static str> {
+    match file_name {
+        "fast-researcher.agent.toml" => Some(FAST_RESEARCHER_AGENT),
+        "backend-coder.agent.toml" => Some(BACKEND_CODER_AGENT),
+        "frontend-builder.agent.toml" => Some(FRONTEND_BUILDER_AGENT),
+        "correctness-reviewer.agent.toml" => Some(CORRECTNESS_REVIEWER_AGENT),
+        "style-reviewer.agent.toml" => Some(STYLE_REVIEWER_AGENT),
+        "codex-style-reviewer.agent.toml" => Some(CODEX_STYLE_REVIEWER_AGENT),
+        "gemini-style-reviewer.agent.toml" => Some(GEMINI_STYLE_REVIEWER_AGENT),
+        "local-fallback-coder.agent.toml" => Some(LOCAL_FALLBACK_CODER_AGENT),
+        "single-provider-coder.agent.toml" => Some(SINGLE_PROVIDER_CODER_AGENT),
+        _ => None,
+    }
+}
+
 fn write(path: &Path, content: &str) -> Result<()> {
     fs::write(path, content)?;
     Ok(())
@@ -276,6 +295,17 @@ mcp-subagent validate --agents-dir ./agents
 mcp-subagent doctor --agents-dir ./agents
 mcp-subagent list-agents --agents-dir ./agents
 ```
+
+## Current Defaults
+
+Generated presets use the current runtime terms: `context_mode`, `delegation_context`,
+`memory_sources`, and `working_dir_policy`.
+Built-in templates keep `memory_sources = ["auto_project_memory"]` and do not inject `active_plan`
+by default.
+Gemini read-only research presets keep `working_dir_policy = "auto"`; on the stable scratch path,
+runtime will keep the override visible by downgrading `native_discovery = "isolated"` to `minimal`.
+If `doctor` reports bootstrap template drift, review those local edits and regenerate only when you
+intend to resync; `init` will not overwrite files silently.
 
 ## MCP Integration (stdio)
 
@@ -693,5 +723,59 @@ mod tests {
         assert!(readme.contains(&build_connect_snippet(ConnectHost::Claude, &paths)));
         assert!(readme.contains(&build_connect_snippet(ConnectHost::Codex, &paths)));
         assert!(readme.contains(&build_connect_snippet(ConnectHost::Gemini, &paths)));
+    }
+
+    #[test]
+    fn generated_presets_do_not_default_to_active_plan_memory() {
+        for preset in [
+            InitPreset::ClaudeOpusSupervisor,
+            InitPreset::ClaudeOpusSupervisorMinimal,
+            InitPreset::CodexPrimaryBuilder,
+            InitPreset::GeminiFrontendTeam,
+            InitPreset::LocalOllamaFallback,
+            InitPreset::MinimalSingleProvider,
+        ] {
+            let dir = tempdir().expect("tempdir");
+            init_workspace(dir.path(), preset, false).expect("init preset");
+
+            for entry in fs::read_dir(dir.path().join("agents")).expect("read agents dir") {
+                let path = entry.expect("dir entry").path();
+                if !path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.ends_with(".agent.toml"))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let raw = fs::read_to_string(&path).expect("read agent");
+                assert!(
+                    raw.contains("memory_sources = [\"auto_project_memory\"]"),
+                    "expected auto_project_memory default in {}",
+                    path.display()
+                );
+                assert!(
+                    !raw.contains("active_plan"),
+                    "unexpected active_plan default in {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn init_readme_documents_current_runtime_terms_and_drift_guidance() {
+        let dir = tempdir().expect("tempdir");
+        init_workspace(dir.path(), InitPreset::ClaudeOpusSupervisorMinimal, false)
+            .expect("init succeeds");
+
+        let readme = fs::read_to_string(dir.path().join("README.mcp-subagent.md"))
+            .expect("read generated readme");
+        assert!(readme.contains("`context_mode`, `delegation_context`,"));
+        assert!(readme.contains("`memory_sources`, and `working_dir_policy`."));
+        assert!(readme.contains("memory_sources = [\"auto_project_memory\"]"));
+        assert!(readme.contains("do not inject `active_plan`"));
+        assert!(readme.contains("`doctor` reports bootstrap template drift"));
+        assert!(readme.contains("`init` will not overwrite files silently"));
     }
 }

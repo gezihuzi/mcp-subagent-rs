@@ -173,6 +173,12 @@ pub fn parse_summary_contract(raw_stdout: &str, raw_stderr: &str) -> ParsedSumma
     if let Some(parsed) = parse_from_raw(raw_stderr, "stderr", &mut invalid_candidate) {
         return parsed;
     }
+    if let Some(parsed) = parse_bare_provider_summary(raw_stdout) {
+        return parsed;
+    }
+    if let Some(parsed) = parse_bare_provider_summary(raw_stderr) {
+        return parsed;
+    }
     if let Some((reason, raw_fallback_text)) = invalid_candidate {
         return invalid_summary(&reason, raw_fallback_text);
     }
@@ -192,6 +198,9 @@ fn parse_from_raw(
     for json_block in extract_json_blocks(raw) {
         let trimmed = json_block.trim();
         if trimmed.is_empty() || !seen.insert(trimmed) {
+            continue;
+        }
+        if is_placeholder_json_candidate(trimmed) {
             continue;
         }
 
@@ -216,6 +225,36 @@ fn parse_json_candidate(json_block: &str) -> Option<ProviderSummary> {
     serde_json::from_str::<ProviderSummary>(json_block).ok()
 }
 
+fn parse_bare_provider_summary(raw: &str) -> Option<ParsedSummary> {
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() && !is_placeholder_json_candidate(trimmed) {
+        if let Some(parsed) = parse_json_candidate(trimmed) {
+            return Some(ParsedSummary {
+                parse_status: SummaryParseStatus::Degraded,
+                summary: parsed,
+                raw_fallback_text: None,
+            });
+        }
+    }
+
+    let mut seen = HashSet::new();
+    for json_block in extract_json_object_candidates(raw) {
+        let trimmed = json_block.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed) || is_placeholder_json_candidate(trimmed) {
+            continue;
+        }
+        if let Some(parsed) = parse_json_candidate(trimmed) {
+            return Some(ParsedSummary {
+                parse_status: SummaryParseStatus::Degraded,
+                summary: parsed,
+                raw_fallback_text: None,
+            });
+        }
+    }
+
+    None
+}
+
 fn extract_json_blocks(raw: &str) -> Vec<&str> {
     let mut blocks = Vec::new();
     let mut offset = 0usize;
@@ -229,6 +268,59 @@ fn extract_json_blocks(raw: &str) -> Vec<&str> {
         offset = end + SUMMARY_END_SENTINEL.len();
     }
     blocks
+}
+
+fn extract_json_object_candidates(raw: &str) -> Vec<&str> {
+    let mut blocks = Vec::new();
+    for (start, ch) in raw.char_indices() {
+        if ch != '{' {
+            continue;
+        }
+        let Some(len) = find_json_object_length(&raw[start..]) else {
+            continue;
+        };
+        blocks.push(&raw[start..start + len]);
+    }
+    blocks
+}
+
+fn find_json_object_length(raw: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (idx, ch) in raw.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(idx + ch.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn is_placeholder_json_candidate(candidate: &str) -> bool {
+    candidate.trim() == "{...valid json...}"
 }
 
 fn degraded_summary(reason: &str, raw_fallback_text: Option<String>) -> ParsedSummary {
@@ -341,10 +433,11 @@ mod tests {
     fn marks_degraded_when_summary_json_without_sentinels() {
         let parsed = parse_summary_contract(&summary_json(), "");
         assert_eq!(parsed.parse_status(), &SummaryParseStatus::Degraded);
+        assert_eq!(parsed.summary_text(), "ok");
     }
 
     #[test]
-    fn marks_invalid_when_only_placeholder_sentinel_and_late_raw_json() {
+    fn parses_late_raw_json_after_placeholder_sentinel() {
         let stdout = format!(
             "OUTPUT SENTINELS\n{start}\n{{...valid json...}}\n{end}\nrunner logs\n{summary}",
             start = SUMMARY_START_SENTINEL,
@@ -352,8 +445,8 @@ mod tests {
             summary = summary_json()
         );
         let parsed = parse_summary_contract(&stdout, "");
-        assert_eq!(parsed.parse_status(), &SummaryParseStatus::Invalid);
-        assert!(parsed.raw_fallback_text().is_some());
+        assert_eq!(parsed.parse_status(), &SummaryParseStatus::Degraded);
+        assert_eq!(parsed.summary_text(), "ok");
     }
 
     #[test]
@@ -380,6 +473,26 @@ mod tests {
         assert_eq!(parsed.parse_status(), &SummaryParseStatus::Invalid);
         assert!(parsed.raw_fallback_text().is_some());
         assert_eq!(parsed.verification_status(), &VerificationStatus::NotRun);
+    }
+
+    #[test]
+    fn ignores_placeholder_sentinel_in_stderr_when_stdout_is_plain_text() {
+        let stderr = format!(
+            "OUTPUT SENTINELS\n{start}\n{{...valid json...}}\n{end}",
+            start = SUMMARY_START_SENTINEL,
+            end = SUMMARY_END_SENTINEL
+        );
+        let parsed = parse_summary_contract("plain text", &stderr);
+        assert_eq!(parsed.parse_status(), &SummaryParseStatus::Degraded);
+        assert!(parsed.raw_fallback_text().is_some());
+    }
+
+    #[test]
+    fn parses_first_valid_provider_summary_from_back_to_back_json_objects() {
+        let stdout = format!("{}\n{}", summary_json(), summary_json());
+        let parsed = parse_summary_contract(&stdout, "");
+        assert_eq!(parsed.parse_status(), &SummaryParseStatus::Degraded);
+        assert_eq!(parsed.summary_text(), "ok");
     }
 
     #[test]

@@ -19,8 +19,8 @@ use mcp_subagent::{
     logging::{init_logging, LoggingGuard},
     mcp::{
         dto::{
-            ArtifactOutput, HandleInput, OutcomeView, ReadAgentArtifactInput, RunAgentInput,
-            RunAgentSelectedFileInput, RunView,
+            ArtifactOutput, GetAgentStatsInput, GetAgentStatsOutput, HandleInput, OutcomeView,
+            ReadAgentArtifactInput, RunAgentInput, RunAgentSelectedFileInput, RunView,
         },
         server::McpSubagentServer,
     },
@@ -40,6 +40,7 @@ const BRIDGE_AGENTS_DIR_RELATIVE: &str = "./.mcp-subagent/bootstrap/agents";
 const BRIDGE_STATE_DIR_RELATIVE: &str = "./.mcp-subagent/bootstrap/.mcp-subagent/state";
 const GITIGNORE_RUNTIME_HEADER: &str = "# mcp-subagent runtime artifacts";
 const RESULT_CONTRACT_VERSION: &str = "mcp-subagent.result.v1";
+const STREAM_FOLLOW_INTERVAL_MS: u64 = 250;
 const GITIGNORE_RUNTIME_RULES: [&str; 3] = [
     ".mcp-subagent/state/",
     ".mcp-subagent/logs/",
@@ -226,6 +227,8 @@ enum Commands {
         #[arg(long)]
         working_dir: Option<PathBuf>,
         #[arg(long)]
+        stream: bool,
+        #[arg(long)]
         json: bool,
     },
     Spawn {
@@ -247,6 +250,8 @@ enum Commands {
         #[arg(long)]
         working_dir: Option<PathBuf>,
         #[arg(long)]
+        stream: bool,
+        #[arg(long)]
         json: bool,
     },
     Submit {
@@ -267,6 +272,8 @@ enum Commands {
         selected_files_inline: Vec<PathBuf>,
         #[arg(long)]
         working_dir: Option<PathBuf>,
+        #[arg(long)]
+        stream: bool,
         #[arg(long)]
         json: bool,
     },
@@ -729,6 +736,7 @@ async fn main() -> ExitCode {
             selected_files,
             selected_files_inline,
             working_dir,
+            stream,
             json,
         } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -757,6 +765,7 @@ async fn main() -> ExitCode {
                     selected_files,
                     selected_files_inline,
                     working_dir,
+                    stream,
                     json,
                 },
             )
@@ -772,6 +781,7 @@ async fn main() -> ExitCode {
             selected_files,
             selected_files_inline,
             working_dir,
+            stream,
             json,
         } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -800,6 +810,7 @@ async fn main() -> ExitCode {
                     selected_files,
                     selected_files_inline,
                     working_dir,
+                    stream,
                     json,
                 },
             )
@@ -815,6 +826,7 @@ async fn main() -> ExitCode {
             selected_files,
             selected_files_inline,
             working_dir,
+            stream,
             json,
         } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -831,7 +843,7 @@ async fn main() -> ExitCode {
                 }
             };
             info!("starting command: submit");
-            spawn_agent(
+            submit_agent(
                 cfg,
                 AgentRunCommand {
                     agent,
@@ -843,6 +855,7 @@ async fn main() -> ExitCode {
                     selected_files,
                     selected_files_inline,
                     working_dir,
+                    stream,
                     json,
                 },
             )
@@ -1427,6 +1440,27 @@ struct WaitRunOutput {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct RunStatusOutput {
+    handle_id: String,
+    agent_name: String,
+    task_brief: Option<String>,
+    status: String,
+    state: Option<String>,
+    phase: String,
+    terminal: bool,
+    created_at: String,
+    updated_at: String,
+    stalled: bool,
+    block_reason: Option<String>,
+    last_event_at: Option<String>,
+    last_event_age_ms: Option<u64>,
+    current_wait_reason: Option<String>,
+    wait_reasons: Vec<String>,
+    advice: Vec<String>,
+    outcome: Option<OutcomeView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct RunStatsOutput {
     handle_id: String,
     status: String,
@@ -1520,6 +1554,94 @@ fn render_show_run_text(view: &RunShowOutput, color: bool) -> String {
     }
     if let Some(error) = view.error_message.as_deref() {
         lines.push(format!("error: {}", ansi(error, "31", color)));
+    }
+    lines.join("\n")
+}
+
+fn build_run_status_output(view: RunView, stats: GetAgentStatsOutput) -> RunStatusOutput {
+    RunStatusOutput {
+        handle_id: view.handle_id,
+        agent_name: view.agent_name,
+        task_brief: view.task_brief,
+        status: stats.status,
+        state: stats.state,
+        phase: stats.phase.unwrap_or(view.phase),
+        terminal: view.terminal,
+        created_at: view.created_at,
+        updated_at: view.updated_at,
+        stalled: stats.stalled,
+        block_reason: stats.block_reason,
+        last_event_at: stats.last_event_at,
+        last_event_age_ms: stats.last_event_age_ms,
+        current_wait_reason: stats.current_wait_reason,
+        wait_reasons: stats.wait_reasons,
+        advice: stats.advice,
+        outcome: view.outcome,
+    }
+}
+
+fn render_status_output_text(output: &RunStatusOutput) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("handle_id: {}", output.handle_id));
+    lines.push(format!("agent: {}", output.agent_name));
+    if let Some(task_brief) = output.task_brief.as_deref() {
+        lines.push(format!("task_brief: {task_brief}"));
+    }
+    lines.push(format!("status: {}", output.status));
+    lines.push(format!(
+        "state: {}",
+        output.state.as_deref().unwrap_or(output.status.as_str())
+    ));
+    lines.push(format!("phase: {}", output.phase));
+    lines.push(format!(
+        "terminal: {}",
+        if output.terminal { "yes" } else { "no" }
+    ));
+    lines.push(format!("created_at: {}", output.created_at));
+    lines.push(format!("updated_at: {}", output.updated_at));
+    lines.push(format!(
+        "last_event_at: {}",
+        output.last_event_at.as_deref().unwrap_or("unknown")
+    ));
+    lines.push(format!(
+        "last_event_age_ms: {}",
+        output
+            .last_event_age_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    ));
+    lines.push(format!(
+        "stalled: {}",
+        if output.stalled { "yes" } else { "no" }
+    ));
+    lines.push(format!(
+        "block_reason: {}",
+        output.block_reason.as_deref().unwrap_or("-")
+    ));
+    lines.push(format!(
+        "current_wait_reason: {}",
+        output.current_wait_reason.as_deref().unwrap_or("-")
+    ));
+    lines.push(format!(
+        "wait_reasons: {}",
+        if output.wait_reasons.is_empty() {
+            "-".to_string()
+        } else {
+            output.wait_reasons.join(",")
+        }
+    ));
+    if !output.advice.is_empty() {
+        lines.push(format!("advice: {}", output.advice.join(" | ")));
+    }
+    if let Some(outcome) = output.outcome.as_ref() {
+        match outcome {
+            OutcomeView::Succeeded { summary, .. } => lines.push(format!("summary: {summary}")),
+            OutcomeView::Failed { error, .. } => lines.push(format!("error: {error}")),
+            OutcomeView::Cancelled { reason } => lines.push(format!("cancelled: {reason}")),
+            OutcomeView::TimedOut { elapsed_secs } => {
+                lines.push(format!("timed_out_after: {elapsed_secs}s"))
+            }
+        }
     }
     lines.join("\n")
 }
@@ -3973,6 +4095,7 @@ struct AgentRunCommand {
     selected_files: Vec<PathBuf>,
     selected_files_inline: Vec<PathBuf>,
     working_dir: Option<PathBuf>,
+    stream: bool,
     json: bool,
 }
 
@@ -3987,9 +4110,9 @@ async fn run_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
         selected_files,
         selected_files_inline,
         working_dir,
+        stream,
         json,
     } = options;
-    let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
     let selected_files = match build_selected_file_inputs(
         selected_files,
         selected_files_inline,
@@ -4011,6 +4134,12 @@ async fn run_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
         plan_ref,
         working_dir: working_dir.map(|path| path.display().to_string()),
     };
+
+    if stream {
+        return spawn_and_optionally_stream(cfg, input, json, true, false, "run").await;
+    }
+
+    let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
 
     match server.run_agent(Parameters(input)).await {
         Ok(result) => {
@@ -4056,9 +4185,9 @@ async fn spawn_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
         selected_files,
         selected_files_inline,
         working_dir,
+        stream,
         json,
     } = options;
-    let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
     let selected_files = match build_selected_file_inputs(
         selected_files,
         selected_files_inline,
@@ -4080,11 +4209,157 @@ async fn spawn_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
         plan_ref,
         working_dir: working_dir.map(|path| path.display().to_string()),
     };
+    spawn_and_optionally_stream(cfg, input, json, stream, true, "spawn").await
+}
 
+async fn submit_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
+    let AgentRunCommand {
+        agent,
+        task,
+        task_brief,
+        parent_summary,
+        stage,
+        plan_ref,
+        selected_files,
+        selected_files_inline,
+        working_dir,
+        stream,
+        json,
+    } = options;
+    let selected_files = match build_selected_file_inputs(
+        selected_files,
+        selected_files_inline,
+        working_dir.as_deref(),
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("submit failed: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let input = RunAgentInput {
+        agent_name: agent,
+        task,
+        task_brief,
+        parent_summary,
+        selected_files,
+        stage,
+        plan_ref,
+        working_dir: working_dir.map(|path| path.display().to_string()),
+    };
+    spawn_and_optionally_stream(cfg, input, json, stream, true, "submit").await
+}
+
+fn cli_spawn_waits_for_completion() -> bool {
+    !std::env::var("MCP_SUBAGENT_CLI_SPAWN_ACCEPT_ONLY")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+}
+
+async fn fetch_status_output(
+    server: &McpSubagentServer,
+    handle_id: String,
+) -> std::result::Result<RunStatusOutput, String> {
+    let run_view = server
+        .get_agent_status(Parameters(HandleInput {
+            handle_id: handle_id.clone(),
+        }))
+        .await
+        .map_err(|err| err.message.to_string())?
+        .0;
+    let stats = server
+        .get_agent_stats(Parameters(GetAgentStatsInput { handle_id }))
+        .await
+        .map_err(|err| err.message.to_string())?
+        .0;
+    Ok(build_run_status_output(run_view, stats))
+}
+
+fn print_stream_accepted_output(output: &RunView, json: bool) -> std::result::Result<(), String> {
+    if json {
+        return print_json_line(&serde_json::json!({
+            "kind": "accepted",
+            "run": output,
+        }));
+    }
+    println!("handle_id: {}", output.handle_id);
+    println!("phase: {}", output.phase);
+    println!("accepted_at: {}", output.updated_at);
+    Ok(())
+}
+
+fn print_stream_terminal_output(
+    output: &RunStatusOutput,
+    json: bool,
+) -> std::result::Result<(), String> {
+    if json {
+        return print_json_line(&serde_json::json!({
+            "kind": "final_status",
+            "run": output,
+        }));
+    }
+    println!("{}", render_status_output_text(output));
+    Ok(())
+}
+
+async fn follow_streamed_run(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
+    read_logs(
+        cfg,
+        handle_id,
+        ReadLogsOptions {
+            stdout_only: false,
+            stderr_only: false,
+            phase: None,
+            follow: true,
+            interval_ms: STREAM_FOLLOW_INTERVAL_MS,
+            timeout_secs: None,
+            phase_timeout_secs: None,
+            json,
+        },
+    )
+    .await
+}
+
+async fn spawn_and_optionally_stream(
+    cfg: RuntimeConfig,
+    input: RunAgentInput,
+    json: bool,
+    stream: bool,
+    announce_keepalive: bool,
+    error_label: &str,
+) -> ExitCode {
+    let server =
+        McpSubagentServer::new_with_state_dir(cfg.agents_dirs.clone(), cfg.state_dir.clone());
     match server.spawn_agent(Parameters(input)).await {
         Ok(result) => {
             let output = result.0;
-            if cli_spawn_waits_for_completion() {
+            if stream {
+                if let Err(err) = print_stream_accepted_output(&output, json) {
+                    eprintln!("stream failed: {err}");
+                    return ExitCode::from(1);
+                }
+                let follow_code =
+                    follow_streamed_run(cfg.clone(), output.handle_id.clone(), json).await;
+                server.wait_for_run(&output.handle_id).await;
+                if follow_code != ExitCode::SUCCESS {
+                    return follow_code;
+                }
+                match fetch_status_output(&server, output.handle_id.clone()).await {
+                    Ok(status) => {
+                        if let Err(err) = print_stream_terminal_output(&status, json) {
+                            eprintln!("stream failed: {err}");
+                            return ExitCode::from(1);
+                        }
+                        return wait_exit_code(status.status.as_str());
+                    }
+                    Err(err) => {
+                        eprintln!("stream failed: {err}");
+                        return ExitCode::from(1);
+                    }
+                }
+            }
+
+            if announce_keepalive && cli_spawn_waits_for_completion() {
                 eprintln!(
                     "spawn accepted; keeping CLI process alive until run settles (set MCP_SUBAGENT_CLI_SPAWN_ACCEPT_ONLY=1 for immediate return)"
                 );
@@ -4096,59 +4371,31 @@ async fn spawn_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
                 println!("phase: {}", output.phase);
                 println!("accepted_at: {}", output.updated_at);
             }
-            if cli_spawn_waits_for_completion() {
+            if announce_keepalive && cli_spawn_waits_for_completion() {
                 server.wait_for_run(&output.handle_id).await;
             }
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("spawn failed: {}", err.message);
+            eprintln!("{error_label} failed: {}", err.message);
             ExitCode::from(1)
         }
     }
 }
 
-fn cli_spawn_waits_for_completion() -> bool {
-    !std::env::var("MCP_SUBAGENT_CLI_SPAWN_ACCEPT_ONLY")
-        .ok()
-        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
-}
-
 async fn get_status(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
     let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
-    match server
-        .get_agent_status(Parameters(HandleInput { handle_id }))
-        .await
-    {
-        Ok(result) => {
+    match fetch_status_output(&server, handle_id).await {
+        Ok(output) => {
             if json {
-                print_json(&result.0);
+                print_json(&output);
             } else {
-                println!("handle_id: {}", result.0.handle_id);
-                println!("phase: {}", result.0.phase);
-                println!("terminal: {}", if result.0.terminal { "yes" } else { "no" });
-                println!("updated_at: {}", result.0.updated_at);
-                if let Some(outcome) = result.0.outcome {
-                    match outcome {
-                        OutcomeView::Succeeded { summary, .. } => {
-                            println!("summary: {summary}");
-                        }
-                        OutcomeView::Failed { error, .. } => {
-                            println!("error: {error}");
-                        }
-                        OutcomeView::Cancelled { reason } => {
-                            println!("cancelled: {reason}");
-                        }
-                        OutcomeView::TimedOut { elapsed_secs } => {
-                            println!("timed_out_after: {}s", elapsed_secs);
-                        }
-                    }
-                }
+                println!("{}", render_status_output_text(&output));
             }
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("status failed: {}", err.message);
+            eprintln!("status failed: {err}");
             ExitCode::from(1)
         }
     }
@@ -4471,6 +4718,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_run_command_with_stream_flag() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "run",
+            "reviewer",
+            "--task",
+            "review code",
+            "--stream",
+        ]);
+        match cli.command {
+            Commands::Run { stream, .. } => assert!(stream),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_run_command_with_selected_file_inline() {
         let cli = Cli::parse_from([
             "mcp-subagent",
@@ -4751,6 +5014,67 @@ target/
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_run_status_output_carries_stall_and_block_reason() {
+        let output = super::build_run_status_output(
+            mcp_subagent::mcp::dto::RunView {
+                handle_id: "handle-1".to_string(),
+                agent_name: "backend-coder".to_string(),
+                task_brief: Some("implement feature".to_string()),
+                phase: "running".to_string(),
+                terminal: false,
+                outcome: None,
+                created_at: "2026-03-28T00:00:00Z".to_string(),
+                updated_at: "2026-03-28T00:00:05Z".to_string(),
+            },
+            mcp_subagent::mcp::dto::GetAgentStatsOutput {
+                handle_id: "handle-1".to_string(),
+                status: "running".to_string(),
+                state: Some("running".to_string()),
+                phase: Some("provider_boot".to_string()),
+                last_event_at: Some("2026-03-28T00:00:05Z".to_string()),
+                last_event_age_ms: Some(9000),
+                stalled: true,
+                block_reason: Some("waiting_for_trust".to_string()),
+                advice: vec!["approve trust once".to_string()],
+                queue_ms: Some(10),
+                provider_probe_ms: Some(20),
+                workspace_prepare_ms: Some(30),
+                provider_boot_ms: Some(40),
+                execution_ms: Some(50),
+                first_output_ms: None,
+                first_output_warned: true,
+                first_output_warning_at: Some("2026-03-28T00:00:04Z".to_string()),
+                current_wait_reason: Some("provider.first_output.warning".to_string()),
+                wait_reasons: vec!["provider.first_output.warning".to_string()],
+                wall_ms: Some(100),
+                usage: mcp_subagent::mcp::dto::RunUsageOutput {
+                    started_at: Some("2026-03-28T00:00:00Z".to_string()),
+                    finished_at: None,
+                    duration_ms: Some(100),
+                    provider: "codex".to_string(),
+                    model: Some("gpt-5.3-codex".to_string()),
+                    provider_exit_code: None,
+                    retries: 0,
+                    token_source: "none".to_string(),
+                    input_tokens: None,
+                    output_tokens: None,
+                    total_tokens: None,
+                    estimated_prompt_bytes: None,
+                    estimated_output_bytes: None,
+                },
+            },
+        );
+
+        assert_eq!(output.phase, "provider_boot");
+        assert!(output.stalled);
+        assert_eq!(output.block_reason.as_deref(), Some("waiting_for_trust"));
+        let rendered = super::render_status_output_text(&output);
+        assert!(rendered.contains("stalled: yes"));
+        assert!(rendered.contains("block_reason: waiting_for_trust"));
+        assert!(rendered.contains("current_wait_reason: provider.first_output.warning"));
     }
 
     #[test]
@@ -5865,6 +6189,38 @@ target/
                 assert_eq!(task, "find docs");
                 assert!(json);
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_spawn_command_with_stream_flag() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "spawn",
+            "backend-coder",
+            "--task",
+            "implement feature",
+            "--stream",
+        ]);
+        match cli.command {
+            Commands::Spawn { stream, .. } => assert!(stream),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_submit_command_with_stream_flag() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "submit",
+            "fast-researcher",
+            "--task",
+            "find docs",
+            "--stream",
+        ]);
+        match cli.command {
+            Commands::Submit { stream, .. } => assert!(stream),
             other => panic!("unexpected command: {other:?}"),
         }
     }

@@ -1,12 +1,13 @@
 use std::{
     collections::BTreeMap,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use glob::glob;
 use serde::Serialize;
 
 use crate::{
+    init::{builtin_agent_template, preset_catalog_version},
     probe::{ProviderProbe, ProviderProber},
     spec::{
         registry::{load_agent_specs_from_dirs, LoadedAgentSpec},
@@ -31,6 +32,7 @@ pub struct DoctorReport {
     pub workspace_policy_hints: Vec<WorkspacePolicyHint>,
     pub ambient_isolation: AmbientIsolationReport,
     pub knowledge_layout: KnowledgeLayoutHealth,
+    pub bootstrap_catalog: BootstrapCatalogHealth,
     pub version_pins: ProviderVersionPinReport,
     pub status: String,
     pub issues: Vec<DoctorIssue>,
@@ -77,6 +79,20 @@ pub struct KnowledgeLayoutHealth {
     pub project_memory_paths: Vec<PathBuf>,
     pub archived_plan_paths: Vec<PathBuf>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BootstrapCatalogHealth {
+    pub catalog_version: String,
+    pub drifted_templates: Vec<BootstrapTemplateDrift>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BootstrapTemplateDrift {
+    pub path: PathBuf,
+    pub template_name: String,
+    pub reason: String,
+    pub legacy_active_plan: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -151,6 +167,7 @@ fn build_doctor_report_for_cwd_with_home(
     let ambient_isolation =
         build_ambient_isolation_report(&cwd, &loaded_specs, user_home.as_deref());
     let knowledge_layout = build_knowledge_layout_health(&cwd);
+    let bootstrap_catalog = build_bootstrap_catalog_health(&loaded_specs);
     let probes: Vec<ProviderProbe> = all_providers()
         .into_iter()
         .map(|provider| prober.probe(&provider))
@@ -159,6 +176,7 @@ fn build_doctor_report_for_cwd_with_home(
     let (status, issues, advice) = build_doctor_health(
         &agents_error,
         &knowledge_layout,
+        &bootstrap_catalog,
         &probes,
         &version_pins,
         &ambient_isolation,
@@ -174,6 +192,7 @@ fn build_doctor_report_for_cwd_with_home(
         workspace_policy_hints,
         ambient_isolation,
         knowledge_layout,
+        bootstrap_catalog,
         version_pins,
         status,
         issues,
@@ -184,6 +203,7 @@ fn build_doctor_report_for_cwd_with_home(
 fn build_doctor_health(
     agents_error: &Option<String>,
     knowledge_layout: &KnowledgeLayoutHealth,
+    bootstrap_catalog: &BootstrapCatalogHealth,
     probes: &[ProviderProbe],
     version_pins: &ProviderVersionPinReport,
     ambient_isolation: &AmbientIsolationReport,
@@ -209,6 +229,35 @@ fn build_doctor_health(
             message: warning.clone(),
             suggestion: Some(
                 "Create PLAN.md / PROJECT.md and archive plans under docs/plans/.".to_string(),
+            ),
+        });
+    }
+
+    if !bootstrap_catalog.drifted_templates.is_empty() {
+        let legacy_active_plan_count = bootstrap_catalog
+            .drifted_templates
+            .iter()
+            .filter(|entry| entry.legacy_active_plan)
+            .count();
+        let message = if legacy_active_plan_count > 0 {
+            format!(
+                "{} drifted bootstrap template(s) detected; {} still reference legacy active_plan injection",
+                bootstrap_catalog.drifted_templates.len(),
+                legacy_active_plan_count
+            )
+        } else {
+            format!(
+                "{} drifted bootstrap template(s) detected against catalog {}",
+                bootstrap_catalog.drifted_templates.len(),
+                bootstrap_catalog.catalog_version
+            )
+        };
+        issues.push(DoctorIssue {
+            level: "warning".to_string(),
+            code: "bootstrap_template_drift".to_string(),
+            message,
+            suggestion: Some(
+                "Review .mcp-subagent/bootstrap/agents drift first; if it is accidental, regenerate that bootstrap root with the intended preset and `--force`. Doctor only reports drift and will not overwrite files.".to_string(),
             ),
         });
     }
@@ -597,6 +646,55 @@ fn build_provider_version_pin_report(
     }
 }
 
+fn build_bootstrap_catalog_health(loaded_specs: &[LoadedAgentSpec]) -> BootstrapCatalogHealth {
+    let drifted_templates = loaded_specs
+        .iter()
+        .filter_map(analyze_bootstrap_template_drift)
+        .collect::<Vec<_>>();
+    BootstrapCatalogHealth {
+        catalog_version: preset_catalog_version().to_string(),
+        drifted_templates,
+    }
+}
+
+fn analyze_bootstrap_template_drift(loaded: &LoadedAgentSpec) -> Option<BootstrapTemplateDrift> {
+    if !is_generated_bootstrap_agent_path(&loaded.path) {
+        return None;
+    }
+    let file_name = loaded.path.file_name()?.to_str()?;
+    let expected = builtin_agent_template(file_name)?;
+    let actual = std::fs::read_to_string(&loaded.path).ok()?;
+    if actual == expected {
+        return None;
+    }
+
+    let legacy_active_plan = actual.contains("active_plan");
+    let reason = if legacy_active_plan {
+        "differs from current built-in template and still references legacy active_plan memory injection"
+    } else {
+        "differs from current built-in template"
+    };
+    Some(BootstrapTemplateDrift {
+        path: loaded.path.clone(),
+        template_name: file_name.to_string(),
+        reason: reason.to_string(),
+        legacy_active_plan,
+    })
+}
+
+fn is_generated_bootstrap_agent_path(path: &Path) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    components
+        .windows(3)
+        .any(|window| window == [".mcp-subagent", "bootstrap", "agents"])
+}
+
 #[derive(Debug, Default)]
 struct ProviderPinConfig {
     enabled: bool,
@@ -933,6 +1031,26 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
         }
     }
 
+    out.push_str("\nbootstrap_catalog:\n");
+    out.push_str(&format!(
+        "  catalog_version: {}\n",
+        report.bootstrap_catalog.catalog_version
+    ));
+    if report.bootstrap_catalog.drifted_templates.is_empty() {
+        out.push_str("  drifted_templates: []\n");
+    } else {
+        out.push_str("  drifted_templates:\n");
+        for drift in &report.bootstrap_catalog.drifted_templates {
+            out.push_str(&format!(
+                "    - path: {}\n      template_name: {}\n      reason: {}\n      legacy_active_plan: {}\n",
+                drift.path.display(),
+                drift.template_name,
+                drift.reason,
+                drift.legacy_active_plan,
+            ));
+        }
+    }
+
     if !report.advice.is_empty() {
         out.push_str("\nadvice:\n");
         for advice in &report.advice {
@@ -1255,5 +1373,73 @@ native_discovery = "inherit"
                 .any(|issue| issue.code == "ambient_skill_conflicts"),
             "expected ambient conflict issue"
         );
+    }
+
+    #[test]
+    fn doctor_reports_bootstrap_template_drift_without_overwriting() {
+        let temp = tempdir().expect("tempdir");
+        let agents_dir = temp.path().join(".mcp-subagent/bootstrap/agents");
+        fs::create_dir_all(&agents_dir).expect("create bootstrap agents");
+        fs::write(
+            agents_dir.join("backend-coder.agent.toml"),
+            r#"[core]
+name = "backend-coder"
+description = "Implements backend and Rust changes from an approved plan."
+provider = "codex"
+model = "gpt-5.3-codex"
+instructions = "Implement scoped changes from PLAN.md. Keep diffs minimal and reference plan steps in summary."
+tags = ["build", "backend", "rust", "codex"]
+
+[runtime]
+context_mode = { selected_files = ["src/**", "Cargo.toml", "PLAN.md"] }
+delegation_context = "selected_files"
+memory_sources = ["auto_project_memory", "active_plan"]
+native_discovery = "minimal"
+working_dir_policy = "auto"
+file_conflict_policy = "serialize"
+sandbox = "workspace_write"
+approval = "deny_by_default"
+timeout_secs = 1200
+output_mode = "both"
+parse_policy = "best_effort"
+spawn_policy = "async"
+
+[provider_overrides.codex]
+model_reasoning_effort = "medium"
+
+[workflow]
+enabled = true
+stages = ["build", "review"]
+max_runtime_depth = 1
+"#,
+        )
+        .expect("write drifted agent");
+
+        let report = build_doctor_report_for_cwd(
+            temp.path().to_path_buf(),
+            vec![agents_dir],
+            temp.path()
+                .join(".mcp-subagent/bootstrap/.mcp-subagent/state"),
+            &FakeProber::default(),
+        );
+
+        assert_eq!(report.bootstrap_catalog.catalog_version, "v0.9.0");
+        assert_eq!(report.bootstrap_catalog.drifted_templates.len(), 1);
+        let drift = &report.bootstrap_catalog.drifted_templates[0];
+        assert_eq!(drift.template_name, "backend-coder.agent.toml");
+        assert!(drift.legacy_active_plan);
+        assert!(drift.reason.contains("legacy active_plan"));
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "bootstrap_template_drift"),
+            "expected bootstrap drift warning"
+        );
+
+        let rendered = render_doctor_report(&report);
+        assert!(rendered.contains("bootstrap_catalog"));
+        assert!(rendered.contains("backend-coder.agent.toml"));
+        assert!(rendered.contains("legacy_active_plan: true"));
     }
 }

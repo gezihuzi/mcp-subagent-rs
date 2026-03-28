@@ -6,12 +6,19 @@
 
 ## Execution Strategy (v0.10 Current)
 
-### Batch V0.10-P0 - Spawn Accepted-only + Runtime Transparency（当前优先）
+### Batch V0.10-P0 - Spawn Accepted-only + Runtime Transparency（已完成）
 
 目标：先消除“spawn 黑盒卡住”与“运行中不可观察”两类核心体验问题。首个切片先完成 `spawn` accepted-only 语义（同步路径不做 provider probe），随后补事件流/心跳/watch/stats，并补 `block_reason + logs --follow + waiting/watchdog events + stats phase splits + phase_progress view + phase filter/timeout + MCP phase watchdog + watch advice` 让阻塞可解释。
 依赖顺序：`T-086(Completed) -> T-087(Completed) -> T-088(Completed) -> T-089(Completed) -> T-090(Completed) -> T-091(Completed) -> T-092(Completed) -> T-093(Completed) -> T-094(Completed) -> T-095(Completed) -> T-096(Completed) -> T-097(Completed) -> T-098(Completed) -> T-099(Completed) -> T-100(Completed) -> T-101(Completed) -> T-102(Completed) -> T-103(Completed) -> T-104(Completed) -> T-105(Completed) -> T-106(Completed) -> T-107(Completed) -> T-108(Completed) -> T-109(Completed) -> T-110(Completed) -> T-111(Completed)`。
 回滚策略：`run_agent` 保持同步 probe 语义；`spawn_agent` 仅将 probe 后移到 worker，异常仍落盘同一 run 结构，必要时可回退到旧 `prepare_run + upfront probe` 路径。
 风险与控制：provider 不可用从“同步拒绝”变成“异步失败”可能影响调用侧预期；通过保留明确 `error_message`（含 unavailable 原因）和测试覆盖（slow probe 快返、unavailable 异步失败）降低误解。
+
+### Batch V0.10-P1 - Parser Bridge + Bootstrap Drift Guard + CLI Exposure（已完成）
+
+目标：在不改 `RunPhase`、不改现有 run 目录布局、也不引入新持久化契约的前提下，优先收口三个真实痛点：`summary` 归一化桥接误判、bootstrap preset 漂移导致的上下文过量注入，以及已有流式/心跳/阻塞诊断能力尚未被 `run/spawn/status` 直接暴露。当前仓库术语保持统一使用 `RunPhase`、`parse_status`、`delegation_context`、`context_mode`、`memory_sources`、`StableScratch`。
+依赖顺序：`T-150(Completed) -> T-151(Completed) -> T-152(Completed) -> T-153(Completed)`。
+回滚策略：parser 收口仅增强 `best_effort` 主路径并保留 strict 旧语义；bootstrap/preset 治理不改现有文件名与 agent spec 结构；CLI `--stream` 仅做增量 flag 暴露，不改变默认非流式行为。
+风险与控制：放宽裸 JSON 识别可能掩盖真正的格式违规；通过继续保留 `parse_status`、native artifacts、以及占位 sentinel 污染回归测试控制误判。旧 workspace 中已生成的 bootstrap 文件不会被 `init` 自动重写；通过新增 drift 检查/提示而不是静默覆盖降低意外变更风险。CLI 流式输出可能影响脚本消费；通过 `--stream` 显式 opt-in、保持现有默认输出不变来控制兼容性。
 
 ## Execution Strategy (v0.9 Current)
 

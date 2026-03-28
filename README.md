@@ -120,6 +120,9 @@ Run one command for minimal local acceptance:
 Default `init` writes to an isolated bootstrap root (`./.mcp-subagent/bootstrap`) to avoid clobbering existing repo files.
 It also writes a project bridge config at `./.mcp-subagent/config.toml`, so running from project root auto-resolves bootstrap `agents_dir/state_dir`.
 For bootstrap mode, `init` also patches project `.gitignore` idempotently to ignore runtime artifacts.
+Generated presets use the current runtime terms `context_mode`, `delegation_context`, `memory_sources`, and `working_dir_policy`.
+Built-in templates keep `memory_sources = ["auto_project_memory"]` and do not inject `active_plan` by default.
+If `doctor` reports bootstrap template drift, review those local files first and regenerate only when you intend to resync; `init` will not overwrite files silently.
 Use this fixed order for first-time setup:
 
 ```bash
@@ -164,6 +167,14 @@ mcp-subagent run fast-researcher \
   --json
 ```
 
+For a live terminal view on the same task, use `--stream`; this reuses the existing event/stdout/stderr follow path and ends with a final status snapshot:
+
+```bash
+mcp-subagent run fast-researcher \
+  --task "Search the official site of Octoclip and return JSON: {name,url,description}" \
+  --stream
+```
+
 For Gemini read-only + minimal-delegation research profiles (no selected files / no `plan_ref`), `working_dir_policy=auto` now routes execution to a stable scratch workspace by default:
 `~/.mcp-subagent/provider-workspaces/gemini/research`.
 When this stable scratch route is active, runtime will auto-downgrade Gemini `native_discovery="isolated"` to `minimal` to avoid auth/trust startup fallback loops.
@@ -173,6 +184,7 @@ Asynchronous task (recommended for coding/review jobs):
 
 ```bash
 mcp-subagent submit backend-coder --task "Implement feature X from PLAN.md" --json
+mcp-subagent submit backend-coder --task "Implement feature X from PLAN.md" --stream
 mcp-subagent ps --limit 20
 mcp-subagent watch <handle-id>
 ```
@@ -182,6 +194,7 @@ CLI `spawn/submit` now defaults to "accepted + keepalive": it prints accepted en
 If you explicitly want immediate return in one-shot mode, set `MCP_SUBAGENT_CLI_SPAWN_ACCEPT_ONLY=1`.
 
 `ps` now includes observability fields for running jobs: `phase`, `elapsed`, `last_event`, `stalled`, `block_reason`.
+`status` now surfaces the same stall/block diagnostics for a single run, while `--stream` on `run/spawn/submit` is the direct live view shortcut over `logs/events --follow`.
 `stats` now includes stage timing splits (`workspace_prepare_ms`, `provider_boot_ms`), first-output watchdog markers, and aggregated `wait_reasons`.
 `watch`, `events --follow`, and `logs --follow` now emit a rolling `phase_progress` line (phase durations + current phase marker) in text mode.
 `events --follow` now tails run events incrementally via cursor offsets instead of re-reading full `events.jsonl` every poll.

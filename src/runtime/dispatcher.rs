@@ -1417,12 +1417,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_best_effort_succeeds_when_summary_is_bare_provider_json() {
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            SequenceRunner::new(vec![RunnerExecution {
+                terminal_state: RunnerTerminalState::Succeeded,
+                stdout: r#"{
+  "summary": "ok",
+  "key_findings": ["a"],
+  "artifacts": [],
+  "open_questions": [],
+  "next_steps": ["next"],
+  "verification": "Passed",
+  "touched_files": ["src/main.rs"],
+  "plan_refs": ["step-1"]
+}"#
+                .to_string(),
+                stderr: String::new(),
+            }]),
+        );
+
+        let result = dispatcher
+            .run(
+                &sample_spec(),
+                &sample_task_spec(),
+                &sample_hints(),
+                ResolvedMemory::default(),
+            )
+            .await
+            .expect("dispatch run");
+
+        assert_eq!(result.status, RunPhase::Succeeded);
+        match &result.outcome {
+            RunOutcome::Succeeded(success) => {
+                assert_eq!(success.parse_status, SummaryParseStatus::Degraded);
+                assert_eq!(success.summary, "ok");
+            }
+            other => panic!("expected succeeded outcome, got {other:?}"),
+        }
+        assert_eq!(result.error_message, None);
+    }
+
+    #[tokio::test]
     async fn dispatch_strict_fails_when_summary_is_degraded() {
         let dispatcher = Dispatcher::new(
             DefaultContextCompiler,
             SequenceRunner::new(vec![RunnerExecution {
                 terminal_state: RunnerTerminalState::Succeeded,
                 stdout: "plain text without summary envelope".to_string(),
+                stderr: String::new(),
+            }]),
+        );
+        let mut spec = sample_spec();
+        spec.runtime.parse_policy = ParsePolicy::Strict;
+
+        let result = dispatcher
+            .run(
+                &spec,
+                &sample_task_spec(),
+                &sample_hints(),
+                ResolvedMemory::default(),
+            )
+            .await
+            .expect("dispatch run");
+
+        assert_eq!(result.status, RunPhase::Failed);
+        match &result.outcome {
+            RunOutcome::Failed(failure) => {
+                assert_eq!(
+                    failure.retry.classification,
+                    super::RetryClassification::Retryable
+                );
+                assert!(failure
+                    .partial_summary
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty()));
+            }
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
+        assert!(result
+            .error_message
+            .as_deref()
+            .is_some_and(|msg| msg.contains("structured summary parse status is Degraded")));
+    }
+
+    #[tokio::test]
+    async fn dispatch_strict_fails_when_summary_is_bare_provider_json() {
+        let dispatcher = Dispatcher::new(
+            DefaultContextCompiler,
+            SequenceRunner::new(vec![RunnerExecution {
+                terminal_state: RunnerTerminalState::Succeeded,
+                stdout: r#"{
+  "summary": "ok",
+  "key_findings": ["a"],
+  "artifacts": [],
+  "open_questions": [],
+  "next_steps": ["next"],
+  "verification": "Passed",
+  "touched_files": ["src/main.rs"],
+  "plan_refs": ["step-1"]
+}"#
+                .to_string(),
                 stderr: String::new(),
             }]),
         );
