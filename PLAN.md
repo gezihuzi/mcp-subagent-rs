@@ -6,6 +6,13 @@
 
 ## Execution Strategy (v0.10 Current)
 
+### Batch V1.0-P1 - Bootstrap Drift Repair Path（已完成）
+
+目标：把现有“只能发现 bootstrap drift”的诊断能力补成“可安全修复 drift”的低摩擦入口，直接解决旧 bootstrap 仍携带 legacy `active_plan` 等漂移模板时，用户只能靠重初始化整套 root 才能恢复的问题。本批次只处理 bootstrap catalog 内建模板的刷新与修复提示，不扩展到 runtime、state layout 或新的存储契约。
+依赖顺序：`T-155(Completed)`。
+回滚策略：CLI 仅新增显式 `init --refresh-bootstrap` 修复入口，默认 `init` 和 `doctor` 行为不变；必要时可单独回退 refresh 分支和文档，不影响既有初始化/诊断主路径。
+风险与控制：refresh 若误覆盖用户自定义 agent 会造成意外丢失；通过只重写当前 bootstrap root 中“文件名命中内建 catalog”的模板、保留自定义 agent、不自动创建新模板，降低破坏面。README/doctor 建议统一改成这条安全修复路径，避免继续把用户推回整套 `--force` 重初始化。
+
 ### Batch V1.0-P0 - Release Cutpoint + Stream/Status Regression（已完成）
 
 目标：在 `V0.10-P1` 能力已完成的前提下，补齐发布切口上仍然缺失的两类保证：其一是 `status --json` 的稳定 contract 断言，其二是 `run/spawn/submit --stream` 至少有一条真实 smoke 链路覆盖，不让 CLI 表面能力只停留在单元测试层。与此同时清理 `PLAN.md` 中遗留的历史“当前优先”标记，保证计划面只保留一个真实当前批次。

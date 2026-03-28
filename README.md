@@ -122,7 +122,7 @@ It also writes a project bridge config at `./.mcp-subagent/config.toml`, so runn
 For bootstrap mode, `init` also patches project `.gitignore` idempotently to ignore runtime artifacts.
 Generated presets use the current runtime terms `context_mode`, `delegation_context`, `memory_sources`, and `working_dir_policy`.
 Built-in templates keep `memory_sources = ["auto_project_memory"]` and do not inject `active_plan` by default.
-If `doctor` reports bootstrap template drift, review those local files first and regenerate only when you intend to resync; `init` will not overwrite files silently.
+If `doctor` reports bootstrap template drift, review those local files first; if the drift is accidental, run `mcp-subagent init --refresh-bootstrap` from project root to resync built-in templates while preserving custom agents. Default `init` still will not overwrite files silently.
 Use this fixed order for first-time setup:
 
 ```bash
@@ -150,6 +150,12 @@ mcp-subagent validate
 mcp-subagent doctor --json
 mcp-subagent connect --host claude
 mcp-subagent list-agents
+```
+
+If you only want to repair drifted built-in bootstrap templates without clobbering custom agents, run:
+
+```bash
+mcp-subagent init --refresh-bootstrap
 ```
 
 If you use a different host:

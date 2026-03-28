@@ -145,6 +145,10 @@ export MCP_SUBAGENT_CODEX_BIN="$FAKE_CODEX_BIN"
 export MCP_SUBAGENT_CLAUDE_BIN="$FAKE_CLAUDE_BIN"
 export MCP_SUBAGENT_GEMINI_BIN="$FAKE_GEMINI_BIN"
 
+BOOTSTRAP_ROOT="$TMP_DIR/bootstrap"
+BOOTSTRAP_BACKEND="$BOOTSTRAP_ROOT/agents/backend-coder.agent.toml"
+BOOTSTRAP_CUSTOM="$BOOTSTRAP_ROOT/agents/custom.agent.toml"
+
 run_cmd() {
   cargo run --quiet -- \
     --agents-dir "$AGENTS_DIR" \
@@ -155,6 +159,22 @@ run_cmd() {
 extract_handle_id() {
   awk -F'"' '/"handle_id"[[:space:]]*:/ {print $4; exit}'
 }
+
+echo "[smoke-v08] init bootstrap root"
+cargo run --quiet -- init --preset codex-primary-builder --root-dir "$BOOTSTRAP_ROOT" --json >"$TMP_DIR/init_bootstrap.json"
+printf 'drifted = true\n' >"$BOOTSTRAP_BACKEND"
+printf 'custom = true\n' >"$BOOTSTRAP_CUSTOM"
+
+echo "[smoke-v08] refresh bootstrap root"
+cargo run --quiet -- init --root-dir "$BOOTSTRAP_ROOT" --refresh-bootstrap --json >"$TMP_DIR/refresh_bootstrap.json"
+grep -Eq '"preset"[[:space:]]*:[[:space:]]*"refresh-bootstrap"' "$TMP_DIR/refresh_bootstrap.json"
+grep -Eq 'backend-coder\.agent\.toml' "$TMP_DIR/refresh_bootstrap.json"
+grep -Fq 'memory_sources = ["auto_project_memory"]' "$BOOTSTRAP_BACKEND"
+if grep -Fq 'active_plan' "$BOOTSTRAP_BACKEND"; then
+  echo "[smoke-v08] refresh bootstrap left legacy active_plan behind"
+  exit 1
+fi
+grep -Eq 'custom = true' "$BOOTSTRAP_CUSTOM"
 
 echo "[smoke-v08] validate"
 run_cmd validate >"$TMP_DIR/validate.txt"

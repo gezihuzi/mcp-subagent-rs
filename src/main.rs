@@ -15,7 +15,7 @@ use mcp_subagent::{
         resolve_connect_snippet_paths, ConnectHost, ConnectInvocation,
     },
     doctor::{build_doctor_report, render_doctor_report},
-    init::{init_workspace, InitPreset, InitReport},
+    init::{init_workspace, refresh_bootstrap_workspace, InitPreset, InitReport},
     logging::{init_logging, LoggingGuard},
     mcp::{
         dto::{
@@ -88,6 +88,8 @@ enum Commands {
         in_place: bool,
         #[arg(long)]
         force: bool,
+        #[arg(long)]
+        refresh_bootstrap: bool,
         #[arg(long)]
         json: bool,
     },
@@ -421,10 +423,11 @@ async fn main() -> ExitCode {
             root_dir,
             in_place,
             force,
+            refresh_bootstrap,
             json,
         } => {
             info!("starting command: init");
-            init_command(preset, root_dir, in_place, force, json)
+            init_command(preset, root_dir, in_place, force, refresh_bootstrap, json)
         }
         Commands::ConnectSnippet { host } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -3736,8 +3739,15 @@ fn init_command(
     root_dir: Option<PathBuf>,
     in_place: bool,
     force: bool,
+    refresh_bootstrap: bool,
     json: bool,
 ) -> ExitCode {
+    if refresh_bootstrap && in_place {
+        eprintln!(
+            "init failed: --refresh-bootstrap cannot be combined with --in-place; run from project root or pass --root-dir <bootstrap-root>"
+        );
+        return ExitCode::from(1);
+    }
     let use_default_bootstrap_root = root_dir.is_none() && !in_place;
     let cwd = match std::env::current_dir() {
         Ok(path) => path,
@@ -3753,9 +3763,14 @@ fn init_command(
             return ExitCode::from(1);
         }
     };
-    match init_workspace(&root, preset.into(), force) {
+    let result = if refresh_bootstrap {
+        refresh_bootstrap_workspace(&root)
+    } else {
+        init_workspace(&root, preset.into(), force)
+    };
+    match result {
         Ok(mut report) => {
-            if use_default_bootstrap_root {
+            if use_default_bootstrap_root && !refresh_bootstrap {
                 match ensure_bootstrap_bridge_config(&cwd, force) {
                     Ok((path, true)) => report.notes.push(format!(
                         "Generated project bridge config at `{}`; you can run mcp-subagent commands from project root without extra --agents-dir/--state-dir flags.",
@@ -4787,12 +4802,14 @@ mod tests {
                 preset,
                 in_place,
                 force,
+                refresh_bootstrap,
                 json,
                 ..
             } => {
                 assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisor));
                 assert!(in_place);
                 assert!(force);
+                assert!(!refresh_bootstrap);
                 assert!(json);
             }
             other => panic!("unexpected command: {other:?}"),
@@ -4803,8 +4820,13 @@ mod tests {
     fn init_defaults_to_minimal_supervisor_preset() {
         let cli = Cli::parse_from(["mcp-subagent", "init"]);
         match cli.command {
-            Commands::Init { preset, .. } => {
+            Commands::Init {
+                preset,
+                refresh_bootstrap,
+                ..
+            } => {
                 assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisorMinimal));
+                assert!(!refresh_bootstrap);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -4820,10 +4842,30 @@ mod tests {
         ]);
         match cli.command {
             Commands::Init {
-                preset, in_place, ..
+                preset,
+                in_place,
+                refresh_bootstrap,
+                ..
             } => {
                 assert!(matches!(preset, InitPresetArg::MinimalSingleProvider));
                 assert!(!in_place);
+                assert!(!refresh_bootstrap);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_init_refresh_bootstrap_flag() {
+        let cli = Cli::parse_from(["mcp-subagent", "init", "--refresh-bootstrap"]);
+        match cli.command {
+            Commands::Init {
+                preset,
+                refresh_bootstrap,
+                ..
+            } => {
+                assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisorMinimal));
+                assert!(refresh_bootstrap);
             }
             other => panic!("unexpected command: {other:?}"),
         }

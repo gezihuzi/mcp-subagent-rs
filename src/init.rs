@@ -55,6 +55,102 @@ pub fn init_workspace(root: &Path, preset: InitPreset, force: bool) -> Result<In
     init_with_preset(root, preset, force)
 }
 
+pub fn refresh_bootstrap_workspace(root: &Path) -> Result<InitReport> {
+    let root = root.to_path_buf();
+    let agents_dir = root.join("agents");
+    if !agents_dir.is_dir() {
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "bootstrap agents directory not found: {} (run `mcp-subagent init` first or pass --root-dir <bootstrap-root>)",
+                agents_dir.display()
+            ),
+        )
+        .into());
+    }
+
+    let mut builtin_template_paths = Vec::new();
+    let mut overwritten_files = Vec::new();
+    let mut preserved_custom_agent_count = 0usize;
+    let mut entries = fs::read_dir(&agents_dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(expected) = builtin_agent_template(file_name) else {
+            if file_name.ends_with(".agent.toml") {
+                preserved_custom_agent_count += 1;
+            }
+            continue;
+        };
+
+        builtin_template_paths.push(path.clone());
+        let actual = fs::read_to_string(&path)?;
+        if actual != expected {
+            write(&path, expected)?;
+            overwritten_files.push(path);
+        }
+    }
+
+    if builtin_template_paths.is_empty() {
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "no built-in bootstrap agent templates found under {}",
+                agents_dir.display()
+            ),
+        )
+        .into());
+    }
+
+    let state_dir = root.join(".mcp-subagent/state");
+    let mut notes = if overwritten_files.is_empty() {
+        vec![format!(
+            "No drifted built-in bootstrap templates were found under `{}`; catalog files already match {}.",
+            agents_dir.display(),
+            PRESET_CATALOG_VERSION
+        )]
+    } else {
+        vec![format!(
+            "Refreshed {} drifted built-in bootstrap template(s) under `{}`.",
+            overwritten_files.len(),
+            agents_dir.display()
+        )]
+    };
+    if preserved_custom_agent_count > 0 {
+        notes.push(format!(
+            "Preserved {} custom agent file(s) outside the built-in catalog.",
+            preserved_custom_agent_count
+        ));
+    }
+    notes.push(format!(
+        "Run `mcp-subagent validate --agents-dir {}` to verify refreshed specs.",
+        agents_dir.display()
+    ));
+    notes.push(format!(
+        "Run `mcp-subagent doctor --agents-dir {} --state-dir {}` to confirm bootstrap drift is gone.",
+        agents_dir.display(),
+        state_dir.display()
+    ));
+
+    Ok(InitReport {
+        preset: "refresh-bootstrap".to_string(),
+        preset_catalog_version: PRESET_CATALOG_VERSION.to_string(),
+        root,
+        agents_dir,
+        created_files: Vec::new(),
+        overwritten_files,
+        generated_agent_count: builtin_template_paths.len(),
+        notes,
+    })
+}
+
 fn init_with_preset(root: &Path, preset: InitPreset, force: bool) -> Result<InitReport> {
     let root = root.to_path_buf();
     let agents_dir = root.join("agents");
@@ -304,8 +400,9 @@ Built-in templates keep `memory_sources = ["auto_project_memory"]` and do not in
 by default.
 Gemini read-only research presets keep `working_dir_policy = "auto"`; on the stable scratch path,
 runtime will keep the override visible by downgrading `native_discovery = "isolated"` to `minimal`.
-If `doctor` reports bootstrap template drift, review those local edits and regenerate only when you
-intend to resync; `init` will not overwrite files silently.
+If `doctor` reports bootstrap template drift, review those local edits first; if the drift is
+accidental, run `mcp-subagent init --refresh-bootstrap` from project root to resync built-in
+templates while preserving custom agents. Default `init` still will not overwrite files silently.
 
 ## MCP Integration (stdio)
 
@@ -624,7 +721,7 @@ mod tests {
 
     use crate::connect::{build_connect_snippet, resolve_connect_snippet_paths, ConnectHost};
 
-    use super::{init_workspace, InitPreset};
+    use super::{init_workspace, refresh_bootstrap_workspace, InitPreset};
 
     #[test]
     fn init_creates_preset_files_and_valid_specs() {
@@ -776,6 +873,64 @@ mod tests {
         assert!(readme.contains("memory_sources = [\"auto_project_memory\"]"));
         assert!(readme.contains("do not inject `active_plan`"));
         assert!(readme.contains("`doctor` reports bootstrap template drift"));
-        assert!(readme.contains("`init` will not overwrite files silently"));
+        assert!(readme.contains("`mcp-subagent init --refresh-bootstrap`"));
+        assert!(readme.contains("preserving custom agents"));
+        assert!(readme.contains("Default `init` still will not overwrite files silently"));
+    }
+
+    #[test]
+    fn refresh_bootstrap_overwrites_builtin_templates_and_preserves_custom_agents() {
+        let dir = tempdir().expect("tempdir");
+        init_workspace(dir.path(), InitPreset::CodexPrimaryBuilder, false).expect("init succeeds");
+
+        let backend_path = dir.path().join("agents/backend-coder.agent.toml");
+        let custom_path = dir.path().join("agents/custom.agent.toml");
+        fs::write(&backend_path, "drifted = true\n").expect("write drifted builtin");
+        fs::write(&custom_path, "custom = true\n").expect("write custom agent");
+
+        let report = refresh_bootstrap_workspace(dir.path()).expect("refresh succeeds");
+        let backend = fs::read_to_string(&backend_path).expect("read refreshed builtin");
+        let custom = fs::read_to_string(&custom_path).expect("read preserved custom");
+
+        assert!(backend.contains("provider = \"codex\""));
+        assert!(backend.contains("memory_sources = [\"auto_project_memory\"]"));
+        assert_eq!(custom, "custom = true\n");
+        assert!(report.created_files.is_empty());
+        assert!(
+            report
+                .overwritten_files
+                .iter()
+                .any(|path| path == &backend_path),
+            "expected drifted builtin to be refreshed"
+        );
+        assert_eq!(report.generated_agent_count, 3);
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("Preserved 1 custom agent file")),
+            "expected preserved custom agent note: {:?}",
+            report.notes
+        );
+    }
+
+    #[test]
+    fn refresh_bootstrap_fails_when_no_builtin_templates_exist() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("agents")).expect("create agents dir");
+        fs::write(
+            dir.path().join("agents/custom.agent.toml"),
+            "custom = true\n",
+        )
+        .expect("write custom agent");
+
+        let err = refresh_bootstrap_workspace(dir.path()).expect_err("refresh must fail");
+        assert!(
+            matches!(
+                err,
+                crate::error::McpSubagentError::Io(ref io) if io.kind() == ErrorKind::NotFound
+            ),
+            "unexpected error: {err}"
+        );
     }
 }

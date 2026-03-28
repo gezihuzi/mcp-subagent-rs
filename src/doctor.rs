@@ -257,7 +257,7 @@ fn build_doctor_health(
             code: "bootstrap_template_drift".to_string(),
             message,
             suggestion: Some(
-                "Review .mcp-subagent/bootstrap/agents drift first; if it is accidental, regenerate that bootstrap root with the intended preset and `--force`. Doctor only reports drift and will not overwrite files.".to_string(),
+                "Review .mcp-subagent/bootstrap/agents drift first; if it is accidental, run `mcp-subagent init --refresh-bootstrap` from project root to resync built-in templates while preserving custom agents. Doctor only reports drift and will not overwrite files.".to_string(),
             ),
         });
     }
@@ -1435,6 +1435,19 @@ max_runtime_depth = 1
                 .iter()
                 .any(|issue| issue.code == "bootstrap_template_drift"),
             "expected bootstrap drift warning"
+        );
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "bootstrap_template_drift")
+            .expect("drift issue");
+        assert!(
+            issue
+                .suggestion
+                .as_deref()
+                .is_some_and(|suggestion| suggestion.contains("init --refresh-bootstrap")),
+            "expected refresh-bootstrap suggestion, got {:?}",
+            issue.suggestion
         );
 
         let rendered = render_doctor_report(&report);

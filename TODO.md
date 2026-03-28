@@ -3927,3 +3927,22 @@
   - `bash scripts/smoke_v08.sh` 通过。
   - `cargo test --workspace` 通过（216 + 70 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-155 V1.0-P1-BootstrapDriftRepairPath (Completed 2026-03-28)
+
+任务：为 bootstrap catalog drift 增加安全修复入口，避免用户为了清掉旧生成物里的 legacy `active_plan` 或其他模板漂移，被迫整套 `init --force` 重建 bootstrap root。  
+验收标准：
+
+1. CLI `init` 新增显式 `--refresh-bootstrap` 路径，只刷新当前 bootstrap root `agents/` 下文件名命中内建 catalog 的模板，不覆盖自定义 agent，也不改变默认 `init` 行为。
+2. `doctor` 的 drift 建议与生成的 bootstrap README 都改为指向新的安全修复路径，而不是笼统要求整套重初始化。
+3. 回归覆盖至少包含：refresh 能覆盖 drifted built-in 模板、保留 custom agent、不存在 built-in 模板时给出明确失败；并补一条 smoke 证明真实 refresh 链路可用。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+- 已完成：
+  - `init` 新增显式 `--refresh-bootstrap` 入口，落到 `src/init.rs` 的 `refresh_bootstrap_workspace`，只重写当前 bootstrap root `agents/` 下文件名命中内建 catalog 的模板；custom agent 保留，不会静默改写默认 `init` 路径。
+  - `doctor` drift 建议与生成的 bootstrap README 已统一改成新的修复路径，用户不再需要被笼统引导到整套 `--force` 重初始化。
+  - `scripts/smoke_v08.sh` 新增真实 refresh 链路：`init --root-dir <bootstrap-root>` 生成 bootstrap、人工制造 drift、再执行 `init --refresh-bootstrap`，同时断言 legacy `active_plan` 不再残留且 custom agent 未被覆盖。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（218 + 71 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
