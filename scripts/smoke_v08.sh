@@ -199,11 +199,18 @@ echo "[smoke-v08] custom root without sync keeps project config untouched"
   cd "$SYNC_PROJECT"
   cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- \
     init --preset codex-primary-builder --root-dir "$SYNC_ROOT" --json >"$TMP_DIR/init_custom_root_no_sync.json"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- \
+    --agents-dir "$SYNC_ROOT/agents" \
+    --state-dir "$SYNC_ROOT/.mcp-subagent/state" \
+    doctor --json >"$TMP_DIR/custom_root_doctor_missing.json"
 )
 if [[ -e "$SYNC_PROJECT/.mcp-subagent/config.toml" ]]; then
   echo "[smoke-v08] custom-root init wrote project config without --sync-project-config"
   exit 1
 fi
+grep -Eq '"project_bridge"[[:space:]]*:' "$TMP_DIR/custom_root_doctor_missing.json"
+grep -Eq '"status"[[:space:]]*:[[:space:]]*"missing"' "$TMP_DIR/custom_root_doctor_missing.json"
+grep -Eq '"repair_command"[[:space:]]*:[[:space:]]*"mcp-subagent init --refresh-bootstrap --root-dir .* --sync-project-config"' "$TMP_DIR/custom_root_doctor_missing.json"
 
 echo "[smoke-v08] custom root with sync writes project config"
 (
@@ -216,6 +223,9 @@ echo "[smoke-v08] custom root with sync writes project config"
 grep -Fq 'agents_dirs = ["'"$SYNC_ROOT"'/agents"]' "$SYNC_PROJECT/.mcp-subagent/config.toml"
 grep -Fq 'state_dir = "'"$SYNC_ROOT"'/.mcp-subagent/state"' "$SYNC_PROJECT/.mcp-subagent/config.toml"
 grep -Eq '"agents_loaded"[[:space:]]*:[[:space:]]*3' "$TMP_DIR/sync_project_doctor.json"
+grep -Eq '"project_bridge"[[:space:]]*:' "$TMP_DIR/sync_project_doctor.json"
+grep -Eq '"status"[[:space:]]*:[[:space:]]*"synced"' "$TMP_DIR/sync_project_doctor.json"
+grep -Eq '"root_scope"[[:space:]]*:[[:space:]]*"project_external"' "$TMP_DIR/sync_project_doctor.json"
 if [[ -e "$SYNC_PROJECT/.gitignore" ]]; then
   echo "[smoke-v08] external custom-root sync should not write project .gitignore"
   exit 1

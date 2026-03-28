@@ -33,6 +33,7 @@ pub struct DoctorReport {
     pub workspace_policy_hints: Vec<WorkspacePolicyHint>,
     pub ambient_isolation: AmbientIsolationReport,
     pub knowledge_layout: KnowledgeLayoutHealth,
+    pub project_bridge: ProjectBridgeHealth,
     pub bootstrap_catalog: BootstrapCatalogHealth,
     pub version_pins: ProviderVersionPinReport,
     pub status: String,
@@ -79,6 +80,20 @@ pub struct KnowledgeLayoutHealth {
     pub active_plan_path: Option<PathBuf>,
     pub project_memory_paths: Vec<PathBuf>,
     pub archived_plan_paths: Vec<PathBuf>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectBridgeHealth {
+    pub config_path: PathBuf,
+    pub status: String,
+    pub configured_agents_dirs: Vec<PathBuf>,
+    pub configured_state_dir: Option<PathBuf>,
+    pub runtime_agents_dirs: Vec<PathBuf>,
+    pub runtime_state_dir: PathBuf,
+    pub generated_root: Option<PathBuf>,
+    pub root_scope: Option<String>,
+    pub repair_command: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -161,6 +176,7 @@ fn build_doctor_report_for_cwd_with_home(
     prober: &dyn ProviderProber,
     user_home: Option<PathBuf>,
 ) -> DoctorReport {
+    let project_bridge = build_project_bridge_health(&cwd, &agents_dirs, &state_dir);
     let (agents_loaded, agents_error, loaded_specs) = match load_agent_specs_from_dirs(&agents_dirs)
     {
         Ok(loaded) => (Some(loaded.len()), None, loaded),
@@ -180,6 +196,7 @@ fn build_doctor_report_for_cwd_with_home(
     let (status, issues, advice) = build_doctor_health(
         &agents_error,
         &knowledge_layout,
+        &project_bridge,
         &bootstrap_catalog,
         &probes,
         &version_pins,
@@ -196,6 +213,7 @@ fn build_doctor_report_for_cwd_with_home(
         workspace_policy_hints,
         ambient_isolation,
         knowledge_layout,
+        project_bridge,
         bootstrap_catalog,
         version_pins,
         status,
@@ -207,6 +225,7 @@ fn build_doctor_report_for_cwd_with_home(
 fn build_doctor_health(
     agents_error: &Option<String>,
     knowledge_layout: &KnowledgeLayoutHealth,
+    project_bridge: &ProjectBridgeHealth,
     bootstrap_catalog: &BootstrapCatalogHealth,
     probes: &[ProviderProbe],
     version_pins: &ProviderVersionPinReport,
@@ -235,6 +254,39 @@ fn build_doctor_health(
                 "Create PLAN.md / PROJECT.md and archive plans under docs/plans/.".to_string(),
             ),
         });
+    }
+
+    match project_bridge.status.as_str() {
+        "missing" if project_bridge.repair_command.is_some() => issues.push(DoctorIssue {
+            level: "warning".to_string(),
+            code: "project_bridge_missing".to_string(),
+            message: "project bridge config is missing for the current generated root".to_string(),
+            suggestion: project_bridge.repair_command.clone(),
+        }),
+        "unconfigured" if project_bridge.repair_command.is_some() => issues.push(DoctorIssue {
+            level: "warning".to_string(),
+            code: "project_bridge_unconfigured".to_string(),
+            message: "project config exists but does not declare [paths].agents_dirs/state_dir"
+                .to_string(),
+            suggestion: project_bridge.repair_command.clone(),
+        }),
+        "invalid" => issues.push(DoctorIssue {
+            level: "warning".to_string(),
+            code: "project_bridge_invalid".to_string(),
+            message: project_bridge
+                .warnings
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "project bridge config is invalid".to_string()),
+            suggestion: project_bridge.repair_command.clone(),
+        }),
+        "drifted" => issues.push(DoctorIssue {
+            level: "warning".to_string(),
+            code: "project_bridge_drifted".to_string(),
+            message: "project bridge config does not match the active runtime target".to_string(),
+            suggestion: project_bridge.repair_command.clone(),
+        }),
+        _ => {}
     }
 
     if !bootstrap_catalog.drifted_templates.is_empty() {
@@ -365,6 +417,217 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+fn build_project_bridge_health(
+    cwd: &Path,
+    runtime_agents_dirs: &[PathBuf],
+    runtime_state_dir: &Path,
+) -> ProjectBridgeHealth {
+    let config_path = cwd.join(".mcp-subagent/config.toml");
+    let runtime_agents_dirs = runtime_agents_dirs
+        .iter()
+        .map(|path| resolve_bridge_path(cwd, path))
+        .collect::<Vec<_>>();
+    let runtime_state_dir = resolve_bridge_path(cwd, runtime_state_dir);
+    let runtime_generated_root =
+        infer_generated_root_from_paths(&runtime_agents_dirs, &runtime_state_dir);
+
+    match load_project_bridge_config(cwd, &config_path) {
+        ProjectBridgeConfigLoad::Missing => ProjectBridgeHealth {
+            config_path,
+            status: "missing".to_string(),
+            configured_agents_dirs: Vec::new(),
+            configured_state_dir: None,
+            runtime_agents_dirs,
+            runtime_state_dir,
+            generated_root: runtime_generated_root.clone(),
+            root_scope: runtime_generated_root
+                .as_ref()
+                .map(|root| classify_root_scope(cwd, root)),
+            repair_command: runtime_generated_root
+                .as_ref()
+                .map(|root| build_sync_project_bridge_command(root, false)),
+            warnings: runtime_generated_root
+                .as_ref()
+                .map(|root| {
+                    vec![format!(
+                        "project bridge config is missing; current runtime target resolves to generated root {}",
+                        root.display()
+                    )]
+                })
+                .unwrap_or_default(),
+        },
+        ProjectBridgeConfigLoad::Unconfigured => ProjectBridgeHealth {
+            config_path,
+            status: "unconfigured".to_string(),
+            configured_agents_dirs: Vec::new(),
+            configured_state_dir: None,
+            runtime_agents_dirs,
+            runtime_state_dir,
+            generated_root: runtime_generated_root.clone(),
+            root_scope: runtime_generated_root
+                .as_ref()
+                .map(|root| classify_root_scope(cwd, root)),
+            repair_command: runtime_generated_root
+                .as_ref()
+                .map(|root| build_sync_project_bridge_command(root, true)),
+            warnings: vec![
+                "project config exists but does not declare [paths].agents_dirs/state_dir"
+                    .to_string(),
+            ],
+        },
+        ProjectBridgeConfigLoad::Invalid(reason) => ProjectBridgeHealth {
+            config_path,
+            status: "invalid".to_string(),
+            configured_agents_dirs: Vec::new(),
+            configured_state_dir: None,
+            runtime_agents_dirs,
+            runtime_state_dir,
+            generated_root: runtime_generated_root.clone(),
+            root_scope: runtime_generated_root
+                .as_ref()
+                .map(|root| classify_root_scope(cwd, root)),
+            repair_command: runtime_generated_root
+                .as_ref()
+                .map(|root| build_sync_project_bridge_command(root, true)),
+            warnings: vec![reason],
+        },
+        ProjectBridgeConfigLoad::Configured {
+            agents_dirs,
+            state_dir,
+        } => {
+            let configured_generated_root =
+                infer_generated_root_from_paths(&agents_dirs, &state_dir);
+            let matches_runtime =
+                agents_dirs == runtime_agents_dirs && state_dir == runtime_state_dir;
+            let generated_root = configured_generated_root.or(runtime_generated_root.clone());
+            let root_scope = generated_root
+                .as_ref()
+                .map(|root| classify_root_scope(cwd, root));
+            let warnings = if matches_runtime {
+                Vec::new()
+            } else {
+                vec!["configured bridge paths differ from the active runtime target".to_string()]
+            };
+
+            ProjectBridgeHealth {
+                config_path,
+                status: if matches_runtime {
+                    "synced".to_string()
+                } else {
+                    "drifted".to_string()
+                },
+                configured_agents_dirs: agents_dirs,
+                configured_state_dir: Some(state_dir),
+                runtime_agents_dirs,
+                runtime_state_dir,
+                generated_root,
+                root_scope,
+                repair_command: if matches_runtime {
+                    None
+                } else {
+                    runtime_generated_root
+                        .as_ref()
+                        .map(|root| build_sync_project_bridge_command(root, true))
+                },
+                warnings,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ProjectBridgeConfigLoad {
+    Missing,
+    Unconfigured,
+    Invalid(String),
+    Configured {
+        agents_dirs: Vec<PathBuf>,
+        state_dir: PathBuf,
+    },
+}
+
+fn load_project_bridge_config(cwd: &Path, config_path: &Path) -> ProjectBridgeConfigLoad {
+    if !config_path.exists() {
+        return ProjectBridgeConfigLoad::Missing;
+    }
+    if !config_path.is_file() {
+        return ProjectBridgeConfigLoad::Invalid(format!(
+            "project bridge config path is not a file: {}",
+            config_path.display()
+        ));
+    }
+
+    let raw = match std::fs::read_to_string(config_path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            return ProjectBridgeConfigLoad::Invalid(format!(
+                "failed to read project bridge config: {err}"
+            ));
+        }
+    };
+    let parsed = match raw.parse::<toml::Value>() {
+        Ok(value) => value,
+        Err(err) => {
+            return ProjectBridgeConfigLoad::Invalid(format!(
+                "failed to parse project bridge config: {err}"
+            ));
+        }
+    };
+    let Some(paths) = parsed.get("paths").and_then(|value| value.as_table()) else {
+        return ProjectBridgeConfigLoad::Unconfigured;
+    };
+    let agents_value = paths.get("agents_dirs");
+    let state_value = paths.get("state_dir");
+
+    match (agents_value, state_value) {
+        (None, None) => ProjectBridgeConfigLoad::Unconfigured,
+        (Some(_), None) | (None, Some(_)) => ProjectBridgeConfigLoad::Invalid(
+            "project bridge config must define both [paths].agents_dirs and [paths].state_dir"
+                .to_string(),
+        ),
+        (Some(agents_value), Some(state_value)) => {
+            let Some(raw_agents) = agents_value.as_array() else {
+                return ProjectBridgeConfigLoad::Invalid(
+                    "[paths].agents_dirs must be an array of strings".to_string(),
+                );
+            };
+            if raw_agents.is_empty() {
+                return ProjectBridgeConfigLoad::Invalid(
+                    "[paths].agents_dirs must contain at least one entry".to_string(),
+                );
+            }
+            let mut agents_dirs = Vec::with_capacity(raw_agents.len());
+            for entry in raw_agents {
+                let Some(raw_path) = entry.as_str() else {
+                    return ProjectBridgeConfigLoad::Invalid(
+                        "[paths].agents_dirs entries must be strings".to_string(),
+                    );
+                };
+                agents_dirs.push(resolve_bridge_path(cwd, Path::new(raw_path)));
+            }
+
+            let Some(raw_state_dir) = state_value.as_str() else {
+                return ProjectBridgeConfigLoad::Invalid(
+                    "[paths].state_dir must be a string".to_string(),
+                );
+            };
+            let state_dir = resolve_bridge_path(cwd, Path::new(raw_state_dir));
+            ProjectBridgeConfigLoad::Configured {
+                agents_dirs,
+                state_dir,
+            }
+        }
+    }
+}
+
+fn resolve_bridge_path(cwd: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
 }
 
 fn build_ambient_isolation_report(
@@ -710,6 +973,23 @@ fn generated_root_for_agent_path(path: &Path) -> Option<PathBuf> {
     None
 }
 
+fn infer_generated_root_from_paths(agents_dirs: &[PathBuf], state_dir: &Path) -> Option<PathBuf> {
+    let [agents_dir] = agents_dirs else {
+        return None;
+    };
+    if agents_dir.file_name().and_then(|name| name.to_str()) != Some("agents") {
+        return None;
+    }
+    let root = agents_dir.parent()?;
+    if state_dir != root.join(".mcp-subagent/state") {
+        return None;
+    }
+    if crate::init::load_generated_root_manifest(root).is_some() || is_legacy_generated_root(root) {
+        return Some(root.to_path_buf());
+    }
+    None
+}
+
 fn is_legacy_generated_root(root: &Path) -> bool {
     let components = root
         .components()
@@ -723,10 +1003,27 @@ fn is_legacy_generated_root(root: &Path) -> bool {
         .any(|window| window == [".mcp-subagent", "bootstrap"])
 }
 
+fn classify_root_scope(cwd: &Path, root: &Path) -> String {
+    if root.strip_prefix(cwd).is_ok() {
+        "project_internal".to_string()
+    } else {
+        "project_external".to_string()
+    }
+}
+
 fn build_refresh_bootstrap_command(root: &Path) -> String {
     format!(
         "mcp-subagent init --refresh-bootstrap --root-dir {}",
         shell_escape_path(root)
+    )
+}
+
+fn build_sync_project_bridge_command(root: &Path, force: bool) -> String {
+    let force_suffix = if force { " --force" } else { "" };
+    format!(
+        "mcp-subagent init --refresh-bootstrap --root-dir {} --sync-project-config{}",
+        shell_escape_path(root),
+        force_suffix
     )
 }
 
@@ -1066,6 +1363,75 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
         }
     }
 
+    out.push_str("\nproject_bridge:\n");
+    out.push_str(&format!(
+        "  config_path: {}\n",
+        report.project_bridge.config_path.display()
+    ));
+    out.push_str(&format!("  status: {}\n", report.project_bridge.status));
+    if report.project_bridge.configured_agents_dirs.is_empty() {
+        out.push_str("  configured_agents_dirs: []\n");
+    } else {
+        out.push_str("  configured_agents_dirs:\n");
+        for path in &report.project_bridge.configured_agents_dirs {
+            out.push_str(&format!("    - {}\n", path.display()));
+        }
+    }
+    out.push_str(&format!(
+        "  configured_state_dir: {}\n",
+        report
+            .project_bridge
+            .configured_state_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".to_string())
+    ));
+    if report.project_bridge.runtime_agents_dirs.is_empty() {
+        out.push_str("  runtime_agents_dirs: []\n");
+    } else {
+        out.push_str("  runtime_agents_dirs:\n");
+        for path in &report.project_bridge.runtime_agents_dirs {
+            out.push_str(&format!("    - {}\n", path.display()));
+        }
+    }
+    out.push_str(&format!(
+        "  runtime_state_dir: {}\n",
+        report.project_bridge.runtime_state_dir.display()
+    ));
+    out.push_str(&format!(
+        "  generated_root: {}\n",
+        report
+            .project_bridge
+            .generated_root
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".to_string())
+    ));
+    out.push_str(&format!(
+        "  root_scope: {}\n",
+        report
+            .project_bridge
+            .root_scope
+            .as_deref()
+            .unwrap_or("none")
+    ));
+    out.push_str(&format!(
+        "  repair_command: {}\n",
+        report
+            .project_bridge
+            .repair_command
+            .as_deref()
+            .unwrap_or("none")
+    ));
+    if report.project_bridge.warnings.is_empty() {
+        out.push_str("  warnings: []\n");
+    } else {
+        out.push_str("  warnings:\n");
+        for warning in &report.project_bridge.warnings {
+            out.push_str(&format!("    - {warning}\n"));
+        }
+    }
+
     out.push_str("\nbootstrap_catalog:\n");
     out.push_str(&format!(
         "  catalog_version: {}\n",
@@ -1218,6 +1584,7 @@ instructions = "review"
         assert!(rendered.contains("workspace_policy_hints"));
         assert!(rendered.contains("ambient_isolation"));
         assert!(rendered.contains("knowledge_layout_health"));
+        assert!(rendered.contains("project_bridge"));
     }
 
     #[test]
@@ -1421,6 +1788,140 @@ native_discovery = "inherit"
                 .any(|issue| issue.code == "ambient_skill_conflicts"),
             "expected ambient conflict issue"
         );
+    }
+
+    #[test]
+    fn doctor_reports_synced_internal_project_bridge() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join(".mcp-subagent/bootstrap");
+        init_workspace(&root, InitPreset::CodexPrimaryBuilder, false).expect("init root");
+        fs::create_dir_all(temp.path().join(".mcp-subagent")).expect("create project config dir");
+        fs::write(
+            temp.path().join(".mcp-subagent/config.toml"),
+            r#"[paths]
+agents_dirs = ["./.mcp-subagent/bootstrap/agents"]
+state_dir = "./.mcp-subagent/bootstrap/.mcp-subagent/state"
+"#,
+        )
+        .expect("write bridge config");
+
+        let report = build_doctor_report_for_cwd(
+            temp.path().to_path_buf(),
+            vec![root.join("agents")],
+            root.join(".mcp-subagent/state"),
+            &FakeProber::default(),
+        );
+
+        assert_eq!(report.project_bridge.status, "synced");
+        assert_eq!(report.project_bridge.generated_root, Some(root));
+        assert_eq!(
+            report.project_bridge.root_scope.as_deref(),
+            Some("project_internal")
+        );
+        assert!(report.project_bridge.repair_command.is_none());
+    }
+
+    #[test]
+    fn doctor_reports_missing_external_project_bridge_with_repair_command() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let root = temp.path().join("custom-root");
+        fs::create_dir_all(&project).expect("create project");
+        init_workspace(&root, InitPreset::CodexPrimaryBuilder, false).expect("init root");
+
+        let report = build_doctor_report_for_cwd(
+            project.clone(),
+            vec![root.join("agents")],
+            root.join(".mcp-subagent/state"),
+            &FakeProber::default(),
+        );
+
+        assert_eq!(report.project_bridge.status, "missing");
+        assert_eq!(report.project_bridge.generated_root, Some(root.clone()));
+        assert_eq!(
+            report.project_bridge.root_scope.as_deref(),
+            Some("project_external")
+        );
+        let expected = format!(
+            "mcp-subagent init --refresh-bootstrap --root-dir '{}' --sync-project-config",
+            root.display()
+        );
+        assert_eq!(
+            report.project_bridge.repair_command.as_deref(),
+            Some(expected.as_str())
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "project_bridge_missing"),
+            "expected project_bridge_missing warning"
+        );
+    }
+
+    #[test]
+    fn doctor_reports_unconfigured_project_bridge_with_force_repair() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let root = temp.path().join("custom-root");
+        fs::create_dir_all(project.join(".mcp-subagent")).expect("create project config dir");
+        init_workspace(&root, InitPreset::CodexPrimaryBuilder, false).expect("init root");
+        fs::write(
+            project.join(".mcp-subagent/config.toml"),
+            r#"[provider_version_pins]
+enabled = false
+"#,
+        )
+        .expect("write partial project config");
+
+        let report = build_doctor_report_for_cwd(
+            project,
+            vec![root.join("agents")],
+            root.join(".mcp-subagent/state"),
+            &FakeProber::default(),
+        );
+
+        assert_eq!(report.project_bridge.status, "unconfigured");
+        assert!(
+            report
+                .project_bridge
+                .repair_command
+                .as_deref()
+                .is_some_and(|command| command.contains("--sync-project-config --force")),
+            "expected --force repair command"
+        );
+    }
+
+    #[test]
+    fn doctor_reports_synced_external_project_bridge() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let root = temp.path().join("custom-root");
+        fs::create_dir_all(project.join(".mcp-subagent")).expect("create project config dir");
+        init_workspace(&root, InitPreset::CodexPrimaryBuilder, false).expect("init root");
+        fs::write(
+            project.join(".mcp-subagent/config.toml"),
+            format!(
+                "[paths]\nagents_dirs = [\"{}/agents\"]\nstate_dir = \"{}/.mcp-subagent/state\"\n",
+                root.display(),
+                root.display()
+            ),
+        )
+        .expect("write synced bridge config");
+
+        let report = build_doctor_report_for_cwd(
+            project,
+            vec![root.join("agents")],
+            root.join(".mcp-subagent/state"),
+            &FakeProber::default(),
+        );
+
+        assert_eq!(report.project_bridge.status, "synced");
+        assert_eq!(
+            report.project_bridge.root_scope.as_deref(),
+            Some("project_external")
+        );
+        assert!(report.project_bridge.repair_command.is_none());
     }
 
     #[test]

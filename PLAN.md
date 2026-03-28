@@ -6,6 +6,13 @@
 
 ## Execution Strategy (v0.10 Current)
 
+### Batch V1.0-P4 - Project Bridge Diagnostics（已完成）
+
+目标：把 `init --sync-project-config` 和 generated-root/refresh 路径补成真正可观察的 doctor 诊断面，让项目根能直接看见 bridge config 是否存在、当前指向哪个 root、是否位于项目内/项目外，以及该执行哪条精确 repair command，而不再靠猜 `config.toml` 或重复试错命令。
+依赖顺序：`T-158(Completed)`。
+回滚策略：仅扩展 `doctor` 的 report/rendering/smoke，不改变 `init`、runtime config merge 或现有 bootstrap drift 逻辑；必要时可单独回退 `project_bridge` 视图而不影响主执行链。
+风险与控制：project bridge 诊断若把“当前 runtime 视图”和“项目 config 视图”混在一起，会制造误导；通过同时保留 configured/runtime 路径、显式 `status` 和 `repair_command`，并只在能识别 generated root 时生成修复建议，降低误报面。
+
 ### Batch V1.0-P3 - Custom Root Project Bridge Sync（已完成）
 
 目标：解决 `init --root-dir <custom-root>` 后项目根命令面仍然不知道这个 root 的问题，补一个显式的 project bridge sync 入口，让 `validate/doctor/list-agents` 等命令能无额外 flags 指向 custom root，同时保持当前默认行为不变。

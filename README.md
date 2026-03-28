@@ -48,6 +48,7 @@ Result output also exposes retry observability fields: `retry_classification` an
 `show` renders a compact colorized view in interactive terminals; set `NO_COLOR=1` or use `--json` for plain machine-readable output.
 
 `doctor --json` includes `ambient_isolation` diagnostics (per-provider `native_discovery` profile and workspace-visible skill conflict detection).
+It now also includes `project_bridge` diagnostics: whether `./.mcp-subagent/config.toml` exists, which `agents_dir/state_dir` it points to, whether that root is internal or external to the current project, and the exact repair command when the bridge is missing or drifted.
 
 ## MCP Transport
 

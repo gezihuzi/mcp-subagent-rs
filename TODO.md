@@ -3989,3 +3989,26 @@
   - `bash scripts/smoke_v08.sh` 通过。
   - `cargo test --workspace` 通过（220 + 75 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-158 V1.0-P4-ProjectBridgeDiagnostics (Completed 2026-03-28)
+
+任务：为 `doctor` 增加 project bridge 诊断视图，直接暴露当前项目根 `.mcp-subagent/config.toml` 的存在性、目标路径、与当前 runtime 配置是否一致，以及可执行的 repair command。
+验收标准：
+
+1. `doctor --json` 与文本输出新增 `project_bridge` 段，至少包含 `config_path`、`status`、configured/runtime 路径、可识别 generated root 时的 `root_scope` 与 `repair_command`。
+2. `doctor` 能区分至少三类 project bridge 状态：缺失但当前 runtime 指向 generated root、config 无法解析或缺字段、config 与当前 runtime 已对齐。
+3. 当 `doctor` 能从当前 runtime 识别 generated root 且 project bridge 缺失/失效时，会给出精确 `mcp-subagent init --root-dir <root> --sync-project-config` 修复建议；需要覆盖现有 config 的场景要显式带 `--force`。
+4. 回归至少覆盖：default/internal root synced、external custom root missing bridge、external custom root synced bridge；`scripts/smoke_v08.sh` 需补一条 custom-root `doctor --json` 断言链。
+5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - `doctor` 新增 `project_bridge` 诊断段，文本与 `--json` 都会输出 `config_path`、`status`、configured/runtime 路径、`generated_root`、`root_scope`、`repair_command` 和警告列表。
+  - `project_bridge` 现在能区分至少四类状态：`missing`、`unconfigured`、`invalid`、`synced/drifted`；只有当前 runtime 能识别 generated root 时，才会生成精确 repair command。
+  - repair command 统一走安全的 refresh 路径：`mcp-subagent init --refresh-bootstrap --root-dir <root> --sync-project-config`；需要覆盖现有 project config 的场景会显式追加 `--force`。
+  - `doctor` 的 issue/advice 现在会直接报告 `project_bridge_missing/unconfigured/invalid/drifted`，不再只让用户自己翻 `config.toml`。
+  - 已补单测覆盖 internal synced、external missing、external synced、unconfigured-with-force repair；`scripts/smoke_v08.sh` 也新增了 custom-root missing/synced 的 `doctor --json` 断言。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（224 + 75 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
