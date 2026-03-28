@@ -4140,3 +4140,18 @@
   - `docs/release_v0.10.0.md` 已改为优先引用 `bash scripts/release_check.sh 0.10.0`，手动命令保留为 fallback，不再让 release 文档与实际切版流程分叉。
 - 已验证：
   - `bash scripts/release_check.sh 0.10.0` 通过（内部已串行跑通 `cargo fmt --all`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`bash scripts/smoke_v08.sh`）。
+
+## T-165 V1.0-P11-ReleaseBranchCut (Completed 2026-03-28)
+
+任务：在 `v0.10.0` cut point 已提交且工作树干净的前提下，用 `git flow release start 0.10.0` 正式切出 release 分支。
+验收标准：
+
+1. `T-164` 对应变更已先提交到 `develop`，`git status --short` 为空，不带未提交改动进入 release cut。
+2. `git flow release start 0.10.0` 成功，当前分支切到 `release/0.10.0`。
+3. 本轮不改 runtime 行为，不新增 release 内容；只允许 branch cut 本身与 `PLAN.md` / `TODO.md` 记录更新。
+完成记录：
+
+- 已完成：
+  - 已先在 `develop` 上提交 `T-164` 收口，提交点为 `c27d162 chore: automate release cut checks`，随后确认工作树为空。
+  - `git flow release start 0.10.0` 已成功执行，当前分支已切到 `release/0.10.0`，release cut 起点明确固定在 `develop@c27d162`。
+  - 本轮未引入新的 runtime/CLI 行为变更，只补 release branch cut 的计划与任务记录。

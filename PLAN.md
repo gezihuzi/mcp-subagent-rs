@@ -6,6 +6,13 @@
 
 ## Execution Strategy (v0.10 Current)
 
+### Batch V1.0-P11 - Release Branch Cut（已完成）
+
+目标：在 `develop` 已具备 `v0.10.0` release cut point 且工作树干净的前提下，用 `git flow release start 0.10.0` 正式切出 release 分支，冻结后续收口位置，不再继续在 `develop` 上混入发布准备变更。
+依赖顺序：`T-165(Completed)`。
+回滚策略：仅执行 git-flow release branch cut，并回填计划/任务记录；若 branch naming 或切版版本号判断有误，可删除错误 release branch 后重新从 `develop` 切出，不影响已完成的 v0.10 内容提交。
+风险与控制：若在 dirty worktree 上直接起 release，git-flow 会拒绝或把未提交改动混进 release 准备链；通过先把 `T-164` 提交到 `develop`、确认 worktree clean，再执行 `git flow release start 0.10.0`，控制分支起点的可追溯性。
+
 ### Batch V1.0-P10 - Release Cut Automation（已完成）
 
 目标：把 `v0.10.0` 现有的 release checklist 收成一条可重复执行的自动化命令，避免后续切版继续依赖人肉逐项核对 `Cargo.toml`、`Cargo.lock`、`PRESET_CATALOG_VERSION`、`CHANGELOG.md`、release doc 和验证命令。
