@@ -1,15 +1,21 @@
 use crate::{
     error::Result,
     runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
-    runtime::summary::{StructuredSummary, SUMMARY_END_SENTINEL, SUMMARY_START_SENTINEL},
+    runtime::{
+        outcome::{SuccessOutcome, UsageStats},
+        summary::{
+            ProviderSummary, SummaryParseStatus, VerificationStatus, SUMMARY_END_SENTINEL,
+            SUMMARY_START_SENTINEL,
+        },
+    },
     spec::AgentSpec,
-    types::{CompiledContext, RunRequest},
+    types::{CompiledContext, TaskSpec, WorkflowHints},
 };
 
 #[derive(Debug, Clone)]
 pub enum MockRunPlan {
     Succeeded {
-        summary: StructuredSummary,
+        envelope: ProviderSummary,
     },
     SucceededFromRequest,
     Failed {
@@ -34,15 +40,16 @@ impl MockRunner {
 
 #[async_trait::async_trait]
 impl AgentRunner for MockRunner {
-    async fn execute(
+    async fn execute_task(
         &self,
         spec: &AgentSpec,
-        request: &RunRequest,
+        task_spec: &TaskSpec,
+        _hints: &WorkflowHints,
         _compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
         let execution = match &self.plan {
-            MockRunPlan::Succeeded { summary } => {
-                let summary_json = serde_json::to_string_pretty(summary)?;
+            MockRunPlan::Succeeded { envelope } => {
+                let summary_json = serde_json::to_string_pretty(envelope)?;
                 RunnerExecution {
                     terminal_state: RunnerTerminalState::Succeeded,
                     stdout: format!(
@@ -53,8 +60,9 @@ impl AgentRunner for MockRunner {
                 }
             }
             MockRunPlan::SucceededFromRequest => {
-                let summary_json =
-                    serde_json::to_string_pretty(&build_mock_summary_from_request(spec, request))?;
+                let summary_json = serde_json::to_string_pretty(
+                    &build_mock_envelope_from_task_spec(spec, task_spec),
+                )?;
                 RunnerExecution {
                     terminal_state: RunnerTerminalState::Succeeded,
                     stdout: format!(
@@ -90,15 +98,15 @@ impl AgentRunner for MockRunner {
     }
 }
 
-fn build_mock_summary_from_request(spec: &AgentSpec, request: &RunRequest) -> StructuredSummary {
-    let touched_files = request
+fn build_mock_success_outcome(spec: &AgentSpec, task_spec: &TaskSpec) -> SuccessOutcome {
+    let touched_files = task_spec
         .selected_files
         .iter()
         .map(|file| file.path.display().to_string())
         .collect::<Vec<_>>();
 
-    StructuredSummary {
-        summary: format!("Mock run completed for task: {}", request.task),
+    SuccessOutcome {
+        summary: format!("Mock run completed for task: {}", task_spec.task),
         key_findings: vec![format!(
             "Agent `{}` executed through dispatcher mock runner.",
             spec.core.name
@@ -108,10 +116,25 @@ fn build_mock_summary_from_request(spec: &AgentSpec, request: &RunRequest) -> St
         next_steps: vec![
             "Replace mock runner with provider runner for production use.".to_string(),
         ],
-        exit_code: 0,
-        verification_status: crate::runtime::summary::VerificationStatus::Passed,
+        verification: VerificationStatus::Passed,
+        usage: UsageStats::ZERO,
+        parse_status: SummaryParseStatus::Validated,
         touched_files,
         plan_refs: Vec::new(),
+    }
+}
+
+fn build_mock_envelope_from_task_spec(spec: &AgentSpec, task_spec: &TaskSpec) -> ProviderSummary {
+    let success = build_mock_success_outcome(spec, task_spec);
+    ProviderSummary {
+        summary: success.summary,
+        key_findings: success.key_findings,
+        artifacts: success.artifacts,
+        open_questions: success.open_questions,
+        next_steps: success.next_steps,
+        verification: success.verification,
+        touched_files: success.touched_files,
+        plan_refs: success.plan_refs,
     }
 }
 
@@ -123,14 +146,14 @@ mod tests {
         runtime::{
             runners::mock::{MockRunPlan, MockRunner},
             runners::{AgentRunner, RunnerTerminalState},
-            summary::{StructuredSummary, VerificationStatus},
+            summary::{ProviderSummary, VerificationStatus},
         },
         spec::{
             core::{AgentSpecCore, Provider},
             runtime_policy::{RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
             AgentSpec,
         },
-        types::{CompiledContext, RunMode, RunRequest},
+        types::{CompiledContext, RunMode, TaskSpec, WorkflowHints},
     };
 
     fn sample_spec() -> AgentSpec {
@@ -157,40 +180,39 @@ mod tests {
         }
     }
 
-    fn sample_request() -> RunRequest {
-        RunRequest {
+    fn sample_task_spec() -> TaskSpec {
+        TaskSpec {
             task: "review".to_string(),
             task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir: PathBuf::from("."),
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir: PathBuf::from("."),
         }
     }
 
     #[tokio::test]
     async fn mock_runner_success_wraps_summary_json() {
         let runner = MockRunner::new(MockRunPlan::Succeeded {
-            summary: StructuredSummary {
+            envelope: ProviderSummary {
                 summary: "ok".to_string(),
                 key_findings: vec!["a".to_string()],
                 artifacts: Vec::new(),
                 open_questions: Vec::new(),
                 next_steps: Vec::new(),
-                exit_code: 0,
-                verification_status: VerificationStatus::Passed,
+                verification: VerificationStatus::Passed,
                 touched_files: Vec::new(),
                 plan_refs: Vec::new(),
             },
         });
 
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(),
-                &sample_request(),
+                &sample_task_spec(),
+                &WorkflowHints {
+                    run_mode: RunMode::Sync,
+                    ..WorkflowHints::default()
+                },
                 &CompiledContext {
                     system_prefix: String::new(),
                     injected_prompt: String::new(),

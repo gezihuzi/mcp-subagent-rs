@@ -5,19 +5,20 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::{
     mcp::dto::ArtifactOutput,
-    runtime::summary::{ArtifactKind, SummaryEnvelope},
+    runtime::{outcome::RunOutcome, summary::ArtifactKind},
     spec::AgentSpec,
-    types::RunRequest,
+    types::{TaskSpec, WorkflowHints},
 };
 
 pub(crate) fn apply_review_evidence_hook(
     spec: &AgentSpec,
-    request: &RunRequest,
-    summary: &SummaryEnvelope,
+    task_spec: &TaskSpec,
+    hints: &WorkflowHints,
+    outcome: &RunOutcome,
     artifact_index: &mut Vec<ArtifactOutput>,
     artifacts: &mut HashMap<String, String>,
 ) {
-    if !request
+    if !hints
         .stage
         .as_deref()
         .is_some_and(|stage| stage.eq_ignore_ascii_case("review"))
@@ -30,8 +31,11 @@ pub(crate) fn apply_review_evidence_hook(
     if !workflow.enabled {
         return;
     }
+    let RunOutcome::Succeeded(success) = outcome else {
+        return;
+    };
 
-    let high_risk = is_high_risk_review(spec, request);
+    let high_risk = is_high_risk_review(spec, task_spec, hints);
     let mut required_tracks = Vec::new();
     if workflow.review_policy.require_correctness_review {
         required_tracks.push("correctness".to_string());
@@ -41,7 +45,7 @@ pub(crate) fn apply_review_evidence_hook(
     }
 
     let current_tracks = detect_review_tracks(&agent_profile(spec));
-    let parent_tracks = request
+    let parent_tracks = hints
         .parent_summary
         .as_deref()
         .map(|text| detect_review_tracks(&text.to_lowercase()))
@@ -60,7 +64,7 @@ pub(crate) fn apply_review_evidence_hook(
 
     let content = serde_json::to_string_pretty(&json!({
         "agent": spec.core.name,
-        "stage": request.stage,
+        "stage": hints.stage,
         "high_risk": high_risk,
         "required_tracks": required_tracks,
         "current_agent_tracks": tracks_to_vec(current_tracks),
@@ -74,10 +78,10 @@ pub(crate) fn apply_review_evidence_hook(
             "prefer_cross_provider_review": workflow.review_policy.prefer_cross_provider_review,
         },
         "summary": {
-            "parse_status": format!("{}", summary.parse_status),
-            "verification_status": format!("{}", summary.summary.verification_status),
-            "touched_files": summary.summary.touched_files,
-            "plan_refs": summary.summary.plan_refs,
+            "parse_status": format!("{}", success.parse_status),
+            "verification_status": format!("{}", success.verification),
+            "touched_files": success.touched_files.clone(),
+            "plan_refs": success.plan_refs.clone(),
         }
     }))
     .unwrap_or_else(|_| "{}".to_string());
@@ -157,19 +161,19 @@ fn agent_profile(spec: &AgentSpec) -> String {
     profile.to_lowercase()
 }
 
-fn is_high_risk_review(spec: &AgentSpec, request: &RunRequest) -> bool {
+fn is_high_risk_review(spec: &AgentSpec, task_spec: &TaskSpec, hints: &WorkflowHints) -> bool {
     let Some(workflow) = spec.workflow.as_ref() else {
         return false;
     };
     let gate = &workflow.require_plan_when;
     if gate
         .require_plan_if_touched_files_ge
-        .is_some_and(|threshold| request.selected_files.len() as u32 >= threshold)
+        .is_some_and(|threshold| task_spec.selected_files.len() as u32 >= threshold)
     {
         return true;
     }
     if gate.require_plan_if_parallel_agents
-        && matches!(request.run_mode, crate::types::RunMode::Async)
+        && matches!(hints.run_mode, crate::types::RunMode::Async)
     {
         return true;
     }
@@ -182,8 +186,8 @@ fn is_high_risk_review(spec: &AgentSpec, request: &RunRequest) -> bool {
 
     let lowered = format!(
         "{}\n{}",
-        request.task,
-        request.task_brief.clone().unwrap_or_default()
+        task_spec.task,
+        task_spec.task_brief.clone().unwrap_or_default()
     )
     .to_lowercase();
     (gate.require_plan_if_cross_module
@@ -253,8 +257,9 @@ mod tests {
 
     use crate::{
         mcp::{dto::ArtifactOutput, review::apply_review_evidence_hook},
-        runtime::summary::{
-            StructuredSummary, SummaryEnvelope, SummaryParseStatus, VerificationStatus,
+        runtime::{
+            outcome::{RunOutcome, SuccessOutcome, UsageStats},
+            summary::{SummaryParseStatus, VerificationStatus},
         },
         spec::{
             core::{AgentSpecCore, Provider},
@@ -262,7 +267,7 @@ mod tests {
             workflow::WorkflowSpec,
             AgentSpec,
         },
-        types::{RunMode, RunRequest},
+        types::{RunMode, TaskSpec, WorkflowHints},
     };
 
     fn sample_spec() -> AgentSpec {
@@ -285,48 +290,56 @@ mod tests {
         }
     }
 
-    fn sample_request() -> RunRequest {
-        RunRequest {
+    fn sample_task_spec() -> TaskSpec {
+        TaskSpec {
             task: "review parser behavior changes".to_string(),
             task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: Some("review".to_string()),
-            plan_ref: None,
-            working_dir: ".".into(),
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir: ".".into(),
         }
     }
 
-    fn sample_summary() -> SummaryEnvelope {
-        SummaryEnvelope {
-            contract_version: "mcp-subagent.summary.v2".to_string(),
-            parse_status: SummaryParseStatus::Validated,
-            summary: StructuredSummary {
-                summary: "ok".to_string(),
-                key_findings: vec!["a".to_string()],
-                artifacts: Vec::new(),
-                open_questions: Vec::new(),
-                next_steps: Vec::new(),
-                exit_code: 0,
-                verification_status: VerificationStatus::Passed,
-                touched_files: vec!["src/parser.rs".to_string()],
-                plan_refs: vec!["step-1".to_string()],
-            },
-            raw_fallback_text: None,
+    fn sample_hints() -> WorkflowHints {
+        WorkflowHints {
+            stage: Some("review".to_string()),
+            run_mode: RunMode::Sync,
+            ..WorkflowHints::default()
         }
+    }
+
+    fn sample_outcome() -> RunOutcome {
+        RunOutcome::Succeeded(SuccessOutcome {
+            summary: "ok".to_string(),
+            key_findings: vec!["a".to_string()],
+            artifacts: Vec::new(),
+            open_questions: Vec::new(),
+            next_steps: Vec::new(),
+            verification: VerificationStatus::Passed,
+            usage: UsageStats::ZERO,
+            parse_status: SummaryParseStatus::Validated,
+            touched_files: vec!["src/parser.rs".to_string()],
+            plan_refs: vec!["step-1".to_string()],
+        })
     }
 
     #[test]
     fn review_stage_emits_review_evidence_artifact() {
         let spec = sample_spec();
-        let request = sample_request();
-        let summary = sample_summary();
+        let task_spec = sample_task_spec();
+        let hints = sample_hints();
+        let outcome = sample_outcome();
         let mut index: Vec<ArtifactOutput> = Vec::new();
         let mut artifacts = HashMap::new();
 
-        apply_review_evidence_hook(&spec, &request, &summary, &mut index, &mut artifacts);
+        apply_review_evidence_hook(
+            &spec,
+            &task_spec,
+            &hints,
+            &outcome,
+            &mut index,
+            &mut artifacts,
+        );
 
         assert!(index.iter().any(|item| item.path == "review/evidence.json"));
         assert!(artifacts

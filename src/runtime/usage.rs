@@ -32,11 +32,8 @@ const CODEX_TOTAL_TOKEN_KEYS: &[&str] = &["tokens used", "tokens_used"];
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NativeUsage {
-    #[serde(default)]
     pub input_tokens: Option<u64>,
-    #[serde(default)]
     pub output_tokens: Option<u64>,
-    #[serde(default)]
     pub total_tokens: Option<u64>,
 }
 

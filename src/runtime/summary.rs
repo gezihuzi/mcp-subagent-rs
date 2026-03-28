@@ -3,11 +3,11 @@ use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+
+use crate::runtime::outcome::{SuccessOutcome, UsageStats};
 
 pub const SUMMARY_START_SENTINEL: &str = "<<<MCP_SUBAGENT_SUMMARY_JSON_START>>>";
 pub const SUMMARY_END_SENTINEL: &str = "<<<MCP_SUBAGENT_SUMMARY_JSON_END>>>";
-pub const SUMMARY_CONTRACT_VERSION: &str = "mcp-subagent.summary.v2";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -33,7 +33,6 @@ pub struct ArtifactRef {
     pub path: PathBuf,
     pub kind: ArtifactKind,
     pub description: String,
-    #[serde(default)]
     pub media_type: Option<String>,
 }
 
@@ -54,16 +53,14 @@ impl std::fmt::Display for VerificationStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct StructuredSummary {
+pub struct ProviderSummary {
     pub summary: String,
     pub key_findings: Vec<String>,
     pub artifacts: Vec<ArtifactRef>,
     pub open_questions: Vec<String>,
     pub next_steps: Vec<String>,
-    pub exit_code: i32,
-    pub verification_status: VerificationStatus,
+    pub verification: VerificationStatus,
     pub touched_files: Vec<String>,
-    #[serde(default)]
     pub plan_refs: Vec<String>,
 }
 
@@ -80,17 +77,95 @@ impl std::fmt::Display for SummaryParseStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct SummaryEnvelope {
-    pub contract_version: String,
-    pub parse_status: SummaryParseStatus,
-    pub summary: StructuredSummary,
-    #[serde(default)]
-    pub raw_fallback_text: Option<String>,
+pub struct ParsedSummary {
+    parse_status: SummaryParseStatus,
+    summary: ProviderSummary,
+    raw_fallback_text: Option<String>,
 }
 
-pub fn parse_summary_envelope(raw_stdout: &str, raw_stderr: &str) -> SummaryEnvelope {
+impl ProviderSummary {
+    pub fn into_success_outcome(
+        self,
+        parse_status: SummaryParseStatus,
+        usage: UsageStats,
+    ) -> SuccessOutcome {
+        SuccessOutcome {
+            summary: self.summary,
+            key_findings: self.key_findings,
+            touched_files: self.touched_files,
+            next_steps: self.next_steps,
+            open_questions: self.open_questions,
+            artifacts: self.artifacts,
+            verification: self.verification,
+            usage,
+            parse_status,
+            plan_refs: self.plan_refs,
+        }
+    }
+
+    pub fn to_success_outcome(
+        &self,
+        parse_status: SummaryParseStatus,
+        usage: UsageStats,
+    ) -> SuccessOutcome {
+        self.clone().into_success_outcome(parse_status, usage)
+    }
+}
+
+impl ParsedSummary {
+    pub fn parse_status(&self) -> &SummaryParseStatus {
+        &self.parse_status
+    }
+
+    pub fn summary_text(&self) -> &str {
+        &self.summary.summary
+    }
+
+    pub fn key_findings(&self) -> &[String] {
+        &self.summary.key_findings
+    }
+
+    pub fn artifacts(&self) -> &[ArtifactRef] {
+        &self.summary.artifacts
+    }
+
+    pub fn open_questions(&self) -> &[String] {
+        &self.summary.open_questions
+    }
+
+    pub fn next_steps(&self) -> &[String] {
+        &self.summary.next_steps
+    }
+
+    pub fn verification_status(&self) -> &VerificationStatus {
+        &self.summary.verification
+    }
+
+    pub fn touched_files(&self) -> &[String] {
+        &self.summary.touched_files
+    }
+
+    pub fn plan_refs(&self) -> &[String] {
+        &self.summary.plan_refs
+    }
+
+    pub fn raw_fallback_text(&self) -> Option<&str> {
+        self.raw_fallback_text.as_deref()
+    }
+
+    pub fn into_success_outcome(self, usage: UsageStats) -> SuccessOutcome {
+        self.summary.into_success_outcome(self.parse_status, usage)
+    }
+
+    pub fn to_success_outcome(&self, usage: UsageStats) -> SuccessOutcome {
+        self.summary
+            .to_success_outcome(self.parse_status.clone(), usage)
+    }
+}
+
+pub fn parse_summary_contract(raw_stdout: &str, raw_stderr: &str) -> ParsedSummary {
     let mut invalid_candidate = None;
     if let Some(parsed) = parse_from_raw(raw_stdout, "stdout", &mut invalid_candidate) {
         return parsed;
@@ -98,11 +173,17 @@ pub fn parse_summary_envelope(raw_stdout: &str, raw_stderr: &str) -> SummaryEnve
     if let Some(parsed) = parse_from_raw(raw_stderr, "stderr", &mut invalid_candidate) {
         return parsed;
     }
+    if let Some(parsed) = parse_bare_provider_summary(raw_stdout) {
+        return parsed;
+    }
+    if let Some(parsed) = parse_bare_provider_summary(raw_stderr) {
+        return parsed;
+    }
     if let Some((reason, raw_fallback_text)) = invalid_candidate {
-        return invalid_envelope(&reason, raw_fallback_text);
+        return invalid_summary(&reason, raw_fallback_text);
     }
 
-    degraded_envelope(
+    degraded_summary(
         "summary sentinels not found in stdout/stderr",
         fallback_raw_text(raw_stdout, raw_stderr),
     )
@@ -112,19 +193,23 @@ fn parse_from_raw(
     raw: &str,
     source: &str,
     invalid_candidate: &mut Option<(String, String)>,
-) -> Option<SummaryEnvelope> {
+) -> Option<ParsedSummary> {
     let mut seen = HashSet::new();
-    for json_block in extract_json_blocks(raw)
-        .into_iter()
-        .chain(extract_json_objects(raw))
-    {
+    for json_block in extract_json_blocks(raw) {
         let trimmed = json_block.trim();
         if trimmed.is_empty() || !seen.insert(trimmed) {
             continue;
         }
+        if is_placeholder_json_candidate(trimmed) {
+            continue;
+        }
 
         if let Some(parsed) = parse_json_candidate(trimmed) {
-            return Some(parsed);
+            return Some(ParsedSummary {
+                parse_status: SummaryParseStatus::Validated,
+                summary: parsed,
+                raw_fallback_text: None,
+            });
         }
 
         *invalid_candidate = Some((
@@ -136,55 +221,38 @@ fn parse_from_raw(
     None
 }
 
-fn parse_json_candidate(json_block: &str) -> Option<SummaryEnvelope> {
-    if let Ok(parsed_envelope) = serde_json::from_str::<SummaryEnvelope>(json_block) {
-        return Some(parsed_envelope);
+fn parse_json_candidate(json_block: &str) -> Option<ProviderSummary> {
+    serde_json::from_str::<ProviderSummary>(json_block).ok()
+}
+
+fn parse_bare_provider_summary(raw: &str) -> Option<ParsedSummary> {
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() && !is_placeholder_json_candidate(trimmed) {
+        if let Some(parsed) = parse_json_candidate(trimmed) {
+            return Some(ParsedSummary {
+                parse_status: SummaryParseStatus::Degraded,
+                summary: parsed,
+                raw_fallback_text: None,
+            });
+        }
     }
 
-    if let Ok(parsed_summary) = serde_json::from_str::<StructuredSummary>(json_block) {
-        return Some(SummaryEnvelope {
-            contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
-            parse_status: SummaryParseStatus::Validated,
-            summary: parsed_summary,
-            raw_fallback_text: None,
-        });
-    }
-
-    if let Ok(payload) = serde_json::from_str::<Value>(json_block) {
-        if let Some(wrapped) = wrap_json_payload(payload) {
-            return Some(wrapped);
+    let mut seen = HashSet::new();
+    for json_block in extract_json_object_candidates(raw) {
+        let trimmed = json_block.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed) || is_placeholder_json_candidate(trimmed) {
+            continue;
+        }
+        if let Some(parsed) = parse_json_candidate(trimmed) {
+            return Some(ParsedSummary {
+                parse_status: SummaryParseStatus::Degraded,
+                summary: parsed,
+                raw_fallback_text: None,
+            });
         }
     }
 
     None
-}
-
-fn wrap_json_payload(payload: Value) -> Option<SummaryEnvelope> {
-    let Value::Object(map) = &payload else {
-        return None;
-    };
-    if map.is_empty() {
-        return None;
-    }
-
-    let payload_text = serde_json::to_string(&payload).ok()?;
-    Some(SummaryEnvelope {
-        contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
-        parse_status: SummaryParseStatus::Validated,
-        summary: StructuredSummary {
-            summary: "Provider returned JSON payload; runtime wrapped it into SummaryEnvelope."
-                .to_string(),
-            key_findings: vec![payload_text],
-            artifacts: Vec::new(),
-            open_questions: Vec::new(),
-            next_steps: Vec::new(),
-            exit_code: 0,
-            verification_status: VerificationStatus::Passed,
-            touched_files: Vec::new(),
-            plan_refs: Vec::new(),
-        },
-        raw_fallback_text: None,
-    })
 }
 
 fn extract_json_blocks(raw: &str) -> Vec<&str> {
@@ -202,10 +270,22 @@ fn extract_json_blocks(raw: &str) -> Vec<&str> {
     blocks
 }
 
-fn extract_json_objects(raw: &str) -> Vec<&str> {
-    let mut objects = Vec::new();
+fn extract_json_object_candidates(raw: &str) -> Vec<&str> {
+    let mut blocks = Vec::new();
+    for (start, ch) in raw.char_indices() {
+        if ch != '{' {
+            continue;
+        }
+        let Some(len) = find_json_object_length(&raw[start..]) else {
+            continue;
+        };
+        blocks.push(&raw[start..start + len]);
+    }
+    blocks
+}
+
+fn find_json_object_length(raw: &str) -> Option<usize> {
     let mut depth = 0usize;
-    let mut start_idx = None;
     let mut in_string = false;
     let mut escaped = false;
 
@@ -225,51 +305,42 @@ fn extract_json_objects(raw: &str) -> Vec<&str> {
 
         match ch {
             '"' => in_string = true,
-            '{' => {
-                if depth == 0 {
-                    start_idx = Some(idx);
-                }
-                depth += 1;
-            }
+            '{' => depth += 1,
             '}' => {
+                depth = depth.checked_sub(1)?;
                 if depth == 0 {
-                    continue;
-                }
-                depth -= 1;
-                if depth == 0 {
-                    if let Some(start) = start_idx.take() {
-                        let end = idx + ch.len_utf8();
-                        objects.push(raw[start..end].trim());
-                    }
+                    return Some(idx + ch.len_utf8());
                 }
             }
             _ => {}
         }
     }
 
-    objects
+    None
 }
 
-fn degraded_envelope(reason: &str, raw_fallback_text: Option<String>) -> SummaryEnvelope {
-    SummaryEnvelope {
-        contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
+fn is_placeholder_json_candidate(candidate: &str) -> bool {
+    candidate.trim() == "{...valid json...}"
+}
+
+fn degraded_summary(reason: &str, raw_fallback_text: Option<String>) -> ParsedSummary {
+    ParsedSummary {
         parse_status: SummaryParseStatus::Degraded,
         summary: fallback_summary(reason),
         raw_fallback_text,
     }
 }
 
-fn invalid_envelope(reason: &str, raw_fallback_text: String) -> SummaryEnvelope {
-    SummaryEnvelope {
-        contract_version: SUMMARY_CONTRACT_VERSION.to_string(),
+fn invalid_summary(reason: &str, raw_fallback_text: String) -> ParsedSummary {
+    ParsedSummary {
         parse_status: SummaryParseStatus::Invalid,
         summary: fallback_summary(reason),
         raw_fallback_text: Some(raw_fallback_text),
     }
 }
 
-fn fallback_summary(reason: &str) -> StructuredSummary {
-    StructuredSummary {
+fn fallback_summary(reason: &str) -> ProviderSummary {
+    ProviderSummary {
         summary: "Structured summary parsing failed; generated degraded summary.".to_string(),
         key_findings: vec![reason.to_string()],
         artifacts: Vec::new(),
@@ -279,8 +350,7 @@ fn fallback_summary(reason: &str) -> StructuredSummary {
         next_steps: vec![
             "Fix prompt contract or runner bridge to emit valid summary JSON.".to_string(),
         ],
-        exit_code: 1,
-        verification_status: VerificationStatus::NotRun,
+        verification: VerificationStatus::NotRun,
         touched_files: Vec::new(),
         plan_refs: Vec::new(),
     }
@@ -299,75 +369,38 @@ fn fallback_raw_text(stdout: &str, stderr: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_summary_envelope, SummaryEnvelope, SummaryParseStatus, VerificationStatus,
+        parse_summary_contract, ParsedSummary, SummaryParseStatus, VerificationStatus,
         SUMMARY_END_SENTINEL, SUMMARY_START_SENTINEL,
     };
+    use crate::runtime::outcome::UsageStats;
 
-    fn legacy_summary_json() -> String {
+    fn summary_json() -> String {
         r#"{
   "summary": "ok",
   "key_findings": ["a"],
   "artifacts": [],
   "open_questions": [],
   "next_steps": ["next"],
-  "exit_code": 0,
-  "verification_status": "Passed",
+  "verification": "Passed",
   "touched_files": ["src/main.rs"],
   "plan_refs": ["step-1"]
 }"#
         .to_string()
     }
 
-    fn envelope_json() -> String {
-        r#"{
-  "contract_version": "mcp-subagent.summary.v2",
-  "parse_status": "Validated",
-  "summary": {
-    "summary": "ok",
-    "key_findings": ["a"],
-    "artifacts": [],
-    "open_questions": [],
-    "next_steps": ["next"],
-    "exit_code": 0,
-    "verification_status": "Passed",
-    "touched_files": ["src/main.rs"],
-    "plan_refs": ["step-1"]
-  },
-  "raw_fallback_text": null
-}"#
-        .to_string()
-    }
-
     #[test]
-    fn parses_valid_legacy_summary_from_stdout() {
+    fn parses_valid_summary_from_stdout() {
         let stdout = format!(
             "prefix\n{start}\n{json}\n{end}\nsuffix",
             start = SUMMARY_START_SENTINEL,
-            json = legacy_summary_json(),
+            json = summary_json(),
             end = SUMMARY_END_SENTINEL
         );
-        let parsed = parse_summary_envelope(&stdout, "");
+        let parsed = parse_summary_contract(&stdout, "");
 
-        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
-        assert_eq!(parsed.summary.summary, "ok");
-        assert_eq!(parsed.summary.exit_code, 0);
-        assert_eq!(
-            parsed.summary.verification_status,
-            VerificationStatus::Passed
-        );
-    }
-
-    #[test]
-    fn parses_valid_envelope_from_stdout() {
-        let stdout = format!(
-            "{start}\n{json}\n{end}",
-            start = SUMMARY_START_SENTINEL,
-            json = envelope_json(),
-            end = SUMMARY_END_SENTINEL
-        );
-        let parsed = parse_summary_envelope(&stdout, "");
-        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
-        assert_eq!(parsed.summary.summary, "ok");
+        assert_eq!(parsed.parse_status(), &SummaryParseStatus::Validated);
+        assert_eq!(parsed.summary_text(), "ok");
+        assert_eq!(parsed.verification_status(), &VerificationStatus::Passed);
     }
 
     #[test]
@@ -375,12 +408,12 @@ mod tests {
         let stderr = format!(
             "{start}\n{json}\n{end}",
             start = SUMMARY_START_SENTINEL,
-            json = legacy_summary_json(),
+            json = summary_json(),
             end = SUMMARY_END_SENTINEL
         );
-        let parsed = parse_summary_envelope("no summary", &stderr);
-        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
-        assert_eq!(parsed.summary.summary, "ok");
+        let parsed = parse_summary_contract("no summary", &stderr);
+        assert_eq!(parsed.parse_status(), &SummaryParseStatus::Validated);
+        assert_eq!(parsed.summary_text(), "ok");
     }
 
     #[test]
@@ -390,33 +423,30 @@ mod tests {
             start = SUMMARY_START_SENTINEL,
             end = SUMMARY_END_SENTINEL
         );
-        let parsed: SummaryEnvelope = parse_summary_envelope(&stdout, "");
-        assert_eq!(parsed.parse_status, SummaryParseStatus::Invalid);
-        assert!(parsed.raw_fallback_text.is_some());
-        assert_eq!(
-            parsed.summary.verification_status,
-            VerificationStatus::NotRun
-        );
+        let parsed: ParsedSummary = parse_summary_contract(&stdout, "");
+        assert_eq!(parsed.parse_status(), &SummaryParseStatus::Invalid);
+        assert!(parsed.raw_fallback_text().is_some());
+        assert_eq!(parsed.verification_status(), &VerificationStatus::NotRun);
     }
 
     #[test]
-    fn parses_valid_json_without_sentinels() {
-        let parsed = parse_summary_envelope(&legacy_summary_json(), "");
-        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
-        assert_eq!(parsed.summary.summary, "ok");
+    fn marks_degraded_when_summary_json_without_sentinels() {
+        let parsed = parse_summary_contract(&summary_json(), "");
+        assert_eq!(parsed.parse_status(), &SummaryParseStatus::Degraded);
+        assert_eq!(parsed.summary_text(), "ok");
     }
 
     #[test]
-    fn parses_late_valid_json_after_placeholder_sentinel_block() {
+    fn parses_late_raw_json_after_placeholder_sentinel() {
         let stdout = format!(
-            "OUTPUT SENTINELS\n{start}\n{{...valid json...}}\n{end}\nrunner logs\n{envelope}",
+            "OUTPUT SENTINELS\n{start}\n{{...valid json...}}\n{end}\nrunner logs\n{summary}",
             start = SUMMARY_START_SENTINEL,
             end = SUMMARY_END_SENTINEL,
-            envelope = envelope_json()
+            summary = summary_json()
         );
-        let parsed = parse_summary_envelope(&stdout, "");
-        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
-        assert_eq!(parsed.summary.summary, "ok");
+        let parsed = parse_summary_contract(&stdout, "");
+        assert_eq!(parsed.parse_status(), &SummaryParseStatus::Degraded);
+        assert_eq!(parsed.summary_text(), "ok");
     }
 
     #[test]
@@ -425,38 +455,76 @@ mod tests {
             "{start}\n{{...valid json...}}\n{end}\n{start}\n{json}\n{end}",
             start = SUMMARY_START_SENTINEL,
             end = SUMMARY_END_SENTINEL,
-            json = legacy_summary_json()
+            json = summary_json()
         );
-        let parsed = parse_summary_envelope(&stdout, "");
-        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
-        assert_eq!(parsed.summary.summary, "ok");
+        let parsed = parse_summary_contract(&stdout, "");
+        assert_eq!(parsed.parse_status(), &SummaryParseStatus::Validated);
+        assert_eq!(parsed.summary_text(), "ok");
     }
 
     #[test]
-    fn wraps_json_payload_inside_sentinel_as_validated() {
+    fn marks_invalid_when_json_payload_inside_sentinel_is_not_summary_contract() {
         let stdout = format!(
             "{start}\n{{\"name\":\"Octoclip\",\"url\":\"https://octoclip.app\"}}\n{end}",
             start = SUMMARY_START_SENTINEL,
             end = SUMMARY_END_SENTINEL
         );
-        let parsed = parse_summary_envelope(&stdout, "");
-        assert_eq!(parsed.parse_status, SummaryParseStatus::Validated);
-        assert_eq!(parsed.summary.exit_code, 0);
-        assert_eq!(
-            parsed.summary.verification_status,
-            VerificationStatus::Passed
+        let parsed = parse_summary_contract(&stdout, "");
+        assert_eq!(parsed.parse_status(), &SummaryParseStatus::Invalid);
+        assert!(parsed.raw_fallback_text().is_some());
+        assert_eq!(parsed.verification_status(), &VerificationStatus::NotRun);
+    }
+
+    #[test]
+    fn ignores_placeholder_sentinel_in_stderr_when_stdout_is_plain_text() {
+        let stderr = format!(
+            "OUTPUT SENTINELS\n{start}\n{{...valid json...}}\n{end}",
+            start = SUMMARY_START_SENTINEL,
+            end = SUMMARY_END_SENTINEL
         );
-        assert_eq!(parsed.summary.key_findings.len(), 1);
-        assert!(parsed.summary.key_findings[0].contains("\"name\":\"Octoclip\""));
+        let parsed = parse_summary_contract("plain text", &stderr);
+        assert_eq!(parsed.parse_status(), &SummaryParseStatus::Degraded);
+        assert!(parsed.raw_fallback_text().is_some());
+    }
+
+    #[test]
+    fn parses_first_valid_provider_summary_from_back_to_back_json_objects() {
+        let stdout = format!("{}\n{}", summary_json(), summary_json());
+        let parsed = parse_summary_contract(&stdout, "");
+        assert_eq!(parsed.parse_status(), &SummaryParseStatus::Degraded);
+        assert_eq!(parsed.summary_text(), "ok");
+    }
+
+    #[test]
+    fn converts_parsed_summary_to_success_outcome() {
+        let stdout = format!(
+            "{start}\n{json}\n{end}",
+            start = SUMMARY_START_SENTINEL,
+            json = summary_json(),
+            end = SUMMARY_END_SENTINEL
+        );
+        let parsed = parse_summary_contract(&stdout, "");
+        let usage = UsageStats {
+            duration_ms: 42,
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+            total_tokens: Some(30),
+            provider_exit_code: Some(0),
+        };
+
+        let success = parsed.to_success_outcome(usage);
+        assert_eq!(success.summary, "ok");
+        assert_eq!(success.parse_status, SummaryParseStatus::Validated);
+        assert_eq!(success.verification, VerificationStatus::Passed);
+        assert_eq!(success.touched_files, vec!["src/main.rs".to_string()]);
+        assert_eq!(success.usage.duration_ms, 42);
+        assert_eq!(success.usage.provider_exit_code, Some(0));
     }
 
     #[test]
     fn marks_degraded_when_sentinel_missing() {
-        let parsed = parse_summary_envelope("plain text", "");
-        assert_eq!(parsed.parse_status, SummaryParseStatus::Degraded);
-        assert_eq!(
-            parsed.summary.verification_status,
-            VerificationStatus::NotRun
-        );
+        let parsed = parse_summary_contract("plain text", "");
+        assert_eq!(parsed.parse_status(), &SummaryParseStatus::Degraded);
+        assert_eq!(parsed.verification_status(), &VerificationStatus::NotRun);
     }
 }

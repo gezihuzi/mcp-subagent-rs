@@ -13,32 +13,33 @@ pub enum WorkflowStageKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowGatePolicy {
-    #[serde(default)]
+    #[serde(default = "default_require_plan_if_touched_files_ge")]
     pub require_plan_if_touched_files_ge: Option<u32>,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub require_plan_if_cross_module: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub require_plan_if_parallel_agents: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub require_plan_if_new_interface: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub require_plan_if_migration: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub require_plan_if_human_approval_point: bool,
-    #[serde(default)]
+    #[serde(default = "default_require_plan_if_estimated_runtime_minutes_ge")]
     pub require_plan_if_estimated_runtime_minutes_ge: Option<u32>,
 }
 
 impl Default for WorkflowGatePolicy {
     fn default() -> Self {
         Self {
-            require_plan_if_touched_files_ge: Some(5),
+            require_plan_if_touched_files_ge: default_require_plan_if_touched_files_ge(),
             require_plan_if_cross_module: true,
             require_plan_if_parallel_agents: true,
             require_plan_if_new_interface: true,
             require_plan_if_migration: true,
             require_plan_if_human_approval_point: true,
-            require_plan_if_estimated_runtime_minutes_ge: Some(15),
+            require_plan_if_estimated_runtime_minutes_ge:
+                default_require_plan_if_estimated_runtime_minutes_ge(),
         }
     }
 }
@@ -66,7 +67,7 @@ impl Default for ActivePlanPolicy {
 pub struct ReviewPolicy {
     #[serde(default = "default_true")]
     pub require_correctness_review: bool,
-    #[serde(default)]
+    #[serde(default = "default_false")]
     pub require_style_review: bool,
     #[serde(default = "default_true")]
     pub allow_same_provider_dual_review: bool,
@@ -88,24 +89,24 @@ impl Default for ReviewPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeCapturePolicy {
-    #[serde(default)]
+    #[serde(default = "default_trigger_if_touched_files_gt")]
     pub trigger_if_touched_files_gt: Option<u32>,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub trigger_if_new_config: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub trigger_if_behavior_change: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub trigger_if_non_obvious_bugfix: bool,
     #[serde(default = "default_true")]
     pub write_decision_note: bool,
-    #[serde(default)]
+    #[serde(default = "default_false")]
     pub update_project_memory: bool,
 }
 
 impl Default for KnowledgeCapturePolicy {
     fn default() -> Self {
         Self {
-            trigger_if_touched_files_gt: Some(3),
+            trigger_if_touched_files_gt: default_trigger_if_touched_files_gt(),
             trigger_if_new_config: default_true(),
             trigger_if_behavior_change: default_true(),
             trigger_if_non_obvious_bugfix: default_true(),
@@ -144,21 +145,21 @@ impl Default for ArchivePolicy {
 pub struct WorkflowSpec {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default)]
+    #[serde(default = "default_workflow_gate_policy")]
     pub require_plan_when: WorkflowGatePolicy,
     #[serde(default = "default_workflow_stages")]
     pub stages: Vec<WorkflowStageKind>,
-    #[serde(default)]
+    #[serde(default = "default_active_plan_policy")]
     pub active_plan: ActivePlanPolicy,
-    #[serde(default)]
+    #[serde(default = "default_review_policy")]
     pub review_policy: ReviewPolicy,
-    #[serde(default)]
+    #[serde(default = "default_knowledge_capture_policy")]
     pub knowledge_capture: KnowledgeCapturePolicy,
-    #[serde(default)]
+    #[serde(default = "default_archive_policy")]
     pub archive_policy: ArchivePolicy,
     #[serde(default = "default_max_runtime_depth")]
     pub max_runtime_depth: u8,
-    #[serde(default)]
+    #[serde(default = "default_allowed_stages")]
     pub allowed_stages: Vec<WorkflowStageKind>,
 }
 
@@ -182,8 +183,44 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
+fn default_require_plan_if_touched_files_ge() -> Option<u32> {
+    Some(5)
+}
+
+fn default_require_plan_if_estimated_runtime_minutes_ge() -> Option<u32> {
+    Some(15)
+}
+
+fn default_trigger_if_touched_files_gt() -> Option<u32> {
+    Some(3)
+}
+
 fn default_archive_dir() -> String {
     "docs/plans".to_string()
+}
+
+fn default_workflow_gate_policy() -> WorkflowGatePolicy {
+    WorkflowGatePolicy::default()
+}
+
+fn default_active_plan_policy() -> ActivePlanPolicy {
+    ActivePlanPolicy::default()
+}
+
+fn default_review_policy() -> ReviewPolicy {
+    ReviewPolicy::default()
+}
+
+fn default_knowledge_capture_policy() -> KnowledgeCapturePolicy {
+    KnowledgeCapturePolicy::default()
+}
+
+fn default_archive_policy() -> ArchivePolicy {
+    ArchivePolicy::default()
 }
 
 fn default_workflow_stages() -> Vec<WorkflowStageKind> {
@@ -198,4 +235,116 @@ fn default_workflow_stages() -> Vec<WorkflowStageKind> {
 
 fn default_max_runtime_depth() -> u8 {
     1
+}
+
+fn default_allowed_stages() -> Vec<WorkflowStageKind> {
+    Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KnowledgeCapturePolicy, WorkflowGatePolicy, WorkflowSpec};
+
+    #[test]
+    fn workflow_gate_policy_partial_deserialization_preserves_business_defaults() {
+        let policy: WorkflowGatePolicy = toml::from_str(
+            r#"
+require_plan_if_cross_module = false
+"#,
+        )
+        .expect("workflow gate policy should parse");
+
+        assert_eq!(policy.require_plan_if_touched_files_ge, Some(5));
+        assert!(!policy.require_plan_if_cross_module);
+        assert!(policy.require_plan_if_parallel_agents);
+        assert!(policy.require_plan_if_new_interface);
+        assert!(policy.require_plan_if_migration);
+        assert!(policy.require_plan_if_human_approval_point);
+        assert_eq!(
+            policy.require_plan_if_estimated_runtime_minutes_ge,
+            Some(15)
+        );
+    }
+
+    #[test]
+    fn knowledge_capture_partial_deserialization_preserves_business_defaults() {
+        let policy: KnowledgeCapturePolicy = toml::from_str(
+            r#"
+update_project_memory = false
+"#,
+        )
+        .expect("knowledge capture policy should parse");
+
+        assert_eq!(policy.trigger_if_touched_files_gt, Some(3));
+        assert!(policy.trigger_if_new_config);
+        assert!(policy.trigger_if_behavior_change);
+        assert!(policy.trigger_if_non_obvious_bugfix);
+        assert!(policy.write_decision_note);
+        assert!(!policy.update_project_memory);
+    }
+
+    #[test]
+    fn workflow_spec_partial_nested_tables_inherit_subpolicy_defaults() {
+        let workflow: WorkflowSpec = toml::from_str(
+            r#"
+enabled = true
+
+[require_plan_when]
+require_plan_if_parallel_agents = false
+
+[knowledge_capture]
+update_project_memory = true
+"#,
+        )
+        .expect("workflow spec should parse");
+
+        assert_eq!(
+            workflow.require_plan_when.require_plan_if_touched_files_ge,
+            Some(5)
+        );
+        assert!(workflow.require_plan_when.require_plan_if_cross_module);
+        assert!(!workflow.require_plan_when.require_plan_if_parallel_agents);
+        assert_eq!(
+            workflow
+                .require_plan_when
+                .require_plan_if_estimated_runtime_minutes_ge,
+            Some(15)
+        );
+        assert_eq!(
+            workflow.knowledge_capture.trigger_if_touched_files_gt,
+            Some(3)
+        );
+        assert!(workflow.knowledge_capture.trigger_if_new_config);
+        assert!(workflow.knowledge_capture.trigger_if_behavior_change);
+        assert!(workflow.knowledge_capture.trigger_if_non_obvious_bugfix);
+        assert!(workflow.knowledge_capture.write_decision_note);
+        assert!(workflow.knowledge_capture.update_project_memory);
+    }
+
+    #[test]
+    fn workflow_spec_direct_deserialization_preserves_remaining_defaults() {
+        let workflow: WorkflowSpec = toml::from_str("").expect("workflow spec should parse");
+
+        assert!(workflow.enabled);
+        assert_eq!(
+            workflow.require_plan_when.require_plan_if_touched_files_ge,
+            Some(5)
+        );
+        assert!(workflow.active_plan.enabled);
+        assert!(workflow.active_plan.prefer_root_plan);
+        assert!(workflow.review_policy.require_correctness_review);
+        assert!(!workflow.review_policy.require_style_review);
+        assert!(workflow.review_policy.allow_same_provider_dual_review);
+        assert!(workflow.review_policy.prefer_cross_provider_review);
+        assert_eq!(
+            workflow.knowledge_capture.trigger_if_touched_files_gt,
+            Some(3)
+        );
+        assert!(workflow.knowledge_capture.write_decision_note);
+        assert!(!workflow.knowledge_capture.update_project_memory);
+        assert!(workflow.archive_policy.enabled);
+        assert_eq!(workflow.archive_policy.archive_dir, "docs/plans");
+        assert_eq!(workflow.max_runtime_depth, 1);
+        assert!(workflow.allowed_stages.is_empty());
+    }
 }

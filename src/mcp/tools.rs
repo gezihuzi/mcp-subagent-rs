@@ -1,9 +1,16 @@
-use std::{collections::HashMap, fs, time::Duration};
+use std::{
+    collections::HashMap,
+    fs,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     tool, tool_router, ErrorData, Json,
 };
+use serde::Deserialize;
+use serde_json::json;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -15,27 +22,31 @@ use crate::{
             sanitize_relative_artifact_path,
         },
         dto::{
-            AgentListing, AgentStatusOutput, CancelAgentOutput, GetRunResultInput,
-            GetRunResultOutput, HandleInput, ListAgentsOutput, ListRunsInput, ListRunsOutput,
-            ReadAgentArtifactInput, ReadAgentArtifactOutput, ReadRunLogsInput, ReadRunLogsOutput,
-            RunAgentInput, RunAgentOutput, RunListingOutput, RunUsageOutput, RuntimePolicySummary,
-            SpawnAgentOutput, WatchRunInput, WatchRunOutput,
+            AgentListing, CancelAgentOutput, GetAgentStatsInput, GetAgentStatsOutput,
+            GetRunResultInput, HandleInput, ListAgentsOutput, ListRunsInput, ListRunsOutput,
+            OutcomeView, ReadAgentArtifactInput, ReadAgentArtifactOutput, ReadRunLogsInput,
+            ReadRunLogsOutput, RunAgentInput, RunEventOutput, RunUsageOutput, RunView,
+            RuntimePolicySummary, WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput,
+            WatchRunOutput,
         },
-        helpers::{
-            build_capability_notes, cancelled_summary, failed_summary, format_time,
-            map_summary_output,
+        helpers::{build_capability_notes, format_time},
+        persistence::{
+            append_run_event, load_run_record_from_disk, persist_run_record, RuntimeEventInput,
         },
-        persistence::{load_run_record_from_disk, persist_run_record},
         review::apply_review_evidence_hook,
-        server::{acquire_serialize_locks_from_state, McpSubagentServer},
+        server::{
+            acquire_serialize_locks_from_state, provider_unavailable_message, McpSubagentServer,
+        },
         service::run_dispatch,
         state::{
             append_status_if_terminal, apply_execution_policy_outcome, build_probe_result_snapshot,
-            build_run_request_snapshot, build_run_spec_snapshot, RetryClassificationRecord,
-            RunRecord,
+            build_run_spec_snapshot, RunRecord,
         },
     },
-    runtime::dispatcher::{RetryClassification, RunMetadata, RunStatus},
+    runtime::{
+        dispatcher::RunPhase,
+        outcome::{FailureOutcome, RetryClassification, RetryInfo, RunOutcome, UsageStats},
+    },
     types::RunMode,
 };
 
@@ -43,12 +54,12 @@ pub(crate) fn build_tool_router() -> ToolRouter<McpSubagentServer> {
     McpSubagentServer::tool_router()
 }
 
-const RUN_RESULT_CONTRACT_VERSION: &str = "mcp-subagent.result.v1";
+const FIRST_OUTPUT_WARN_AFTER_SECS: u64 = 8;
 
-fn is_terminal_status(status: &RunStatus) -> bool {
+fn is_terminal_status(status: &RunPhase) -> bool {
     matches!(
         status,
-        RunStatus::Succeeded | RunStatus::Failed | RunStatus::TimedOut | RunStatus::Cancelled
+        RunPhase::Succeeded | RunPhase::Failed | RunPhase::TimedOut | RunPhase::Cancelled
     )
 }
 
@@ -69,8 +80,11 @@ fn estimate_tokens(bytes: Option<u64>) -> Option<u64> {
 }
 
 fn infer_provider_exit_code(record: &RunRecord) -> Option<i32> {
-    if let Some(summary) = &record.summary {
-        return Some(summary.summary.exit_code);
+    if let Some(outcome) = &record.outcome {
+        let usage = outcome.usage();
+        if usage.provider_exit_code.is_some() {
+            return usage.provider_exit_code;
+        }
     }
 
     let message = record.error_message.as_deref()?;
@@ -168,7 +182,7 @@ fn build_usage_output(record: &RunRecord) -> RunUsageOutput {
             .and_then(|spec| spec.model.clone()),
         provider_exit_code: infer_provider_exit_code(record),
         retries: record
-            .execution_policy
+            .policy
             .as_ref()
             .and_then(|policy| policy.retries_used)
             .unwrap_or(0),
@@ -181,23 +195,742 @@ fn build_usage_output(record: &RunRecord) -> RunUsageOutput {
     }
 }
 
-fn map_retry_classification(metadata: &RunMetadata) -> RetryClassificationRecord {
-    RetryClassificationRecord {
-        classification: format!("{}", metadata.retry_classification),
-        reason: metadata.retry_classification_reason.clone(),
+fn resolve_retry_classification(record: &RunRecord) -> (String, Option<String>) {
+    match record.outcome.as_ref() {
+        Some(RunOutcome::Failed(failure)) => (
+            format!("{}", failure.retry.classification),
+            failure.retry.reason.clone(),
+        ),
+        Some(RunOutcome::Succeeded(_))
+        | Some(RunOutcome::Cancelled { .. })
+        | Some(RunOutcome::TimedOut { .. })
+        | None => (format!("{}", RetryClassification::Unknown), None),
     }
 }
 
-fn resolve_retry_classification(record: &RunRecord) -> (String, Option<String>) {
-    match &record.retry_classification {
-        Some(value) => {
-            let normalized = match value.classification.as_str() {
-                "retryable" | "non_retryable" | "unknown" => value.classification.clone(),
-                _ => "unknown".to_string(),
-            };
-            (normalized, value.reason.clone())
+fn map_record_outcome(record: &RunRecord, usage: RunUsageOutput) -> Option<OutcomeView> {
+    match &record.outcome {
+        Some(RunOutcome::Succeeded(success)) => Some(OutcomeView::Succeeded {
+            summary: success.summary.clone(),
+            key_findings: success.key_findings.clone(),
+            touched_files: success.touched_files.clone(),
+            artifacts: record.artifact_index.clone(),
+            usage,
+        }),
+        Some(RunOutcome::Failed(_failure)) => {
+            let (retry_classification, _) = resolve_retry_classification(record);
+            Some(OutcomeView::Failed {
+                error: record
+                    .error_message
+                    .clone()
+                    .or_else(|| {
+                        record
+                            .outcome
+                            .as_ref()
+                            .and_then(|outcome| outcome.error_message().map(str::to_string))
+                    })
+                    .unwrap_or_else(|| "run failed".to_string()),
+                retry_classification,
+                partial_summary: record
+                    .outcome
+                    .as_ref()
+                    .and_then(|outcome| outcome.summary_text().map(str::to_string)),
+                usage,
+            })
         }
-        None => (format!("{}", RetryClassification::Unknown), None),
+        Some(RunOutcome::Cancelled { reason }) => Some(OutcomeView::Cancelled {
+            reason: reason.clone(),
+        }),
+        Some(RunOutcome::TimedOut { elapsed_secs }) => Some(OutcomeView::TimedOut {
+            elapsed_secs: *elapsed_secs,
+        }),
+        None => None,
+    }
+}
+
+fn build_run_view(
+    handle_id: String,
+    record: &RunRecord,
+    runtime: Option<&EventRuntimeSnapshot>,
+) -> RunView {
+    let usage = build_usage_output(record);
+    let phase = runtime
+        .and_then(|snapshot| snapshot.phase.clone())
+        .unwrap_or_else(|| format!("{}", record.status));
+    RunView {
+        handle_id,
+        agent_name: record
+            .spec_snapshot
+            .as_ref()
+            .map(|spec| spec.name.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
+        task_brief: record.task_spec.task_brief.clone(),
+        phase,
+        terminal: is_terminal_status(&record.status),
+        outcome: map_record_outcome(record, usage),
+        created_at: format_time(record.created_at),
+        updated_at: format_time(record.updated_at),
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StoredRunEventLine {
+    event: String,
+    timestamp: String,
+    detail: serde_json::Value,
+    seq: Option<u64>,
+    state: Option<String>,
+    phase: Option<String>,
+    source: Option<String>,
+    message: Option<String>,
+}
+
+impl StoredRunEventLine {
+    fn into_output(self) -> RunEventOutput {
+        RunEventOutput {
+            seq: self.seq,
+            event: self.event,
+            timestamp: self.timestamp,
+            state: self.state,
+            phase: self.phase,
+            source: self.source,
+            message: self.message,
+            detail: self.detail,
+        }
+    }
+}
+
+fn run_events_jsonl_path(state_dir: &std::path::Path, handle_id: &str) -> PathBuf {
+    run_root_dir(state_dir).join(handle_id).join("events.jsonl")
+}
+
+fn load_run_events(
+    state_dir: &std::path::Path,
+    handle_id: &str,
+) -> std::result::Result<Vec<RunEventOutput>, ErrorData> {
+    let path = run_events_jsonl_path(state_dir, handle_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = fs::read_to_string(&path).map_err(|err| {
+        ErrorData::internal_error(
+            format!("failed to read events file {}: {err}", path.display()),
+            None,
+        )
+    })?;
+
+    let mut events = Vec::new();
+    for (line_no, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parsed = serde_json::from_str::<StoredRunEventLine>(line).map_err(|err| {
+            ErrorData::internal_error(
+                format!(
+                    "failed to parse events file {} line {}: {err}",
+                    path.display(),
+                    line_no + 1
+                ),
+                None,
+            )
+        })?;
+        events.push(parsed.into_output());
+    }
+    Ok(events)
+}
+
+fn parse_rfc3339(value: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
+}
+
+fn event_time(event: &RunEventOutput) -> Option<OffsetDateTime> {
+    parse_rfc3339(&event.timestamp)
+}
+
+fn duration_between(start: Option<OffsetDateTime>, end: Option<OffsetDateTime>) -> Option<u64> {
+    let start = start?;
+    let end = end?;
+    if end < start {
+        return None;
+    }
+    Some((end - start).whole_milliseconds().max(0) as u64)
+}
+
+fn first_event_time(events: &[RunEventOutput], name: &str) -> Option<OffsetDateTime> {
+    events
+        .iter()
+        .find(|event| event.event == name)
+        .and_then(event_time)
+}
+
+fn first_event_timestamp(events: &[RunEventOutput], name: &str) -> Option<String> {
+    events
+        .iter()
+        .find(|event| event.event == name)
+        .map(|event| event.timestamp.clone())
+        .filter(|value| !value.is_empty())
+}
+
+fn latest_event(events: &[RunEventOutput]) -> Option<&RunEventOutput> {
+    events.last()
+}
+
+fn current_phase_age_ms(
+    events: &[RunEventOutput],
+    now: OffsetDateTime,
+) -> (Option<String>, Option<u64>) {
+    let mut current_phase: Option<String> = None;
+    let mut phase_started_at: Option<OffsetDateTime> = None;
+
+    for event in events {
+        let Some(ts) = event_time(event) else {
+            continue;
+        };
+        let Some(phase) = event.phase.clone().filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        match current_phase.as_deref() {
+            None => {
+                current_phase = Some(phase);
+                phase_started_at = Some(ts);
+            }
+            Some(existing) if existing == phase.as_str() => {}
+            Some(_) => {
+                current_phase = Some(phase);
+                phase_started_at = Some(ts);
+            }
+        }
+    }
+
+    let age = phase_started_at.and_then(|started| {
+        if now < started {
+            None
+        } else {
+            Some((now - started).whole_milliseconds().max(0) as u64)
+        }
+    });
+    (current_phase, age)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProviderWaitSignal {
+    event: &'static str,
+    phase: &'static str,
+    reason: &'static str,
+    message: &'static str,
+}
+
+fn detect_provider_wait_signal(text: &str) -> Option<ProviderWaitSignal> {
+    let lowered = text.to_ascii_lowercase();
+    if contains_any(
+        &lowered,
+        &[
+            "trusted folder",
+            "trust this folder",
+            "waiting_for_trust",
+            "waiting for trust",
+            "trust required",
+        ],
+    ) {
+        return Some(ProviderWaitSignal {
+            event: "provider.waiting_for_trust",
+            phase: "waiting_for_trust",
+            reason: "trust_required",
+            message: "provider is waiting for workspace trust",
+        });
+    }
+    if auth_is_wait_signal(&lowered) {
+        return Some(ProviderWaitSignal {
+            event: "provider.waiting_for_auth",
+            phase: "waiting_for_auth",
+            reason: "auth_required",
+            message: "provider is waiting for authentication",
+        });
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "tool approval",
+            "approval required",
+            "permission denied",
+            "consent required",
+            "approval mode",
+        ],
+    ) {
+        return Some(ProviderWaitSignal {
+            event: "provider.waiting_for_tool_approval",
+            phase: "waiting_for_tool_approval",
+            reason: "tool_approval_required",
+            message: "provider is waiting for tool approval",
+        });
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "skill conflict",
+            "skills conflict",
+            "skill discovery",
+            "find-skills",
+            ".agents/skills",
+            ".gemini/skills",
+        ],
+    ) {
+        return Some(ProviderWaitSignal {
+            event: "provider.waiting_for_skill_discovery",
+            phase: "waiting_for_skill_discovery",
+            reason: "skill_discovery",
+            message: "provider is scanning skills/discovery context",
+        });
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "workspace scan",
+            "scanning workspace",
+            "indexing workspace",
+            "workspace settings",
+        ],
+    ) {
+        return Some(ProviderWaitSignal {
+            event: "provider.waiting_for_workspace_scan",
+            phase: "waiting_for_workspace_scan",
+            reason: "workspace_scan",
+            message: "provider is scanning workspace context",
+        });
+    }
+    None
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn auth_is_ready_signal(lowered: &str) -> bool {
+    contains_any(
+        lowered,
+        &[
+            "loaded cached credentials",
+            "credentials loaded",
+            "already authenticated",
+            "auth restored",
+            "using filekeychain fallback for secure storage",
+        ],
+    )
+}
+
+fn auth_is_wait_signal(lowered: &str) -> bool {
+    if auth_is_ready_signal(lowered) {
+        return false;
+    }
+    contains_any(
+        lowered,
+        &[
+            "auth required",
+            "authentication required",
+            "authentication failed",
+            "unauthorized",
+            "login required",
+            "missing credentials",
+            "credentials required",
+            "api key missing",
+            "invalid api key",
+        ],
+    )
+}
+
+fn classify_block_reason_from_text(text: &str) -> Option<&'static str> {
+    let lowered = text.to_ascii_lowercase();
+    if contains_any(
+        &lowered,
+        &[
+            "trusted folder",
+            "trust this folder",
+            "waiting_for_trust",
+            "waiting for trust",
+            "trust required",
+        ],
+    ) {
+        return Some("trust_required");
+    }
+    if auth_is_wait_signal(&lowered) {
+        return Some("auth_required");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "tool approval",
+            "approval required",
+            "permission denied",
+            "consent required",
+            "approval mode",
+        ],
+    ) {
+        return Some("tool_approval_required");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "skill conflict",
+            "skills conflict",
+            "skill discovery",
+            "find-skills",
+            ".agents/skills",
+            ".gemini/skills",
+        ],
+    ) {
+        return Some("skill_discovery");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "workspace scan",
+            "scanning workspace",
+            "indexing workspace",
+            "workspace settings",
+        ],
+    ) {
+        return Some("workspace_scan");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "provider `",
+            "provider unavailable",
+            "missingbinary",
+            "binary `",
+            "not found in path",
+        ],
+    ) {
+        return Some("provider_unavailable");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "structured summary parse status is invalid",
+            "invalid summary json",
+            "sentinel",
+            "structured summary parsing failed",
+        ],
+    ) {
+        return Some("normalization_failed");
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "tls handshake eof",
+            "stream disconnected before completion",
+            "connection refused",
+            "network error",
+        ],
+    ) {
+        return Some("network_error");
+    }
+    None
+}
+
+fn classify_block_reason_from_events(
+    events: &[RunEventOutput],
+    stalled: bool,
+) -> Option<&'static str> {
+    for event in events.iter().rev() {
+        match event.event.as_str() {
+            "provider.waiting_for_trust" => return Some("trust_required"),
+            "provider.waiting_for_auth" => return Some("auth_required"),
+            "provider.waiting_for_tool_approval" => return Some("tool_approval_required"),
+            "provider.waiting_for_consent" => return Some("consent_required"),
+            "provider.waiting_for_skill_discovery" => return Some("skill_discovery"),
+            "provider.waiting_for_workspace_scan" => return Some("workspace_scan"),
+            "provider.first_output.warning" if stalled => return Some("provider_output_wait"),
+            "run.queued" if stalled => return Some("queueing"),
+            "workspace.prepare.started" if stalled => return Some("workspace_prepare"),
+            "provider.probe.started" if stalled => return Some("provider_probe"),
+            "provider.boot.started" if stalled => return Some("provider_boot"),
+            _ => {}
+        }
+        if let Some(message) = event.message.as_deref() {
+            if let Some(reason) = classify_block_reason_from_text(message) {
+                return Some(reason);
+            }
+        }
+        if !event.detail.is_null() {
+            let detail_text = event.detail.to_string();
+            if let Some(reason) = classify_block_reason_from_text(&detail_text) {
+                return Some(reason);
+            }
+        }
+    }
+    None
+}
+
+fn classify_block_reason(
+    status: &RunPhase,
+    phase: Option<&str>,
+    stalled: bool,
+    events: &[RunEventOutput],
+    error_message: Option<&str>,
+) -> Option<String> {
+    if matches!(status, RunPhase::Succeeded) {
+        return None;
+    }
+    if let Some(message) = error_message {
+        if let Some(reason) = classify_block_reason_from_text(message) {
+            return Some(reason.to_string());
+        }
+    }
+    if let Some(reason) = classify_block_reason_from_events(events, stalled) {
+        return Some(reason.to_string());
+    }
+    if !is_terminal_status(status) && stalled {
+        let fallback = match phase.unwrap_or_default() {
+            "queueing" => "queueing",
+            "workspace_prepare" => "workspace_prepare",
+            "provider_probe" => "provider_probe",
+            "provider_boot" => "provider_boot",
+            "running" => "provider_output_wait",
+            _ => "unknown_startup_wait",
+        };
+        return Some(fallback.to_string());
+    }
+    None
+}
+
+fn push_advice(advice: &mut Vec<String>, item: &str) {
+    if advice.iter().any(|existing| existing == item) {
+        return;
+    }
+    advice.push(item.to_string());
+}
+
+fn build_watch_advice(
+    status: &RunPhase,
+    phase: Option<&str>,
+    block_reason: Option<&str>,
+    phase_timeout_hit: bool,
+) -> Vec<String> {
+    let mut advice = Vec::new();
+    if phase_timeout_hit {
+        let phase_label = phase.unwrap_or("unknown");
+        push_advice(
+            &mut advice,
+            &format!(
+                "phase timeout hit in `{phase_label}`; inspect events/logs for this phase and consider cancel/retry"
+            ),
+        );
+    }
+    if let Some(reason) = block_reason {
+        match reason {
+            "trust_required" => push_advice(
+                &mut advice,
+                "provider is waiting for trust; mark the workspace as trusted and retry",
+            ),
+            "auth_required" => push_advice(
+                &mut advice,
+                "provider is waiting for authentication; refresh login/session credentials",
+            ),
+            "tool_approval_required" | "consent_required" => push_advice(
+                &mut advice,
+                "provider is waiting for approval; adjust approval mode or confirm prompt",
+            ),
+            "skill_discovery" => push_advice(
+                &mut advice,
+                "skill discovery is noisy; prefer isolated scratch workspace for simple research tasks",
+            ),
+            "workspace_scan" => push_advice(
+                &mut advice,
+                "workspace scan is slow; reduce include scope or switch to minimal delegation context",
+            ),
+            "provider_unavailable" => push_advice(
+                &mut advice,
+                "provider binary is unavailable; install it or fix PATH before retrying",
+            ),
+            "network_error" => push_advice(
+                &mut advice,
+                "network connectivity looks unstable; retry or switch transport/network",
+            ),
+            "normalization_failed" => push_advice(
+                &mut advice,
+                "normalization failed; consume native result/logs and tighten output contract if needed",
+            ),
+            "provider_output_wait" | "provider_boot" => push_advice(
+                &mut advice,
+                "provider has not produced output; check auth/trust/approval prompts and provider startup logs",
+            ),
+            _ => {}
+        }
+    }
+
+    match status {
+        RunPhase::Succeeded => push_advice(
+            &mut advice,
+            "run completed; use get_run_result/read_run_logs/read_agent_artifact for outputs",
+        ),
+        RunPhase::Failed => push_advice(
+            &mut advice,
+            "run failed; inspect summary.json and stderr.txt for root cause before retry",
+        ),
+        RunPhase::TimedOut => push_advice(
+            &mut advice,
+            "run timed out; increase timeout or narrow task/context scope",
+        ),
+        RunPhase::Cancelled => push_advice(
+            &mut advice,
+            "run was cancelled; restart with spawn/run if still needed",
+        ),
+        _ => {}
+    }
+    advice
+}
+
+fn wait_reason_from_event_name(name: &str) -> Option<&'static str> {
+    match name {
+        "provider.waiting_for_trust" => Some("trust_required"),
+        "provider.waiting_for_auth" => Some("auth_required"),
+        "provider.waiting_for_tool_approval" => Some("tool_approval_required"),
+        "provider.waiting_for_consent" => Some("consent_required"),
+        "provider.waiting_for_skill_discovery" => Some("skill_discovery"),
+        "provider.waiting_for_workspace_scan" => Some("workspace_scan"),
+        _ => None,
+    }
+}
+
+fn collect_wait_reasons(events: &[RunEventOutput]) -> (Vec<String>, Option<String>) {
+    let mut reasons = Vec::new();
+    for event in events {
+        let Some(reason) = wait_reason_from_event_name(&event.event) else {
+            continue;
+        };
+        if reasons.iter().any(|existing| existing == reason) {
+            continue;
+        }
+        reasons.push(reason.to_string());
+    }
+    let current = reasons.last().cloned();
+    (reasons, current)
+}
+
+fn has_event_named(events: &[RunEventOutput], name: &str) -> bool {
+    events.iter().any(|event| event.event == name)
+}
+
+#[derive(Debug, Clone, Default)]
+struct EventRuntimeSnapshot {
+    phase: Option<String>,
+    block_reason: Option<String>,
+}
+
+fn build_event_runtime_snapshot(
+    status: &RunPhase,
+    events: &[RunEventOutput],
+    now: OffsetDateTime,
+    error_message: Option<&str>,
+) -> EventRuntimeSnapshot {
+    let latest = latest_event(events);
+    let last_event_age_ms = latest.and_then(event_time).and_then(|ts| {
+        if now < ts {
+            None
+        } else {
+            Some((now - ts).whole_milliseconds().max(0) as u64)
+        }
+    });
+    let stalled = !is_terminal_status(status) && last_event_age_ms.is_some_and(|ms| ms >= 8_000);
+    let phase = latest.and_then(|event| event.phase.clone());
+    let block_reason =
+        classify_block_reason(status, phase.as_deref(), stalled, events, error_message);
+    EventRuntimeSnapshot {
+        phase,
+        block_reason,
+    }
+}
+
+fn build_agent_stats_output(
+    handle_id: &str,
+    record: &RunRecord,
+    events: &[RunEventOutput],
+    now: OffsetDateTime,
+) -> GetAgentStatsOutput {
+    let created_at = Some(record.created_at);
+    let accepted_at = first_event_time(events, "run.accepted").or(created_at);
+    let probe_started = first_event_time(events, "provider.probe.started");
+    let probe_completed = first_event_time(events, "provider.probe.completed");
+    let workspace_started = first_event_time(events, "workspace.prepare.started");
+    let provider_boot_started = first_event_time(events, "provider.boot.started");
+    let first_output = first_event_time(events, "provider.first_output");
+    let first_output_warning_at = first_event_timestamp(events, "provider.first_output.warning");
+    let first_output_warned = first_output_warning_at.is_some();
+    let terminal_at = if is_terminal_status(&record.status) {
+        Some(record.updated_at)
+    } else {
+        None
+    };
+    let end_at = terminal_at.or(Some(now));
+
+    let queue_ms = duration_between(accepted_at, probe_started.or(workspace_started));
+    let provider_probe_ms = duration_between(probe_started, probe_completed);
+    let workspace_prepare_ms = duration_between(
+        workspace_started,
+        provider_boot_started.or(first_output).or(end_at),
+    );
+    let provider_boot_ms = duration_between(provider_boot_started, first_output.or(end_at));
+    let execution_start = workspace_started
+        .or(probe_completed)
+        .or(probe_started)
+        .or(accepted_at);
+    let execution_ms = duration_between(execution_start, end_at);
+    let first_output_ms = duration_between(accepted_at, first_output);
+    let wall_ms = duration_between(accepted_at.or(created_at), end_at);
+
+    let latest = latest_event(events);
+    let last_event_at = latest
+        .map(|event| event.timestamp.clone())
+        .filter(|v| !v.is_empty());
+    let last_event_age_ms = latest.and_then(event_time).and_then(|ts| {
+        if now < ts {
+            None
+        } else {
+            Some((now - ts).whole_milliseconds().max(0) as u64)
+        }
+    });
+    let state = latest.and_then(|event| event.state.clone());
+    let phase = latest.and_then(|event| event.phase.clone());
+    let stalled =
+        !is_terminal_status(&record.status) && last_event_age_ms.is_some_and(|ms| ms >= 8_000);
+    let block_reason = classify_block_reason(
+        &record.status,
+        phase.as_deref(),
+        stalled,
+        events,
+        record.error_message.as_deref(),
+    );
+    let advice = build_watch_advice(
+        &record.status,
+        phase.as_deref(),
+        block_reason.as_deref(),
+        false,
+    );
+    let (wait_reasons, current_wait_reason) = collect_wait_reasons(events);
+
+    GetAgentStatsOutput {
+        handle_id: handle_id.to_string(),
+        status: format!("{}", record.status),
+        state,
+        phase,
+        last_event_at,
+        last_event_age_ms,
+        stalled,
+        block_reason,
+        advice,
+        queue_ms,
+        provider_probe_ms,
+        workspace_prepare_ms,
+        provider_boot_ms,
+        execution_ms,
+        first_output_ms,
+        first_output_warned,
+        first_output_warning_at,
+        current_wait_reason,
+        wait_reasons,
+        wall_ms,
+        usage: build_usage_output(record),
     }
 }
 
@@ -297,22 +1030,18 @@ impl McpSubagentServer {
         rows.reverse();
 
         let limit = input.limit.unwrap_or(50).max(1);
-        let runs = rows
-            .into_iter()
-            .take(limit)
-            .map(|(handle_id, record)| RunListingOutput {
-                handle_id,
-                status: format!("{}", record.status),
-                updated_at: format_time(record.updated_at),
-                provider: record
-                    .spec_snapshot
-                    .as_ref()
-                    .map(|spec| spec.provider.clone()),
-                agent: record.spec_snapshot.as_ref().map(|spec| spec.name.clone()),
-                task: record.task,
-                duration_ms: compute_duration_ms(record.created_at, record.updated_at),
-            })
-            .collect();
+        let now = OffsetDateTime::now_utc();
+        let mut runs = Vec::new();
+        for (handle_id, record) in rows.into_iter().take(limit) {
+            let events = load_run_events(self.state_dir(), &handle_id)?;
+            let runtime = build_event_runtime_snapshot(
+                &record.status,
+                &events,
+                now,
+                record.error_message.as_deref(),
+            );
+            runs.push(build_run_view(handle_id, &record, Some(&runtime)));
+        }
 
         Ok(Json(ListRunsOutput { runs }))
     }
@@ -321,49 +1050,20 @@ impl McpSubagentServer {
     pub async fn get_run_result(
         &self,
         Parameters(input): Parameters<GetRunResultInput>,
-    ) -> std::result::Result<Json<GetRunResultOutput>, ErrorData> {
+    ) -> std::result::Result<Json<RunView>, ErrorData> {
         let record = self.get_or_load_run_record(&input.handle_id).await?;
-        let native_result = read_text_artifact(&record, "stdout.txt").or_else(|| {
-            record
-                .summary
-                .as_ref()
-                .and_then(|summary| summary.raw_fallback_text.clone())
-        });
-        let usage = build_usage_output(&record);
-        let (retry_classification, classification_reason) = resolve_retry_classification(&record);
-
-        Ok(Json(GetRunResultOutput {
-            contract_version: RUN_RESULT_CONTRACT_VERSION.to_string(),
-            handle_id: input.handle_id,
-            status: format!("{}", record.status),
-            updated_at: format_time(record.updated_at),
-            error_message: record.error_message.clone(),
-            provider: record
-                .spec_snapshot
-                .as_ref()
-                .map(|spec| spec.provider.clone()),
-            model: record
-                .spec_snapshot
-                .as_ref()
-                .and_then(|spec| spec.model.clone()),
-            normalization_status: record
-                .summary
-                .as_ref()
-                .map(|summary| format!("{}", summary.parse_status))
-                .unwrap_or_else(|| "NotAvailable".to_string()),
-            summary: record
-                .summary
-                .as_ref()
-                .map(|summary| summary.summary.summary.clone()),
-            native_result,
-            normalized_result: record.summary.as_ref().map(map_summary_output),
-            provider_exit_code: usage.provider_exit_code,
-            retries: usage.retries,
-            retry_classification,
-            classification_reason,
-            usage,
-            artifact_index: record.artifact_index,
-        }))
+        let events = load_run_events(self.state_dir(), &input.handle_id)?;
+        let runtime = build_event_runtime_snapshot(
+            &record.status,
+            &events,
+            OffsetDateTime::now_utc(),
+            record.error_message.as_deref(),
+        );
+        Ok(Json(build_run_view(
+            input.handle_id,
+            &record,
+            Some(&runtime),
+        )))
     }
 
     #[tool(description = "Read stdout/stderr logs for a run handle.")]
@@ -421,53 +1121,185 @@ impl McpSubagentServer {
         let started = std::time::Instant::now();
         loop {
             let record = self.get_or_load_run_record(&input.handle_id).await?;
+            let events = load_run_events(self.state_dir(), &input.handle_id)?;
+            let now = OffsetDateTime::now_utc();
+            let runtime = build_event_runtime_snapshot(
+                &record.status,
+                &events,
+                now,
+                record.error_message.as_deref(),
+            );
+            let (current_phase, phase_age_ms) = current_phase_age_ms(&events, now);
+            let block_reason = runtime.block_reason.clone();
+            let phase_timeout_hit = input.phase_timeout_secs.is_some_and(|timeout_secs| {
+                let matches_phase = input.phase.as_deref().is_none_or(|phase| {
+                    current_phase
+                        .as_deref()
+                        .is_some_and(|current| current == phase)
+                });
+                matches_phase
+                    && phase_age_ms
+                        .is_some_and(|age_ms| age_ms >= timeout_secs.saturating_mul(1000))
+            });
             if is_terminal_status(&record.status) {
+                let advice = build_watch_advice(
+                    &record.status,
+                    current_phase.as_deref(),
+                    block_reason.as_deref(),
+                    false,
+                );
                 return Ok(Json(WatchRunOutput {
-                    handle_id: input.handle_id,
-                    status: format!("{}", record.status),
-                    updated_at: format_time(record.updated_at),
-                    error_message: record.error_message,
-                    terminal: true,
+                    run: build_run_view(input.handle_id.clone(), &record, Some(&runtime)),
                     timed_out: false,
+                    phase_timeout_hit: false,
+                    block_reason,
+                    advice,
+                }));
+            }
+            if phase_timeout_hit {
+                let advice = build_watch_advice(
+                    &record.status,
+                    current_phase.as_deref(),
+                    block_reason.as_deref(),
+                    true,
+                );
+                return Ok(Json(WatchRunOutput {
+                    run: build_run_view(input.handle_id.clone(), &record, Some(&runtime)),
+                    timed_out: true,
+                    phase_timeout_hit: true,
+                    block_reason,
+                    advice,
                 }));
             }
             if timeout_secs.is_some_and(|secs| started.elapsed().as_secs() >= secs) {
+                let advice = build_watch_advice(
+                    &record.status,
+                    current_phase.as_deref(),
+                    block_reason.as_deref(),
+                    false,
+                );
                 return Ok(Json(WatchRunOutput {
-                    handle_id: input.handle_id,
-                    status: format!("{}", record.status),
-                    updated_at: format_time(record.updated_at),
-                    error_message: record.error_message,
-                    terminal: false,
+                    run: build_run_view(input.handle_id.clone(), &record, Some(&runtime)),
                     timed_out: true,
+                    phase_timeout_hit: false,
+                    block_reason,
+                    advice,
                 }));
             }
             tokio::time::sleep(Duration::from_millis(interval_ms)).await;
         }
     }
 
+    #[tool(description = "Read run events with incremental cursor support.")]
+    pub async fn watch_agent_events(
+        &self,
+        Parameters(input): Parameters<WatchAgentEventsInput>,
+    ) -> std::result::Result<Json<WatchAgentEventsOutput>, ErrorData> {
+        let record = self.get_or_load_run_record(&input.handle_id).await?;
+        let all_events = load_run_events(self.state_dir(), &input.handle_id)?;
+        let now = OffsetDateTime::now_utc();
+        let runtime = build_event_runtime_snapshot(
+            &record.status,
+            &all_events,
+            now,
+            record.error_message.as_deref(),
+        );
+        let (current_phase, current_phase_age_ms) = current_phase_age_ms(&all_events, now);
+        let block_reason = runtime.block_reason.clone();
+        let phase_timeout_hit = input.phase_timeout_secs.is_some_and(|timeout_secs| {
+            let matches_phase = input.phase.as_deref().is_none_or(|phase| {
+                current_phase
+                    .as_deref()
+                    .is_some_and(|current| current == phase)
+            });
+            matches_phase
+                && current_phase_age_ms
+                    .is_some_and(|age_ms| age_ms >= timeout_secs.saturating_mul(1000))
+        });
+
+        let mut events = all_events;
+
+        if let Some(since_seq) = input.since_seq {
+            events.retain(|event| event.seq.is_some_and(|seq| seq > since_seq));
+        }
+        if let Some(phase) = input.phase.as_deref() {
+            events.retain(|event| event.phase.as_deref().is_some_and(|value| value == phase));
+        }
+
+        let limit = input.limit.unwrap_or(200).max(1);
+        if events.len() > limit {
+            let start = events.len() - limit;
+            events = events.split_off(start);
+        }
+
+        let next_seq = events
+            .iter()
+            .filter_map(|event| event.seq)
+            .max()
+            .map(|seq| seq + 1)
+            .or(input.since_seq);
+        let advice = build_watch_advice(
+            &record.status,
+            current_phase.as_deref(),
+            block_reason.as_deref(),
+            phase_timeout_hit,
+        );
+
+        Ok(Json(WatchAgentEventsOutput {
+            handle_id: input.handle_id,
+            status: format!("{}", record.status),
+            updated_at: format_time(record.updated_at),
+            terminal: is_terminal_status(&record.status),
+            events,
+            next_seq,
+            current_phase,
+            current_phase_age_ms,
+            phase_timeout_hit,
+            block_reason,
+            advice,
+        }))
+    }
+
+    #[tool(description = "Return run stats summary including phase timings and stall signal.")]
+    pub async fn get_agent_stats(
+        &self,
+        Parameters(input): Parameters<GetAgentStatsInput>,
+    ) -> std::result::Result<Json<GetAgentStatsOutput>, ErrorData> {
+        let record = self.get_or_load_run_record(&input.handle_id).await?;
+        let events = load_run_events(self.state_dir(), &input.handle_id)?;
+        let output = build_agent_stats_output(
+            &input.handle_id,
+            &record,
+            &events,
+            OffsetDateTime::now_utc(),
+        );
+        Ok(Json(output))
+    }
+
     #[tool(description = "Run an agent synchronously and return structured summary.")]
     pub async fn run_agent(
         &self,
         Parameters(input): Parameters<RunAgentInput>,
-    ) -> std::result::Result<Json<RunAgentOutput>, ErrorData> {
-        let (loaded, request, probe_result, execution_policy) =
+    ) -> std::result::Result<Json<RunView>, ErrorData> {
+        let (loaded, task_spec, hints, execution_policy) =
             self.prepare_run(input, RunMode::Sync)?;
-        let request_snapshot = build_run_request_snapshot(&request);
+        let probe_result = self.ensure_provider_ready(&loaded.spec.core.provider)?;
         let spec_snapshot = build_run_spec_snapshot(&loaded.spec);
         let probe_snapshot = build_probe_result_snapshot(&probe_result);
         let run_created_at = OffsetDateTime::now_utc();
         let handle_id = Uuid::now_v7().to_string();
-        let lock_keys = self.conflict_lock_keys(&loaded.spec, &request)?;
+        let lock_keys = self.conflict_lock_keys(&loaded.spec, &task_spec)?;
         let _serialize_guards = self.acquire_serialize_locks(lock_keys.clone()).await;
         let dispatch = run_dispatch(
             &loaded.spec,
-            &request,
+            &task_spec,
+            &hints,
             &handle_id,
             self.state_dir(),
             lock_keys.clone(),
         )
         .await?;
-        let crate::mcp::service::DispatchEnvelope {
+        let crate::mcp::service::RunDispatchData {
             result,
             workspace,
             memory_resolution,
@@ -475,67 +1307,59 @@ impl McpSubagentServer {
         } = dispatch;
 
         let (artifact_index, artifacts) = build_runtime_artifacts(
-            &result.summary,
+            &result.outcome,
             &result.stdout,
             &result.stderr,
             Some(&workspace.workspace_path),
         );
-        let mut execution_policy = Some(execution_policy);
-        apply_execution_policy_outcome(
-            &mut execution_policy,
-            result.metadata.attempts_used,
-            result.metadata.retry_attempts,
-        );
+        let mut policy = Some(execution_policy);
+        apply_execution_policy_outcome(&mut policy, result.attempts_used, result.retry_attempts);
         let mut artifact_index = artifact_index;
         let mut artifacts = artifacts;
         apply_review_evidence_hook(
             &loaded.spec,
-            &request,
-            &result.summary,
+            &task_spec,
+            &hints,
+            &result.outcome,
             &mut artifact_index,
             &mut artifacts,
         );
         apply_archive_hook(
-            &loaded.spec,
-            &request,
-            &result.metadata.status,
-            &handle_id,
-            &workspace,
-            &result.summary,
+            crate::mcp::archive::ArchiveHookInput {
+                spec: &loaded.spec,
+                task_spec: &task_spec,
+                hints: &hints,
+                run_status: &result.status,
+                handle_id: &handle_id,
+                workspace: &workspace,
+                outcome: &result.outcome,
+            },
             &mut crate::mcp::archive::ArtifactCollector {
                 index: &mut artifact_index,
                 data: &mut artifacts,
             },
         );
-        let output = RunAgentOutput {
-            handle_id: handle_id.clone(),
-            status: format!("{}", result.metadata.status),
-            structured_summary: map_summary_output(&result.summary),
-            artifact_index: artifact_index.clone(),
-        };
         let native_usage = result.native_usage;
-        let retry_classification = map_retry_classification(&result.metadata);
-
         let record = RunRecord {
-            status: result.metadata.status,
+            status: result.status,
             created_at: run_created_at,
             updated_at: OffsetDateTime::now_utc(),
-            status_history: result.metadata.status_history,
-            summary: Some(result.summary),
+            status_history: result.status_history,
+            outcome: Some(result.outcome),
             artifact_index,
             artifacts,
-            error_message: result.metadata.error_message,
-            task: request.task,
-            request_snapshot: Some(request_snapshot),
+            error_message: result.error_message,
+            task_spec,
+            hints,
             spec_snapshot: Some(spec_snapshot),
             probe_result: Some(probe_snapshot),
             memory_resolution: Some(memory_resolution),
             workspace: Some(workspace),
             compiled_context_markdown: Some(result.compiled_context_markdown),
             usage: native_usage,
-            retry_classification: Some(retry_classification),
-            execution_policy,
+            policy,
         };
+        let output = build_run_view(handle_id.clone(), &record, None);
         drop(workspace_cleanup);
         self.upsert_and_persist_run(&handle_id, record).await?;
 
@@ -546,37 +1370,231 @@ impl McpSubagentServer {
     pub async fn spawn_agent(
         &self,
         Parameters(input): Parameters<RunAgentInput>,
-    ) -> std::result::Result<Json<SpawnAgentOutput>, ErrorData> {
-        let (loaded, request, probe_result, execution_policy) =
+    ) -> std::result::Result<Json<RunView>, ErrorData> {
+        let (loaded, task_spec, hints, execution_policy) =
             self.prepare_run(input, RunMode::Async)?;
+        let accepted_agent_name = loaded.spec.core.name.clone();
+        let accepted_task_brief = task_spec.task_brief.clone();
         let handle_id = Uuid::now_v7().to_string();
+        let queued_at = format_time(OffsetDateTime::now_utc());
         let running_record = RunRecord::running(
-            request.task.clone(),
-            Some(build_run_request_snapshot(&request)),
+            task_spec.clone(),
+            hints.clone(),
             Some(build_run_spec_snapshot(&loaded.spec)),
-            Some(build_probe_result_snapshot(&probe_result)),
+            None,
             Some(execution_policy),
         );
-        let lock_keys = self.conflict_lock_keys(&loaded.spec, &request)?;
+        let lock_keys = self.conflict_lock_keys(&loaded.spec, &task_spec)?;
+        let provider_prober = self.provider_prober();
 
         self.upsert_and_persist_run(&handle_id, running_record)
             .await?;
+        append_run_event(
+            self.state_dir(),
+            &handle_id,
+            RuntimeEventInput {
+                event: "run.accepted",
+                state: "accepted",
+                phase: "accepted",
+                source: "runtime",
+                message: "run accepted",
+                detail: json!({
+                    "agent": loaded.spec.core.name.clone(),
+                    "provider": loaded.spec.core.provider.as_str(),
+                }),
+            },
+        )?;
+        append_run_event(
+            self.state_dir(),
+            &handle_id,
+            RuntimeEventInput {
+                event: "run.queued",
+                state: "queued",
+                phase: "queueing",
+                source: "runtime",
+                message: "run queued for async execution",
+                detail: json!({
+                    "queued_at": queued_at.clone(),
+                }),
+            },
+        )?;
 
         let state = self.runtime_state();
         let state_dir = self.state_dir().to_path_buf();
         let task_handle_id = handle_id.clone();
         let task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(120)).await;
+            let _ = append_run_event(
+                &state_dir,
+                &task_handle_id,
+                RuntimeEventInput {
+                    event: "provider.probe.started",
+                    state: "preparing",
+                    phase: "provider_probe",
+                    source: "provider",
+                    message: "provider probe started",
+                    detail: json!({
+                        "provider": loaded.spec.core.provider.as_str(),
+                    }),
+                },
+            );
+            let probe_result = provider_prober.probe(&loaded.spec.core.provider);
+            let probe_snapshot = build_probe_result_snapshot(&probe_result);
+            let _ = append_run_event(
+                &state_dir,
+                &task_handle_id,
+                RuntimeEventInput {
+                    event: "provider.probe.completed",
+                    state: "preparing",
+                    phase: "provider_probe",
+                    source: "provider",
+                    message: "provider probe completed",
+                    detail: json!({
+                        "provider": probe_result.provider.as_str(),
+                        "status": format!("{}", probe_result.status),
+                        "version": probe_result.version.clone(),
+                    }),
+                },
+            );
+            if !probe_result.is_available() {
+                let mut probe_details = vec![format!("status={}", probe_result.status)];
+                if let Some(version) = &probe_result.version {
+                    probe_details.push(format!("version={version}"));
+                }
+                probe_details.extend(probe_result.notes.clone());
+                let error_message =
+                    provider_unavailable_message(&loaded.spec.core.provider, &probe_details);
+                let failure_outcome = RunOutcome::Failed(FailureOutcome {
+                    error: error_message.clone(),
+                    retry: RetryInfo {
+                        classification: RetryClassification::Unknown,
+                        reason: Some("provider unavailable during probe".to_string()),
+                        attempts_used: 0,
+                    },
+                    partial_summary: Some(error_message.clone()),
+                    usage: UsageStats::ZERO,
+                });
+                let (artifact_index, artifacts) =
+                    build_runtime_artifacts(&failure_outcome, "", "", None);
+
+                let mut guard = state.lock().await;
+                guard.tasks.remove(&task_handle_id);
+                let Some(record) = guard.runs.get_mut(&task_handle_id) else {
+                    return;
+                };
+                if matches!(record.status, RunPhase::Cancelled) {
+                    return;
+                }
+                record.status = RunPhase::Failed;
+                record.updated_at = OffsetDateTime::now_utc();
+                append_status_if_terminal(&mut record.status_history, RunPhase::Failed);
+                record.error_message = Some(error_message);
+                record.outcome = Some(failure_outcome);
+                record.artifact_index = artifact_index;
+                record.artifacts = artifacts;
+                record.probe_result = Some(probe_snapshot);
+                record.memory_resolution = None;
+                record.workspace = None;
+                record.compiled_context_markdown = None;
+                record.usage = None;
+                let _ = append_run_event(
+                    &state_dir,
+                    &task_handle_id,
+                    RuntimeEventInput {
+                        event: "run.failed",
+                        state: "failed",
+                        phase: "provider_probe",
+                        source: "runtime",
+                        message: "provider unavailable",
+                        detail: json!({
+                            "error": record.error_message.clone(),
+                        }),
+                    },
+                );
+                if let Err(err) = persist_run_record(&state_dir, &task_handle_id, record) {
+                    record.error_message = Some(format!("failed to persist run state: {err}"));
+                }
+                return;
+            }
+
+            let _ = append_run_event(
+                &state_dir,
+                &task_handle_id,
+                RuntimeEventInput {
+                    event: "workspace.prepare.started",
+                    state: "preparing",
+                    phase: "workspace_prepare",
+                    source: "workspace",
+                    message: "workspace/context preparation started",
+                    detail: json!({}),
+                },
+            );
             let _serialize_guards =
                 acquire_serialize_locks_from_state(&state, lock_keys.clone()).await;
-            let dispatch = run_dispatch(
+            let dispatch_started_at = Instant::now();
+            let mut first_output_warned = false;
+            let mut first_output_seen = false;
+            let mut dispatch_future = Box::pin(run_dispatch(
                 &loaded.spec,
-                &request,
+                &task_spec,
+                &hints,
                 &task_handle_id,
                 &state_dir,
                 lock_keys.clone(),
-            )
-            .await;
+            ));
+            let dispatch = loop {
+                tokio::select! {
+                    output = &mut dispatch_future => break output,
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                        let elapsed_ms = dispatch_started_at.elapsed().as_millis() as u64;
+                        if !first_output_seen {
+                            if let Ok(events) = load_run_events(&state_dir, &task_handle_id) {
+                                first_output_seen = has_event_named(&events, "provider.first_output");
+                            }
+                        }
+                        let heartbeat_phase = if first_output_seen {
+                            "running"
+                        } else {
+                            "provider_boot"
+                        };
+                        let _ = append_run_event(
+                            &state_dir,
+                            &task_handle_id,
+                            RuntimeEventInput {
+                                event: "provider.heartbeat",
+                                state: "running",
+                                phase: heartbeat_phase,
+                                source: "runtime",
+                                message: "still alive",
+                                detail: json!({
+                                    "elapsed_ms": elapsed_ms,
+                                }),
+                            },
+                        );
+                        if !first_output_warned
+                            && !first_output_seen
+                            && elapsed_ms >= FIRST_OUTPUT_WARN_AFTER_SECS.saturating_mul(1000)
+                        {
+                            first_output_warned = true;
+                            let _ = append_run_event(
+                                &state_dir,
+                                &task_handle_id,
+                                RuntimeEventInput {
+                                    event: "provider.first_output.warning",
+                                    state: "running",
+                                    phase: "provider_boot",
+                                    source: "runtime",
+                                    message: "provider has not produced output yet",
+                                    detail: json!({
+                                        "elapsed_ms": elapsed_ms,
+                                        "warn_after_secs": FIRST_OUTPUT_WARN_AFTER_SECS,
+                                    }),
+                                },
+                            );
+                        }
+                    }
+                }
+            };
 
             let mut guard = state.lock().await;
             guard.tasks.remove(&task_handle_id);
@@ -584,20 +1602,102 @@ impl McpSubagentServer {
                 return;
             };
 
-            if matches!(record.status, RunStatus::Cancelled) {
+            if matches!(record.status, RunPhase::Cancelled) {
                 return;
             }
 
             match dispatch {
                 Ok(dispatch) => {
-                    let crate::mcp::service::DispatchEnvelope {
+                    let crate::mcp::service::RunDispatchData {
                         result: dispatch_result,
                         workspace,
                         memory_resolution,
                         _workspace_cleanup: workspace_cleanup,
                     } = dispatch;
+                    if !(dispatch_result.stdout.trim().is_empty()
+                        && dispatch_result.stderr.trim().is_empty())
+                    {
+                        let existing_events =
+                            load_run_events(&state_dir, &task_handle_id).unwrap_or_default();
+                        let has_first_output =
+                            has_event_named(&existing_events, "provider.first_output");
+                        let has_stdout_delta =
+                            has_event_named(&existing_events, "provider.stdout.delta");
+                        let has_stderr_delta =
+                            has_event_named(&existing_events, "provider.stderr.delta");
+
+                        if !dispatch_result.stdout.trim().is_empty() && !has_stdout_delta {
+                            let _ = append_run_event(
+                                &state_dir,
+                                &task_handle_id,
+                                RuntimeEventInput {
+                                    event: "provider.stdout.delta",
+                                    state: "running",
+                                    phase: "running",
+                                    source: "provider",
+                                    message: "provider stdout received",
+                                    detail: json!({
+                                        "bytes": dispatch_result.stdout.len(),
+                                        "lines": dispatch_result.stdout.lines().count(),
+                                    }),
+                                },
+                            );
+                        }
+                        if !dispatch_result.stderr.trim().is_empty() && !has_stderr_delta {
+                            let _ = append_run_event(
+                                &state_dir,
+                                &task_handle_id,
+                                RuntimeEventInput {
+                                    event: "provider.stderr.delta",
+                                    state: "running",
+                                    phase: "running",
+                                    source: "provider",
+                                    message: "provider stderr received",
+                                    detail: json!({
+                                        "bytes": dispatch_result.stderr.len(),
+                                        "lines": dispatch_result.stderr.lines().count(),
+                                    }),
+                                },
+                            );
+                        }
+                        if !has_first_output {
+                            let _ = append_run_event(
+                                &state_dir,
+                                &task_handle_id,
+                                RuntimeEventInput {
+                                    event: "provider.first_output",
+                                    state: "running",
+                                    phase: "running",
+                                    source: "provider",
+                                    message: "provider produced output",
+                                    detail: json!({
+                                        "stdout_bytes": dispatch_result.stdout.len(),
+                                        "stderr_bytes": dispatch_result.stderr.len(),
+                                    }),
+                                },
+                            );
+                        }
+                    }
+                    let wait_text =
+                        format!("{}\n{}", dispatch_result.stdout, dispatch_result.stderr);
+                    if let Some(signal) = detect_provider_wait_signal(&wait_text) {
+                        let _ = append_run_event(
+                            &state_dir,
+                            &task_handle_id,
+                            RuntimeEventInput {
+                                event: signal.event,
+                                state: "running",
+                                phase: signal.phase,
+                                source: "provider",
+                                message: signal.message,
+                                detail: json!({
+                                    "reason": signal.reason,
+                                }),
+                            },
+                        );
+                    }
                     let (artifact_index, artifacts) = build_runtime_artifacts(
-                        &dispatch_result.summary,
+                        &dispatch_result.outcome,
                         &dispatch_result.stdout,
                         &dispatch_result.stderr,
                         Some(&workspace.workspace_path),
@@ -605,61 +1705,130 @@ impl McpSubagentServer {
                     let mut artifact_index = artifact_index;
                     let mut artifacts = artifacts;
                     apply_execution_policy_outcome(
-                        &mut record.execution_policy,
-                        dispatch_result.metadata.attempts_used,
-                        dispatch_result.metadata.retry_attempts,
+                        &mut record.policy,
+                        dispatch_result.attempts_used,
+                        dispatch_result.retry_attempts,
                     );
                     apply_review_evidence_hook(
                         &loaded.spec,
-                        &request,
-                        &dispatch_result.summary,
+                        &task_spec,
+                        &hints,
+                        &dispatch_result.outcome,
                         &mut artifact_index,
                         &mut artifacts,
                     );
                     apply_archive_hook(
-                        &loaded.spec,
-                        &request,
-                        &dispatch_result.metadata.status,
-                        &task_handle_id,
-                        &workspace,
-                        &dispatch_result.summary,
+                        crate::mcp::archive::ArchiveHookInput {
+                            spec: &loaded.spec,
+                            task_spec: &task_spec,
+                            hints: &hints,
+                            run_status: &dispatch_result.status,
+                            handle_id: &task_handle_id,
+                            workspace: &workspace,
+                            outcome: &dispatch_result.outcome,
+                        },
                         &mut crate::mcp::archive::ArtifactCollector {
                             index: &mut artifact_index,
                             data: &mut artifacts,
                         },
                     );
-                    let retry_classification = map_retry_classification(&dispatch_result.metadata);
-                    record.status = dispatch_result.metadata.status;
+                    record.status = dispatch_result.status;
                     record.updated_at = OffsetDateTime::now_utc();
-                    record.status_history = dispatch_result.metadata.status_history;
-                    record.error_message = dispatch_result.metadata.error_message;
-                    record.summary = Some(dispatch_result.summary);
+                    record.status_history = dispatch_result.status_history;
+                    record.error_message = dispatch_result.error_message;
+                    record.outcome = Some(dispatch_result.outcome);
                     record.artifact_index = artifact_index;
                     record.artifacts = artifacts;
+                    record.probe_result = Some(probe_snapshot.clone());
                     record.memory_resolution = Some(memory_resolution);
                     record.workspace = Some(workspace);
                     record.compiled_context_markdown =
                         Some(dispatch_result.compiled_context_markdown);
                     record.usage = dispatch_result.native_usage;
-                    record.retry_classification = Some(retry_classification);
+                    let final_status = format!("{}", record.status);
+                    let final_event = match record.status {
+                        RunPhase::Succeeded => "run.completed",
+                        RunPhase::Failed => "run.failed",
+                        RunPhase::TimedOut => "run.timed_out",
+                        RunPhase::Cancelled => "run.cancelled",
+                        _ => "run.updated",
+                    };
+                    let _ = append_run_event(
+                        &state_dir,
+                        &task_handle_id,
+                        RuntimeEventInput {
+                            event: final_event,
+                            state: final_status.as_str(),
+                            phase: "completed",
+                            source: "runtime",
+                            message: "run finished",
+                            detail: json!({
+                                "status": final_status.clone(),
+                                "verification_status": match &record.outcome {
+                                    Some(RunOutcome::Succeeded(success)) => format!("{}", success.verification),
+                                    _ => format!("{}", crate::runtime::summary::VerificationStatus::NotRun),
+                                },
+                            }),
+                        },
+                    );
                     drop(workspace_cleanup);
                 }
                 Err(err) => {
-                    let summary = failed_summary(err.message.clone().into_owned());
+                    let err_text = err.to_string();
+                    if let Some(signal) = detect_provider_wait_signal(&err_text) {
+                        let _ = append_run_event(
+                            &state_dir,
+                            &task_handle_id,
+                            RuntimeEventInput {
+                                event: signal.event,
+                                state: "running",
+                                phase: signal.phase,
+                                source: "provider",
+                                message: signal.message,
+                                detail: json!({
+                                    "reason": signal.reason,
+                                }),
+                            },
+                        );
+                    }
+                    let failure_outcome = RunOutcome::Failed(FailureOutcome {
+                        error: err_text.clone(),
+                        retry: RetryInfo {
+                            classification: RetryClassification::Unknown,
+                            reason: Some("dispatch execution failed".to_string()),
+                            attempts_used: 0,
+                        },
+                        partial_summary: Some(err.message.clone().into_owned()),
+                        usage: UsageStats::ZERO,
+                    });
                     let (artifact_index, artifacts) =
-                        build_runtime_artifacts(&summary, "", "", None);
-                    record.status = RunStatus::Failed;
+                        build_runtime_artifacts(&failure_outcome, "", "", None);
+                    record.status = RunPhase::Failed;
                     record.updated_at = OffsetDateTime::now_utc();
-                    append_status_if_terminal(&mut record.status_history, RunStatus::Failed);
-                    record.error_message = Some(err.to_string());
-                    record.summary = Some(summary);
+                    append_status_if_terminal(&mut record.status_history, RunPhase::Failed);
+                    record.error_message = Some(err_text);
+                    record.outcome = Some(failure_outcome);
                     record.artifact_index = artifact_index;
                     record.artifacts = artifacts;
+                    record.probe_result = Some(probe_snapshot);
                     record.memory_resolution = None;
                     record.workspace = None;
                     record.compiled_context_markdown = None;
                     record.usage = None;
-                    record.retry_classification = None;
+                    let _ = append_run_event(
+                        &state_dir,
+                        &task_handle_id,
+                        RuntimeEventInput {
+                            event: "run.failed",
+                            state: "failed",
+                            phase: "execution",
+                            source: "runtime",
+                            message: "run failed",
+                            detail: json!({
+                                "error": record.error_message.clone(),
+                            }),
+                        },
+                    );
                 }
             }
 
@@ -674,9 +1843,15 @@ impl McpSubagentServer {
             state.tasks.insert(handle_id.clone(), task);
         }
 
-        Ok(Json(SpawnAgentOutput {
+        Ok(Json(RunView {
             handle_id,
-            status: format!("{}", RunStatus::Running),
+            agent_name: accepted_agent_name,
+            task_brief: accepted_task_brief,
+            phase: "accepted".to_string(),
+            terminal: false,
+            outcome: None,
+            created_at: queued_at.clone(),
+            updated_at: queued_at,
         }))
     }
 
@@ -684,18 +1859,21 @@ impl McpSubagentServer {
     pub async fn get_agent_status(
         &self,
         Parameters(input): Parameters<HandleInput>,
-    ) -> std::result::Result<Json<AgentStatusOutput>, ErrorData> {
+    ) -> std::result::Result<Json<RunView>, ErrorData> {
         let record = self.get_or_load_run_record(&input.handle_id).await?;
-        let structured_summary = record.summary.as_ref().map(map_summary_output);
+        let events = load_run_events(self.state_dir(), &input.handle_id)?;
+        let runtime = build_event_runtime_snapshot(
+            &record.status,
+            &events,
+            OffsetDateTime::now_utc(),
+            record.error_message.as_deref(),
+        );
 
-        Ok(Json(AgentStatusOutput {
-            handle_id: input.handle_id,
-            status: format!("{}", record.status),
-            updated_at: format_time(record.updated_at),
-            error_message: record.error_message,
-            structured_summary,
-            artifact_index: record.artifact_index,
-        }))
+        Ok(Json(build_run_view(
+            input.handle_id,
+            &record,
+            Some(&runtime),
+        )))
     }
 
     #[tool(description = "Cancel an async agent run if still in progress.")]
@@ -719,7 +1897,7 @@ impl McpSubagentServer {
 
         if matches!(
             existing_status,
-            RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled | RunStatus::TimedOut
+            RunPhase::Succeeded | RunPhase::Failed | RunPhase::Cancelled | RunPhase::TimedOut
         ) {
             return Ok(Json(CancelAgentOutput {
                 handle_id: input.handle_id,
@@ -732,23 +1910,37 @@ impl McpSubagentServer {
         }
 
         if let Some(record) = state.runs.get_mut(&input.handle_id) {
-            record.status = RunStatus::Cancelled;
+            record.status = RunPhase::Cancelled;
             record.updated_at = OffsetDateTime::now_utc();
-            append_status_if_terminal(&mut record.status_history, RunStatus::Cancelled);
+            append_status_if_terminal(&mut record.status_history, RunPhase::Cancelled);
             record.error_message = Some("cancelled by user request".to_string());
-            if record.summary.is_none() {
-                let summary = cancelled_summary(record.task.clone());
-                let (artifact_index, artifacts) = build_runtime_artifacts(&summary, "", "", None);
-                record.summary = Some(summary);
+            if record.outcome.is_none() {
+                let reason = "cancelled by user request".to_string();
+                let cancelled_outcome = RunOutcome::Cancelled { reason };
+                let (artifact_index, artifacts) =
+                    build_runtime_artifacts(&cancelled_outcome, "", "", None);
+                record.outcome = Some(cancelled_outcome);
                 record.artifact_index = artifact_index;
                 record.artifacts = artifacts;
             }
+            append_run_event(
+                self.state_dir(),
+                &input.handle_id,
+                RuntimeEventInput {
+                    event: "run.cancelled",
+                    state: "cancelled",
+                    phase: "completed",
+                    source: "runtime",
+                    message: "run cancelled by user request",
+                    detail: json!({}),
+                },
+            )?;
             persist_run_record(self.state_dir(), &input.handle_id, record)?;
         }
 
         Ok(Json(CancelAgentOutput {
             handle_id: input.handle_id,
-            status: format!("{}", RunStatus::Cancelled),
+            status: format!("{}", RunPhase::Cancelled),
         }))
     }
 
@@ -794,5 +1986,178 @@ impl McpSubagentServer {
             path: input.path,
             content,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_watch_advice, classify_block_reason, classify_block_reason_from_events,
+        classify_block_reason_from_text, collect_wait_reasons, current_phase_age_ms,
+        detect_provider_wait_signal, parse_rfc3339, RunEventOutput,
+    };
+    use crate::runtime::dispatcher::RunPhase;
+
+    #[test]
+    fn detect_provider_wait_signal_matches_trust_prompt() {
+        let signal = detect_provider_wait_signal("This folder is not trusted folder yet")
+            .expect("expected trust signal");
+        assert_eq!(signal.event, "provider.waiting_for_trust");
+        assert_eq!(signal.reason, "trust_required");
+    }
+
+    #[test]
+    fn classify_block_reason_from_events_recognizes_first_output_warning() {
+        let events = vec![RunEventOutput {
+            seq: Some(1),
+            event: "provider.first_output.warning".to_string(),
+            timestamp: "2026-03-25T00:00:00Z".to_string(),
+            state: Some("running".to_string()),
+            phase: Some("provider_boot".to_string()),
+            source: Some("runtime".to_string()),
+            message: Some("provider has not produced output yet".to_string()),
+            detail: serde_json::json!({}),
+        }];
+        let reason = classify_block_reason_from_events(&events, true);
+        assert_eq!(reason, Some("provider_output_wait"));
+    }
+
+    #[test]
+    fn detect_provider_wait_signal_ignores_cached_credentials_log() {
+        let signal = detect_provider_wait_signal(
+            "Using FileKeychain fallback for secure storage. Loaded cached credentials.",
+        );
+        assert!(signal.is_none());
+    }
+
+    #[test]
+    fn classify_block_reason_is_none_for_succeeded_status() {
+        let events = vec![RunEventOutput {
+            seq: Some(1),
+            event: "provider.waiting_for_auth".to_string(),
+            timestamp: "2026-03-25T00:00:00Z".to_string(),
+            state: Some("running".to_string()),
+            phase: Some("waiting_for_auth".to_string()),
+            source: Some("provider".to_string()),
+            message: Some("provider is waiting for authentication".to_string()),
+            detail: serde_json::json!({}),
+        }];
+        let reason = classify_block_reason(
+            &RunPhase::Succeeded,
+            Some("completed"),
+            false,
+            &events,
+            None,
+        );
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn classify_block_reason_from_text_ignores_cached_credentials_log() {
+        let reason = classify_block_reason_from_text(
+            "Loaded cached credentials. Using FileKeychain fallback for secure storage.",
+        );
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn collect_wait_reasons_deduplicates_and_tracks_latest() {
+        let events = vec![
+            RunEventOutput {
+                seq: Some(1),
+                event: "provider.waiting_for_auth".to_string(),
+                timestamp: "2026-03-25T00:00:00Z".to_string(),
+                state: None,
+                phase: None,
+                source: None,
+                message: None,
+                detail: serde_json::json!({}),
+            },
+            RunEventOutput {
+                seq: Some(2),
+                event: "provider.waiting_for_auth".to_string(),
+                timestamp: "2026-03-25T00:00:01Z".to_string(),
+                state: None,
+                phase: None,
+                source: None,
+                message: None,
+                detail: serde_json::json!({}),
+            },
+            RunEventOutput {
+                seq: Some(3),
+                event: "provider.waiting_for_trust".to_string(),
+                timestamp: "2026-03-25T00:00:02Z".to_string(),
+                state: None,
+                phase: None,
+                source: None,
+                message: None,
+                detail: serde_json::json!({}),
+            },
+        ];
+        let (reasons, current) = collect_wait_reasons(&events);
+        assert_eq!(
+            reasons,
+            vec!["auth_required".to_string(), "trust_required".to_string()]
+        );
+        assert_eq!(current.as_deref(), Some("trust_required"));
+    }
+
+    #[test]
+    fn current_phase_age_ms_tracks_latest_phase_window() {
+        let events = vec![
+            RunEventOutput {
+                seq: Some(1),
+                event: "provider.probe.started".to_string(),
+                timestamp: "2026-03-25T00:00:01Z".to_string(),
+                state: Some("preparing".to_string()),
+                phase: Some("provider_probe".to_string()),
+                source: Some("provider".to_string()),
+                message: None,
+                detail: serde_json::json!({}),
+            },
+            RunEventOutput {
+                seq: Some(2),
+                event: "provider.boot.started".to_string(),
+                timestamp: "2026-03-25T00:00:03Z".to_string(),
+                state: Some("running".to_string()),
+                phase: Some("provider_boot".to_string()),
+                source: Some("provider".to_string()),
+                message: None,
+                detail: serde_json::json!({}),
+            },
+        ];
+        let now = parse_rfc3339("2026-03-25T00:00:08Z").expect("parse now");
+        let (phase, age_ms) = current_phase_age_ms(&events, now);
+        assert_eq!(phase.as_deref(), Some("provider_boot"));
+        assert_eq!(age_ms, Some(5_000));
+    }
+
+    #[test]
+    fn build_watch_advice_includes_timeout_and_reason_guidance() {
+        let advice = build_watch_advice(
+            &RunPhase::Running,
+            Some("provider_boot"),
+            Some("auth_required"),
+            true,
+        );
+        assert!(
+            advice
+                .iter()
+                .any(|item| item.contains("phase timeout hit in `provider_boot`")),
+            "{advice:?}"
+        );
+        assert!(
+            advice.iter().any(|item| item.contains("authentication")),
+            "{advice:?}"
+        );
+    }
+
+    #[test]
+    fn build_watch_advice_includes_terminal_next_step() {
+        let advice = build_watch_advice(&RunPhase::Succeeded, Some("completed"), None, false);
+        assert!(
+            advice.iter().any(|item| item.contains("get_run_result")),
+            "{advice:?}"
+        );
     }
 }

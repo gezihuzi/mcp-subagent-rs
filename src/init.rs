@@ -4,17 +4,20 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     connect::{
         build_connect_snippet, resolve_connect_snippet_paths, ConnectHost, ConnectSnippetPaths,
     },
+    cwd::resolve_cli_cwd,
     error::Result,
     spec::registry::load_agent_specs_from_dirs,
 };
 
-const PRESET_CATALOG_VERSION: &str = "v0.9.0";
+const PRESET_CATALOG_VERSION: &str = "v0.10.0";
+const GENERATED_ROOT_MANIFEST_RELATIVE: &str = ".mcp-subagent/generated-root.toml";
+const GENERATED_ROOT_MANIFEST_KIND: &str = "mcp-subagent-generated-root";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitPreset {
@@ -51,8 +54,215 @@ pub struct InitReport {
     pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct GeneratedRootManifest {
+    pub kind: String,
+    pub catalog_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+}
+
+pub(crate) fn generated_root_manifest_path(root: &Path) -> PathBuf {
+    root.join(GENERATED_ROOT_MANIFEST_RELATIVE)
+}
+
+pub(crate) fn load_generated_root_manifest(root: &Path) -> Option<GeneratedRootManifest> {
+    let raw = fs::read_to_string(generated_root_manifest_path(root)).ok()?;
+    let manifest = toml::from_str::<GeneratedRootManifest>(&raw).ok()?;
+    (manifest.kind == GENERATED_ROOT_MANIFEST_KIND).then_some(manifest)
+}
+
+fn generated_root_manifest_template(preset: Option<&str>) -> String {
+    let mut raw = format!(
+        "kind = \"{GENERATED_ROOT_MANIFEST_KIND}\"\ncatalog_version = \"{PRESET_CATALOG_VERSION}\"\n"
+    );
+    if let Some(preset) = preset {
+        raw.push_str(&format!("preset = \"{preset}\"\n"));
+    }
+    raw
+}
+
+fn sync_generated_root_manifest(
+    root: &Path,
+    preset: Option<&str>,
+) -> Result<(PathBuf, bool, bool)> {
+    let path = generated_root_manifest_path(root);
+    let content = generated_root_manifest_template(preset);
+    let existed = path.exists();
+    let changed = if existed {
+        fs::read_to_string(&path)? != content
+    } else {
+        true
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if changed {
+        fs::write(&path, content)?;
+    }
+    Ok((path, !existed, existed && changed))
+}
+
 pub fn init_workspace(root: &Path, preset: InitPreset, force: bool) -> Result<InitReport> {
     init_with_preset(root, preset, force)
+}
+
+pub fn sync_project_bridge_workspace(root: &Path) -> Result<InitReport> {
+    let root = root.to_path_buf();
+    let agents_dir = root.join("agents");
+    if !agents_dir.is_dir() {
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "generated-root agents directory not found: {} (pass --root-dir <generated-root>)",
+                agents_dir.display()
+            ),
+        )
+        .into());
+    }
+    if !is_generated_root(&root) {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "root does not look like a generated mcp-subagent workspace: {}",
+                root.display()
+            ),
+        )
+        .into());
+    }
+
+    let generated = load_agent_specs_from_dirs(std::slice::from_ref(&agents_dir))?;
+    let state_dir = root.join(".mcp-subagent/state");
+    Ok(InitReport {
+        preset: "sync-project-config-only".to_string(),
+        preset_catalog_version: PRESET_CATALOG_VERSION.to_string(),
+        root: root.clone(),
+        agents_dir: agents_dir.clone(),
+        created_files: Vec::new(),
+        overwritten_files: Vec::new(),
+        generated_agent_count: generated.len(),
+        notes: vec![
+            "Validated existing generated root; bootstrap templates were not rewritten."
+                .to_string(),
+            format!(
+                "Run `mcp-subagent validate --agents-dir {}` to verify existing specs.",
+                agents_dir.display()
+            ),
+            format!(
+                "Run `mcp-subagent doctor --agents-dir {} --state-dir {}` to inspect provider readiness.",
+                agents_dir.display(),
+                state_dir.display()
+            ),
+        ],
+    })
+}
+
+pub fn refresh_bootstrap_workspace(root: &Path) -> Result<InitReport> {
+    let root = root.to_path_buf();
+    let agents_dir = root.join("agents");
+    if !agents_dir.is_dir() {
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "generated-root agents directory not found: {} (run `mcp-subagent init` first or pass --root-dir <generated-root>)",
+                agents_dir.display()
+            ),
+        )
+        .into());
+    }
+
+    let mut builtin_template_paths = Vec::new();
+    let mut created_files = Vec::new();
+    let mut overwritten_files = Vec::new();
+    let mut preserved_custom_agent_count = 0usize;
+    let mut entries = fs::read_dir(&agents_dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(expected) = builtin_agent_template(file_name) else {
+            if file_name.ends_with(".agent.toml") {
+                preserved_custom_agent_count += 1;
+            }
+            continue;
+        };
+
+        builtin_template_paths.push(path.clone());
+        let actual = fs::read_to_string(&path)?;
+        if actual != expected {
+            write(&path, expected)?;
+            overwritten_files.push(path);
+        }
+    }
+
+    if builtin_template_paths.is_empty() {
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "no built-in bootstrap agent templates found under {}",
+                agents_dir.display()
+            ),
+        )
+        .into());
+    }
+
+    let manifest_preset = load_generated_root_manifest(&root)
+        .and_then(|manifest| manifest.preset)
+        .or_else(|| detect_preset_from_generated_agents(&builtin_template_paths));
+    let (manifest_path, created_manifest, overwritten_manifest) =
+        sync_generated_root_manifest(&root, manifest_preset.as_deref())?;
+    if created_manifest {
+        created_files.push(manifest_path);
+    } else if overwritten_manifest {
+        overwritten_files.push(manifest_path);
+    }
+
+    let state_dir = root.join(".mcp-subagent/state");
+    let mut notes = if overwritten_files.is_empty() {
+        vec![format!(
+            "No drifted built-in bootstrap templates were found under `{}`; catalog files already match {}.",
+            agents_dir.display(),
+            PRESET_CATALOG_VERSION
+        )]
+    } else {
+        vec![format!(
+            "Refreshed {} drifted built-in bootstrap template(s) under `{}`.",
+            overwritten_files.len(),
+            agents_dir.display()
+        )]
+    };
+    if preserved_custom_agent_count > 0 {
+        notes.push(format!(
+            "Preserved {} custom agent file(s) outside the built-in catalog.",
+            preserved_custom_agent_count
+        ));
+    }
+    notes.push(format!(
+        "Run `mcp-subagent validate --agents-dir {}` to verify refreshed specs.",
+        agents_dir.display()
+    ));
+    notes.push(format!(
+        "Run `mcp-subagent doctor --agents-dir {} --state-dir {}` to confirm bootstrap drift is gone.",
+        agents_dir.display(),
+        state_dir.display()
+    ));
+
+    Ok(InitReport {
+        preset: "refresh-bootstrap".to_string(),
+        preset_catalog_version: PRESET_CATALOG_VERSION.to_string(),
+        root,
+        agents_dir,
+        created_files,
+        overwritten_files,
+        generated_agent_count: builtin_template_paths.len(),
+        notes,
+    })
 }
 
 fn init_with_preset(root: &Path, preset: InitPreset, force: bool) -> Result<InitReport> {
@@ -61,9 +271,15 @@ fn init_with_preset(root: &Path, preset: InitPreset, force: bool) -> Result<Init
     let config_path = root.join(".mcp-subagent/config.toml");
     let readme_path = root.join("README.mcp-subagent.md");
     let plan_path = root.join("PLAN.md");
+    let manifest_path = generated_root_manifest_path(&root);
     let agent_templates = preset_agent_templates(preset);
 
-    let mut files = vec![plan_path.clone(), config_path.clone(), readme_path.clone()];
+    let mut files = vec![
+        plan_path.clone(),
+        config_path.clone(),
+        readme_path.clone(),
+        manifest_path.clone(),
+    ];
     files.extend(
         agent_templates
             .iter()
@@ -95,7 +311,8 @@ fn init_with_preset(root: &Path, preset: InitPreset, force: bool) -> Result<Init
 
     write(&plan_path, &plan_template())?;
     write(&config_path, &config_template())?;
-    let cwd = std::env::current_dir()?;
+    sync_generated_root_manifest(&root, Some(preset.as_str()))?;
+    let cwd = resolve_cli_cwd()?;
     let binary = std::env::current_exe()?;
     let connect_paths = resolve_connect_snippet_paths(
         &cwd,
@@ -188,6 +405,67 @@ fn preset_agent_templates(preset: InitPreset) -> Vec<(&'static str, &'static str
     }
 }
 
+pub(crate) fn preset_catalog_version() -> &'static str {
+    PRESET_CATALOG_VERSION
+}
+
+pub fn is_generated_root(root: &Path) -> bool {
+    load_generated_root_manifest(root).is_some() || is_legacy_generated_root(root)
+}
+
+pub(crate) fn builtin_agent_template(file_name: &str) -> Option<&'static str> {
+    match file_name {
+        "fast-researcher.agent.toml" => Some(FAST_RESEARCHER_AGENT),
+        "backend-coder.agent.toml" => Some(BACKEND_CODER_AGENT),
+        "frontend-builder.agent.toml" => Some(FRONTEND_BUILDER_AGENT),
+        "correctness-reviewer.agent.toml" => Some(CORRECTNESS_REVIEWER_AGENT),
+        "style-reviewer.agent.toml" => Some(STYLE_REVIEWER_AGENT),
+        "codex-style-reviewer.agent.toml" => Some(CODEX_STYLE_REVIEWER_AGENT),
+        "gemini-style-reviewer.agent.toml" => Some(GEMINI_STYLE_REVIEWER_AGENT),
+        "local-fallback-coder.agent.toml" => Some(LOCAL_FALLBACK_CODER_AGENT),
+        "single-provider-coder.agent.toml" => Some(SINGLE_PROVIDER_CODER_AGENT),
+        _ => None,
+    }
+}
+
+fn detect_preset_from_generated_agents(paths: &[PathBuf]) -> Option<String> {
+    let mut file_names = paths
+        .iter()
+        .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+        .collect::<Vec<_>>();
+    file_names.sort_unstable();
+
+    for preset in [
+        InitPreset::ClaudeOpusSupervisor,
+        InitPreset::ClaudeOpusSupervisorMinimal,
+        InitPreset::CodexPrimaryBuilder,
+        InitPreset::GeminiFrontendTeam,
+        InitPreset::LocalOllamaFallback,
+        InitPreset::MinimalSingleProvider,
+    ] {
+        let mut expected = preset_agent_templates(preset)
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        expected.sort_unstable();
+        if expected == file_names {
+            return Some(preset.as_str().to_string());
+        }
+    }
+
+    None
+}
+
+fn is_legacy_generated_root(root: &Path) -> bool {
+    let components = root
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    components
+        .windows(2)
+        .any(|window| window == [".mcp-subagent", "bootstrap"])
+}
+
 fn write(path: &Path, content: &str) -> Result<()> {
     fs::write(path, content)?;
     Ok(())
@@ -276,6 +554,22 @@ mcp-subagent validate --agents-dir ./agents
 mcp-subagent doctor --agents-dir ./agents
 mcp-subagent list-agents --agents-dir ./agents
 ```
+
+## Current Defaults
+
+Generated presets use the current runtime terms: `context_mode`, `delegation_context`,
+`memory_sources`, and `working_dir_policy`.
+Built-in templates keep `memory_sources = ["auto_project_memory"]` and do not inject `active_plan`
+by default.
+Gemini read-only research presets keep `working_dir_policy = "auto"`; on the stable scratch path,
+runtime will keep the override visible by downgrading `native_discovery = "isolated"` to `minimal`.
+If `doctor` reports generated-root template drift, review those local edits first; if the drift is
+accidental, run the exact `refresh_command` emitted by `doctor`. From project root you can
+usually run `mcp-subagent init --refresh-bootstrap`; from another cwd, pass
+`--root-dir <generated-root>` to resync built-in templates while preserving custom agents.
+Default `init` still will not overwrite files silently.
+If you only need to repair the project bridge for an existing generated root, use the
+bridge-only repair command `mcp-subagent init --root-dir <generated-root> --sync-project-config-only`.
 
 ## MCP Integration (stdio)
 
@@ -593,8 +887,13 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::connect::{build_connect_snippet, resolve_connect_snippet_paths, ConnectHost};
+    use crate::cwd::resolve_cli_cwd;
 
-    use super::{init_workspace, InitPreset};
+    use super::{
+        generated_root_manifest_path, init_workspace, is_generated_root,
+        load_generated_root_manifest, refresh_bootstrap_workspace, sync_project_bridge_workspace,
+        InitPreset,
+    };
 
     #[test]
     fn init_creates_preset_files_and_valid_specs() {
@@ -603,11 +902,18 @@ mod tests {
             .expect("init succeeds");
 
         assert_eq!(report.generated_agent_count, 6);
-        assert_eq!(report.preset_catalog_version, "v0.9.0");
+        assert_eq!(report.preset_catalog_version, "v0.10.0");
         assert!(dir.path().join("agents").exists());
         assert!(dir.path().join("PLAN.md").exists());
         assert!(dir.path().join(".mcp-subagent/config.toml").exists());
+        assert!(generated_root_manifest_path(dir.path()).exists());
         assert!(dir.path().join("README.mcp-subagent.md").exists());
+        assert_eq!(
+            load_generated_root_manifest(dir.path())
+                .and_then(|manifest| manifest.preset)
+                .as_deref(),
+            Some("claude-opus-supervisor")
+        );
     }
 
     #[test]
@@ -627,7 +933,7 @@ mod tests {
                 "preset {} should generate at least one agent",
                 preset.as_str()
             );
-            assert_eq!(report.preset_catalog_version, "v0.9.0");
+            assert_eq!(report.preset_catalog_version, "v0.10.0");
             assert!(dir.path().join("README.mcp-subagent.md").exists());
         }
     }
@@ -682,7 +988,7 @@ mod tests {
         assert!(readme.contains("codex mcp add mcp-subagent --"));
         assert!(readme.contains("gemini mcp add mcp-subagent"));
 
-        let cwd = std::env::current_dir().expect("cwd");
+        let cwd = resolve_cli_cwd().expect("cwd");
         let binary = std::env::current_exe().expect("current exe");
         let paths = resolve_connect_snippet_paths(
             &cwd,
@@ -693,5 +999,235 @@ mod tests {
         assert!(readme.contains(&build_connect_snippet(ConnectHost::Claude, &paths)));
         assert!(readme.contains(&build_connect_snippet(ConnectHost::Codex, &paths)));
         assert!(readme.contains(&build_connect_snippet(ConnectHost::Gemini, &paths)));
+    }
+
+    #[test]
+    fn generated_presets_do_not_default_to_active_plan_memory() {
+        for preset in [
+            InitPreset::ClaudeOpusSupervisor,
+            InitPreset::ClaudeOpusSupervisorMinimal,
+            InitPreset::CodexPrimaryBuilder,
+            InitPreset::GeminiFrontendTeam,
+            InitPreset::LocalOllamaFallback,
+            InitPreset::MinimalSingleProvider,
+        ] {
+            let dir = tempdir().expect("tempdir");
+            init_workspace(dir.path(), preset, false).expect("init preset");
+
+            for entry in fs::read_dir(dir.path().join("agents")).expect("read agents dir") {
+                let path = entry.expect("dir entry").path();
+                if !path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.ends_with(".agent.toml"))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let raw = fs::read_to_string(&path).expect("read agent");
+                assert!(
+                    raw.contains("memory_sources = [\"auto_project_memory\"]"),
+                    "expected auto_project_memory default in {}",
+                    path.display()
+                );
+                assert!(
+                    !raw.contains("active_plan"),
+                    "unexpected active_plan default in {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn init_readme_documents_current_runtime_terms_and_drift_guidance() {
+        let dir = tempdir().expect("tempdir");
+        init_workspace(dir.path(), InitPreset::ClaudeOpusSupervisorMinimal, false)
+            .expect("init succeeds");
+
+        let readme = fs::read_to_string(dir.path().join("README.mcp-subagent.md"))
+            .expect("read generated readme");
+        assert!(readme.contains("`context_mode`, `delegation_context`,"));
+        assert!(readme.contains("`memory_sources`, and `working_dir_policy`."));
+        assert!(readme.contains("memory_sources = [\"auto_project_memory\"]"));
+        assert!(readme.contains("do not inject `active_plan`"));
+        assert!(readme.contains("`doctor` reports generated-root template drift"));
+        assert!(readme.contains("exact `refresh_command` emitted by `doctor`"));
+        assert!(readme.contains("`mcp-subagent init --refresh-bootstrap`"));
+        assert!(readme.contains("`--root-dir <generated-root>`"));
+        assert!(readme.contains(
+            "`mcp-subagent init --root-dir <generated-root> --sync-project-config-only`"
+        ));
+        assert!(readme.contains("bridge-only repair command"));
+        assert!(readme.contains("preserving custom agents"));
+        assert!(readme.contains("Default `init` still will not overwrite files silently"));
+    }
+
+    #[test]
+    fn refresh_bootstrap_overwrites_builtin_templates_and_preserves_custom_agents() {
+        let dir = tempdir().expect("tempdir");
+        init_workspace(dir.path(), InitPreset::CodexPrimaryBuilder, false).expect("init succeeds");
+
+        let backend_path = dir.path().join("agents/backend-coder.agent.toml");
+        let custom_path = dir.path().join("agents/custom.agent.toml");
+        fs::write(&backend_path, "drifted = true\n").expect("write drifted builtin");
+        fs::write(
+            &custom_path,
+            r#"[core]
+name = "custom-agent"
+description = "custom agent preserved during refresh"
+provider = "mock"
+instructions = "custom"
+"#,
+        )
+        .expect("write custom agent");
+
+        let report = refresh_bootstrap_workspace(dir.path()).expect("refresh succeeds");
+        let backend = fs::read_to_string(&backend_path).expect("read refreshed builtin");
+        let custom = fs::read_to_string(&custom_path).expect("read preserved custom");
+
+        assert!(backend.contains("provider = \"codex\""));
+        assert!(backend.contains("memory_sources = [\"auto_project_memory\"]"));
+        assert!(custom.contains("name = \"custom-agent\""));
+        assert!(report.created_files.is_empty());
+        assert!(
+            report
+                .overwritten_files
+                .iter()
+                .any(|path| path == &backend_path),
+            "expected drifted builtin to be refreshed"
+        );
+        assert_eq!(report.generated_agent_count, 3);
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("Preserved 1 custom agent file")),
+            "expected preserved custom agent note: {:?}",
+            report.notes
+        );
+        assert_eq!(
+            load_generated_root_manifest(dir.path())
+                .and_then(|manifest| manifest.preset)
+                .as_deref(),
+            Some("codex-primary-builder")
+        );
+    }
+
+    #[test]
+    fn refresh_bootstrap_backfills_manifest_for_legacy_root() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("agents")).expect("create agents");
+        fs::write(
+            dir.path().join("agents/backend-coder.agent.toml"),
+            super::builtin_agent_template("backend-coder.agent.toml").expect("builtin template"),
+        )
+        .expect("write builtin template");
+        assert!(
+            !generated_root_manifest_path(dir.path()).exists(),
+            "legacy root should start without manifest"
+        );
+
+        let report = refresh_bootstrap_workspace(dir.path()).expect("refresh succeeds");
+        assert!(
+            report
+                .created_files
+                .iter()
+                .any(|path| path == &generated_root_manifest_path(dir.path())),
+            "expected refresh to create generated-root manifest"
+        );
+        assert!(
+            load_generated_root_manifest(dir.path()).is_some(),
+            "expected generated-root manifest after refresh"
+        );
+    }
+
+    #[test]
+    fn refresh_bootstrap_fails_when_no_builtin_templates_exist() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("agents")).expect("create agents dir");
+        fs::write(
+            dir.path().join("agents/custom.agent.toml"),
+            "custom = true\n",
+        )
+        .expect("write custom agent");
+
+        let err = refresh_bootstrap_workspace(dir.path()).expect_err("refresh must fail");
+        assert!(
+            matches!(
+                err,
+                crate::error::McpSubagentError::Io(ref io) if io.kind() == ErrorKind::NotFound
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn sync_project_bridge_validates_generated_root_without_rewriting_templates() {
+        let dir = tempdir().expect("tempdir");
+        init_workspace(dir.path(), InitPreset::CodexPrimaryBuilder, false).expect("init succeeds");
+
+        let backend_path = dir.path().join("agents/backend-coder.agent.toml");
+        let drifted = fs::read_to_string(&backend_path)
+            .expect("read backend")
+            .replacen(
+                "memory_sources = [\"auto_project_memory\"]",
+                "memory_sources = [\"auto_project_memory\", \"active_plan\"]",
+                1,
+            );
+        fs::write(&backend_path, &drifted).expect("write drifted builtin");
+
+        let report = sync_project_bridge_workspace(dir.path()).expect("sync-only succeeds");
+
+        assert_eq!(report.preset, "sync-project-config-only");
+        assert!(report.created_files.is_empty());
+        assert!(report.overwritten_files.is_empty());
+        assert_eq!(report.generated_agent_count, 3);
+        assert_eq!(
+            fs::read_to_string(&backend_path).expect("read backend after sync-only"),
+            drifted
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("bootstrap templates were not rewritten")),
+            "expected non-rewrite note: {:?}",
+            report.notes
+        );
+    }
+
+    #[test]
+    fn sync_project_bridge_rejects_non_generated_root() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("agents")).expect("create agents");
+        fs::write(
+            dir.path().join("agents/custom.agent.toml"),
+            r#"[core]
+name = "custom-agent"
+description = "custom"
+provider = "mock"
+instructions = "custom"
+"#,
+        )
+        .expect("write custom agent");
+
+        let err = sync_project_bridge_workspace(dir.path()).expect_err("must reject");
+        assert!(
+            matches!(
+                err,
+                crate::error::McpSubagentError::Io(ref io) if io.kind() == ErrorKind::InvalidInput
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn generated_root_detection_accepts_legacy_bootstrap_shape() {
+        let dir = tempdir().expect("tempdir");
+        let legacy_root = dir.path().join(".mcp-subagent/bootstrap");
+        fs::create_dir_all(legacy_root.join("agents")).expect("create agents");
+
+        assert!(is_generated_root(&legacy_root));
     }
 }

@@ -10,7 +10,7 @@ use crate::{
     error::{McpSubagentError, Result},
     runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
     spec::AgentSpec,
-    types::{CompiledContext, RunRequest},
+    types::{CompiledContext, TaskSpec, WorkflowHints},
 };
 
 #[derive(Debug, Clone)]
@@ -31,10 +31,11 @@ impl OllamaRunner {
         Self { executable }
     }
 
-    pub async fn execute(
+    pub async fn execute_task(
         &self,
         spec: &AgentSpec,
-        request: &RunRequest,
+        task_spec: &TaskSpec,
+        _hints: &WorkflowHints,
         compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
         let prompt = compose_prompt(compiled);
@@ -46,7 +47,7 @@ impl OllamaRunner {
             .arg("run")
             .arg(model)
             .arg(&prompt)
-            .current_dir(&request.working_dir)
+            .current_dir(&task_spec.working_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -97,13 +98,14 @@ impl OllamaRunner {
 
 #[async_trait]
 impl AgentRunner for OllamaRunner {
-    async fn execute(
+    async fn execute_task(
         &self,
         spec: &AgentSpec,
-        request: &RunRequest,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
         compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
-        OllamaRunner::execute(self, spec, request, compiled).await
+        OllamaRunner::execute_task(self, spec, task_spec, hints, compiled).await
     }
 }
 
@@ -161,7 +163,7 @@ mod tests {
             runtime_policy::{RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
             AgentSpec,
         },
-        types::{CompiledContext, RunMode, RunRequest},
+        types::{CompiledContext, RunMode, TaskSpec, WorkflowHints},
     };
 
     fn sample_spec(timeout_secs: u64) -> AgentSpec {
@@ -189,17 +191,20 @@ mod tests {
         }
     }
 
-    fn sample_request(working_dir: PathBuf) -> RunRequest {
-        RunRequest {
+    fn sample_task_spec(working_dir: PathBuf) -> TaskSpec {
+        TaskSpec {
             task: "implement parser".to_string(),
             task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir,
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir,
+        }
+    }
+
+    fn sample_hints() -> WorkflowHints {
+        WorkflowHints {
+            run_mode: RunMode::Sync,
+            ..WorkflowHints::default()
         }
     }
 
@@ -218,7 +223,6 @@ cat <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": ["next"],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": ["src/lib.rs"]
 }
@@ -233,9 +237,10 @@ exit 0
 
         let runner = OllamaRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(30),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -265,9 +270,10 @@ exit 7
 
         let runner = OllamaRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(30),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -301,9 +307,10 @@ sleep 2
 
         let runner = OllamaRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(1),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -324,9 +331,10 @@ sleep 2
         spec.core.model = None;
 
         let err = runner
-            .execute(
+            .execute_task(
                 &spec,
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),

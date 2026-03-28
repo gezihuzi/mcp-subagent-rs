@@ -7,8 +7,9 @@ use tokio::{sync::Mutex, task::JoinHandle};
 use crate::{
     mcp::dto::ArtifactOutput,
     probe::ProviderProbe,
+    runtime::dispatcher::RunPhase,
+    runtime::outcome::RunOutcome,
     runtime::usage::NativeUsage,
-    runtime::{dispatcher::RunStatus, summary::SummaryEnvelope},
     spec::{
         runtime_policy::{
             ApprovalPolicy, BackgroundPreference, ContextMode, FileConflictPolicy, MemorySource,
@@ -16,7 +17,7 @@ use crate::{
         },
         AgentSpec,
     },
-    types::{ResolvedMemory, RunMode, RunRequest},
+    types::{ResolvedMemory, RunMode, TaskSpec, WorkflowHints},
 };
 
 #[derive(Debug, Default)]
@@ -28,69 +29,59 @@ pub(crate) struct RuntimeState {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RunRecord {
-    pub(crate) status: RunStatus,
+    pub(crate) status: RunPhase,
     pub(crate) created_at: OffsetDateTime,
     pub(crate) updated_at: OffsetDateTime,
-    pub(crate) status_history: Vec<RunStatus>,
-    pub(crate) summary: Option<SummaryEnvelope>,
+    pub(crate) status_history: Vec<RunPhase>,
+    pub(crate) outcome: Option<RunOutcome>,
     pub(crate) artifact_index: Vec<ArtifactOutput>,
     pub(crate) artifacts: HashMap<String, String>,
     pub(crate) error_message: Option<String>,
-    pub(crate) task: String,
-    pub(crate) request_snapshot: Option<RunRequestSnapshot>,
+    pub(crate) task_spec: TaskSpec,
+    pub(crate) hints: WorkflowHints,
     pub(crate) spec_snapshot: Option<RunSpecSnapshot>,
     pub(crate) probe_result: Option<ProbeResultRecord>,
     pub(crate) memory_resolution: Option<MemoryResolutionRecord>,
     pub(crate) workspace: Option<WorkspaceRecord>,
     pub(crate) compiled_context_markdown: Option<String>,
     pub(crate) usage: Option<NativeUsage>,
-    pub(crate) retry_classification: Option<RetryClassificationRecord>,
-    pub(crate) execution_policy: Option<ExecutionPolicyRecord>,
+    pub(crate) policy: Option<PolicySnapshot>,
 }
 
 impl RunRecord {
     pub(crate) fn running(
-        task: String,
-        request_snapshot: Option<RunRequestSnapshot>,
+        task_spec: TaskSpec,
+        hints: WorkflowHints,
         spec_snapshot: Option<RunSpecSnapshot>,
         probe_result: Option<ProbeResultRecord>,
-        execution_policy: Option<ExecutionPolicyRecord>,
+        policy: Option<PolicySnapshot>,
     ) -> Self {
         let now = OffsetDateTime::now_utc();
         Self {
-            status: RunStatus::Running,
+            status: RunPhase::Running,
             created_at: now,
             updated_at: now,
             status_history: vec![
-                RunStatus::Received,
-                RunStatus::Validating,
-                RunStatus::ProbingProvider,
-                RunStatus::Running,
+                RunPhase::Received,
+                RunPhase::Validating,
+                RunPhase::ProbingProvider,
+                RunPhase::Running,
             ],
-            summary: None,
+            outcome: None,
             artifact_index: Vec::new(),
             artifacts: HashMap::new(),
             error_message: None,
-            task,
-            request_snapshot,
+            task_spec,
+            hints,
             spec_snapshot,
             probe_result,
             memory_resolution: None,
             workspace: None,
             compiled_context_markdown: None,
             usage: None,
-            retry_classification: None,
-            execution_policy,
+            policy,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RetryClassificationRecord {
-    pub(crate) classification: String,
-    #[serde(default)]
-    pub(crate) reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -103,7 +94,7 @@ pub(crate) enum PolicyValueSource {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ExecutionPolicyRecord {
+pub(crate) struct PolicySnapshot {
     pub(crate) requested_run_mode: RunMode,
     pub(crate) effective_run_mode: RunMode,
     pub(crate) effective_run_mode_source: PolicyValueSource,
@@ -111,15 +102,12 @@ pub(crate) struct ExecutionPolicyRecord {
     pub(crate) spawn_policy_source: PolicyValueSource,
     pub(crate) background_preference: String,
     pub(crate) background_preference_source: PolicyValueSource,
-    #[serde(default)]
     pub(crate) max_turns: Option<u32>,
     pub(crate) max_turns_source: PolicyValueSource,
     pub(crate) retry_max_attempts: u32,
     pub(crate) retry_backoff_secs: u64,
     pub(crate) retry_policy_source: PolicyValueSource,
-    #[serde(default)]
     pub(crate) attempts_used: Option<u32>,
-    #[serde(default)]
     pub(crate) retries_used: Option<u32>,
 }
 
@@ -129,38 +117,9 @@ pub(crate) struct WorkspaceRecord {
     pub(crate) mode: String,
     pub(crate) source_path: PathBuf,
     pub(crate) workspace_path: PathBuf,
-    #[serde(default)]
     pub(crate) notes: Vec<String>,
-    #[serde(default)]
     pub(crate) lock_key: Option<String>,
-    #[serde(default)]
     pub(crate) lock_keys: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SelectedFileSnapshot {
-    pub(crate) path: PathBuf,
-    #[serde(default)]
-    pub(crate) rationale: Option<String>,
-    pub(crate) has_inlined_content: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RunRequestSnapshot {
-    pub(crate) task: String,
-    #[serde(default)]
-    pub(crate) task_brief: Option<String>,
-    pub(crate) parent_summary_present: bool,
-    pub(crate) selected_files: Vec<SelectedFileSnapshot>,
-    #[serde(default)]
-    pub(crate) stage: Option<String>,
-    #[serde(default)]
-    pub(crate) plan_ref: Option<String>,
-    pub(crate) working_dir: PathBuf,
-    pub(crate) run_mode: RunMode,
-    pub(crate) acceptance_criteria: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,12 +127,9 @@ pub(crate) struct RunRequestSnapshot {
 pub(crate) struct RunSpecSnapshot {
     pub(crate) name: String,
     pub(crate) provider: String,
-    #[serde(default)]
     pub(crate) model: Option<String>,
     pub(crate) context_mode: String,
-    #[serde(default = "default_delegation_context_snapshot")]
     pub(crate) delegation_context: String,
-    #[serde(default)]
     pub(crate) plan_section_selector: Option<String>,
     pub(crate) working_dir_policy: String,
     pub(crate) file_conflict_policy: String,
@@ -188,7 +144,6 @@ pub(crate) struct RunSpecSnapshot {
 pub(crate) struct ProbeResultRecord {
     pub(crate) provider: String,
     pub(crate) executable: PathBuf,
-    #[serde(default)]
     pub(crate) version: Option<String>,
     pub(crate) status: String,
     pub(crate) notes: Vec<String>,
@@ -200,91 +155,62 @@ pub(crate) struct MemoryResolutionRecord {
     pub(crate) project_memory_count: usize,
     pub(crate) additional_memory_count: usize,
     pub(crate) native_passthrough_count: usize,
-    #[serde(default)]
     pub(crate) project_memory_labels: Vec<String>,
-    #[serde(default)]
     pub(crate) additional_memory_labels: Vec<String>,
-    #[serde(default)]
     pub(crate) native_passthrough_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PersistedRunRecord {
-    pub(crate) status: RunStatus,
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    pub(crate) created_at: Option<OffsetDateTime>,
+pub(crate) struct PersistedRunState {
+    pub(crate) status: RunPhase,
+    #[serde(with = "time::serde::rfc3339")]
+    pub(crate) created_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
     pub(crate) updated_at: OffsetDateTime,
-    #[serde(default)]
-    pub(crate) status_history: Vec<RunStatus>,
-    pub(crate) summary: Option<SummaryEnvelope>,
-    pub(crate) artifact_index: Vec<ArtifactOutput>,
+    pub(crate) status_history: Vec<RunPhase>,
     pub(crate) error_message: Option<String>,
-    pub(crate) task: String,
-    #[serde(default)]
-    pub(crate) request_snapshot: Option<RunRequestSnapshot>,
-    #[serde(default)]
-    pub(crate) spec_snapshot: Option<RunSpecSnapshot>,
-    #[serde(default)]
     pub(crate) probe_result: Option<ProbeResultRecord>,
-    #[serde(default)]
     pub(crate) memory_resolution: Option<MemoryResolutionRecord>,
-    #[serde(default)]
     pub(crate) workspace: Option<WorkspaceRecord>,
-    #[serde(default)]
     pub(crate) compiled_context_markdown: Option<String>,
-    #[serde(default)]
     pub(crate) usage: Option<NativeUsage>,
-    #[serde(default)]
-    pub(crate) retry_classification: Option<RetryClassificationRecord>,
-    #[serde(default)]
-    pub(crate) execution_policy: Option<ExecutionPolicyRecord>,
+    pub(crate) policy: Option<PolicySnapshot>,
 }
 
-impl From<&RunRecord> for PersistedRunRecord {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedRun {
+    pub(crate) task_spec: TaskSpec,
+    pub(crate) hints: WorkflowHints,
+    pub(crate) state: PersistedRunState,
+    pub(crate) outcome: Option<RunOutcome>,
+    pub(crate) artifact_index: Vec<ArtifactOutput>,
+    pub(crate) spec_snapshot: Option<RunSpecSnapshot>,
+}
+
+impl From<&RunRecord> for PersistedRun {
     fn from(value: &RunRecord) -> Self {
         Self {
-            status: value.status.clone(),
-            created_at: Some(value.created_at),
-            updated_at: value.updated_at,
-            status_history: value.status_history.clone(),
-            summary: value.summary.clone(),
+            task_spec: value.task_spec.clone(),
+            hints: value.hints.clone(),
+            state: PersistedRunState {
+                status: value.status.clone(),
+                created_at: value.created_at,
+                updated_at: value.updated_at,
+                status_history: value.status_history.clone(),
+                error_message: value.error_message.clone(),
+                probe_result: value.probe_result.clone(),
+                memory_resolution: value.memory_resolution.clone(),
+                workspace: value.workspace.clone(),
+                compiled_context_markdown: value.compiled_context_markdown.clone(),
+                usage: value.usage.clone(),
+                policy: value.policy.clone(),
+            },
+            outcome: value.outcome.clone(),
             artifact_index: value.artifact_index.clone(),
-            error_message: value.error_message.clone(),
-            task: value.task.clone(),
-            request_snapshot: value.request_snapshot.clone(),
             spec_snapshot: value.spec_snapshot.clone(),
-            probe_result: value.probe_result.clone(),
-            memory_resolution: value.memory_resolution.clone(),
-            workspace: value.workspace.clone(),
-            compiled_context_markdown: value.compiled_context_markdown.clone(),
-            usage: value.usage.clone(),
-            retry_classification: value.retry_classification.clone(),
-            execution_policy: value.execution_policy.clone(),
         }
-    }
-}
-
-pub(crate) fn build_run_request_snapshot(request: &RunRequest) -> RunRequestSnapshot {
-    RunRequestSnapshot {
-        task: request.task.clone(),
-        task_brief: request.task_brief.clone(),
-        parent_summary_present: request.parent_summary.is_some(),
-        selected_files: request
-            .selected_files
-            .iter()
-            .map(|selected| SelectedFileSnapshot {
-                path: selected.path.clone(),
-                rationale: selected.rationale.clone(),
-                has_inlined_content: selected.content.is_some(),
-            })
-            .collect(),
-        stage: request.stage.clone(),
-        plan_ref: request.plan_ref.clone(),
-        working_dir: request.working_dir.clone(),
-        run_mode: request.run_mode.clone(),
-        acceptance_criteria: request.acceptance_criteria.clone(),
     }
 }
 
@@ -320,10 +246,6 @@ pub(crate) fn build_probe_result_snapshot(probe: &ProviderProbe) -> ProbeResultR
     }
 }
 
-fn default_delegation_context_snapshot() -> String {
-    "minimal".to_string()
-}
-
 pub(crate) fn build_memory_resolution_snapshot(memory: &ResolvedMemory) -> MemoryResolutionRecord {
     MemoryResolutionRecord {
         project_memory_count: memory.project_memories.len(),
@@ -343,7 +265,7 @@ pub(crate) fn build_memory_resolution_snapshot(memory: &ResolvedMemory) -> Memor
     }
 }
 
-pub(crate) fn append_status_if_terminal(status_history: &mut Vec<RunStatus>, status: RunStatus) {
+pub(crate) fn append_status_if_terminal(status_history: &mut Vec<RunPhase>, status: RunPhase) {
     if status_history.last().is_some_and(|last| *last == status) {
         return;
     }
@@ -355,10 +277,10 @@ pub(crate) fn build_execution_policy_snapshot(
     requested_run_mode: RunMode,
     effective_run_mode: RunMode,
     effective_run_mode_source: PolicyValueSource,
-) -> ExecutionPolicyRecord {
+) -> PolicySnapshot {
     let default_runtime = crate::spec::runtime_policy::RuntimePolicy::default();
     let runtime = &spec.runtime;
-    ExecutionPolicyRecord {
+    PolicySnapshot {
         requested_run_mode,
         effective_run_mode,
         effective_run_mode_source,
@@ -390,7 +312,7 @@ pub(crate) fn build_execution_policy_snapshot(
 }
 
 pub(crate) fn apply_execution_policy_outcome(
-    policy: &mut Option<ExecutionPolicyRecord>,
+    policy: &mut Option<PolicySnapshot>,
     attempts_used: u32,
     retries_used: u32,
 ) {

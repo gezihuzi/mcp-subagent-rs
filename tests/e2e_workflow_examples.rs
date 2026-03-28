@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use mcp_subagent::mcp::{
-    dto::{RunAgentInput, RunAgentSelectedFileInput},
+    dto::{OutcomeView, RunAgentInput, RunAgentSelectedFileInput},
     server::McpSubagentServer,
 };
 use rmcp::handler::server::wrapper::Parameters;
@@ -46,8 +46,9 @@ async fn example_workflow_build_stage_with_plan_ref_succeeds() {
         .expect("run should succeed")
         .0;
 
-    assert_eq!(out.status, "succeeded");
-    assert_eq!(out.structured_summary.parse_status, "Validated");
+    assert_eq!(out.phase, "succeeded");
+    assert!(out.terminal);
+    assert!(matches!(out.outcome, Some(OutcomeView::Succeeded { .. })));
 }
 
 #[tokio::test]

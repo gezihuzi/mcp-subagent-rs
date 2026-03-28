@@ -160,7 +160,6 @@ pub struct RuntimePolicy {
     pub context_mode: ContextMode,
     #[serde(default = "default_delegation_context")]
     pub delegation_context: DelegationContextPolicy,
-    #[serde(default)]
     pub plan_section_selector: Option<String>,
     #[serde(default = "default_memory_sources")]
     pub memory_sources: Vec<MemorySource>,
@@ -174,7 +173,6 @@ pub struct RuntimePolicy {
     pub sandbox: SandboxPolicy,
     #[serde(default = "default_approval_policy")]
     pub approval: ApprovalPolicy,
-    #[serde(default)]
     pub max_turns: Option<u32>,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
@@ -186,9 +184,9 @@ pub struct RuntimePolicy {
     pub parse_policy: ParsePolicy,
     #[serde(default = "default_spawn_policy")]
     pub spawn_policy: SpawnPolicy,
-    #[serde(default)]
+    #[serde(default = "default_artifact_policy")]
     pub artifact_policy: ArtifactPolicy,
-    #[serde(default)]
+    #[serde(default = "default_retry_policy")]
     pub retry_policy: RetryPolicy,
 }
 
@@ -289,6 +287,10 @@ fn default_emit_summary_json() -> bool {
     true
 }
 
+fn default_artifact_policy() -> ArtifactPolicy {
+    ArtifactPolicy::default()
+}
+
 fn default_retry_attempts() -> u32 {
     1
 }
@@ -297,11 +299,15 @@ fn default_retry_backoff_secs() -> u64 {
     1
 }
 
+fn default_retry_policy() -> RetryPolicy {
+    RetryPolicy::default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DelegationContextPolicy, MemorySource, NativeDiscoveryPolicy, OutputMode, ParsePolicy,
-        RuntimePolicy,
+        ArtifactPolicy, DelegationContextPolicy, MemorySource, NativeDiscoveryPolicy, OutputMode,
+        ParsePolicy, RetryPolicy, RuntimePolicy,
     };
 
     #[test]
@@ -316,5 +322,53 @@ mod tests {
             runtime.memory_sources,
             vec![MemorySource::AutoProjectMemory]
         );
+    }
+
+    #[test]
+    fn runtime_policy_option_fields_deserialize_without_default_annotations() {
+        let runtime: RuntimePolicy = toml::from_str("").expect("runtime policy should parse");
+
+        assert!(runtime.plan_section_selector.is_none());
+        assert!(runtime.max_turns.is_none());
+    }
+
+    #[test]
+    fn artifact_policy_partial_deserialization_preserves_business_defaults() {
+        let policy: ArtifactPolicy = toml::from_str("").expect("artifact policy should parse");
+
+        assert!(policy.emit_summary_json);
+    }
+
+    #[test]
+    fn retry_policy_partial_deserialization_preserves_business_defaults() {
+        let policy: RetryPolicy = toml::from_str(
+            r#"
+backoff_secs = 0
+"#,
+        )
+        .expect("retry policy should parse");
+
+        assert_eq!(policy.max_attempts, 1);
+        assert_eq!(policy.backoff_secs, 0);
+    }
+
+    #[test]
+    fn runtime_policy_partial_nested_tables_inherit_subpolicy_defaults() {
+        let runtime: RuntimePolicy = toml::from_str(
+            r#"
+timeout_secs = 30
+
+[artifact_policy]
+
+[retry_policy]
+backoff_secs = 0
+"#,
+        )
+        .expect("runtime policy should parse");
+
+        assert_eq!(runtime.timeout_secs, 30);
+        assert!(runtime.artifact_policy.emit_summary_json);
+        assert_eq!(runtime.retry_policy.max_attempts, 1);
+        assert_eq!(runtime.retry_policy.backoff_secs, 0);
     }
 }

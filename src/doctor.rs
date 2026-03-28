@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -7,6 +7,9 @@ use glob::glob;
 use serde::Serialize;
 
 use crate::{
+    connect::shell_escape_path,
+    cwd::resolve_cli_cwd,
+    init::{builtin_agent_template, is_generated_root, preset_catalog_version},
     probe::{ProviderProbe, ProviderProber},
     spec::{
         registry::{load_agent_specs_from_dirs, LoadedAgentSpec},
@@ -31,6 +34,8 @@ pub struct DoctorReport {
     pub workspace_policy_hints: Vec<WorkspacePolicyHint>,
     pub ambient_isolation: AmbientIsolationReport,
     pub knowledge_layout: KnowledgeLayoutHealth,
+    pub project_bridge: ProjectBridgeHealth,
+    pub bootstrap_catalog: BootstrapCatalogHealth,
     pub version_pins: ProviderVersionPinReport,
     pub status: String,
     pub issues: Vec<DoctorIssue>,
@@ -80,6 +85,37 @@ pub struct KnowledgeLayoutHealth {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ProjectBridgeHealth {
+    pub config_path: PathBuf,
+    pub status: String,
+    pub configured_agents_dirs: Vec<PathBuf>,
+    pub configured_state_dir: Option<PathBuf>,
+    pub runtime_agents_dirs: Vec<PathBuf>,
+    pub runtime_state_dir: PathBuf,
+    pub generated_root: Option<PathBuf>,
+    pub root_scope: Option<String>,
+    pub repair_command: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BootstrapCatalogHealth {
+    pub catalog_version: String,
+    pub drifted_templates: Vec<BootstrapTemplateDrift>,
+    pub refresh_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BootstrapTemplateDrift {
+    pub path: PathBuf,
+    pub bootstrap_root: PathBuf,
+    pub template_name: String,
+    pub reason: String,
+    pub legacy_active_plan: bool,
+    pub refresh_command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct AmbientIsolationReport {
     pub provider_profiles: Vec<ProviderAmbientProfile>,
     pub skill_roots: Vec<SkillRootStatus>,
@@ -120,7 +156,7 @@ pub fn build_doctor_report(
     state_dir: PathBuf,
     prober: &dyn ProviderProber,
 ) -> DoctorReport {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = resolve_cli_cwd().unwrap_or_else(|_| PathBuf::from("."));
     build_doctor_report_for_cwd_with_home(cwd, agents_dirs, state_dir, prober, home_dir())
 }
 
@@ -141,6 +177,7 @@ fn build_doctor_report_for_cwd_with_home(
     prober: &dyn ProviderProber,
     user_home: Option<PathBuf>,
 ) -> DoctorReport {
+    let project_bridge = build_project_bridge_health(&cwd, &agents_dirs, &state_dir);
     let (agents_loaded, agents_error, loaded_specs) = match load_agent_specs_from_dirs(&agents_dirs)
     {
         Ok(loaded) => (Some(loaded.len()), None, loaded),
@@ -151,6 +188,7 @@ fn build_doctor_report_for_cwd_with_home(
     let ambient_isolation =
         build_ambient_isolation_report(&cwd, &loaded_specs, user_home.as_deref());
     let knowledge_layout = build_knowledge_layout_health(&cwd);
+    let bootstrap_catalog = build_bootstrap_catalog_health(&loaded_specs);
     let probes: Vec<ProviderProbe> = all_providers()
         .into_iter()
         .map(|provider| prober.probe(&provider))
@@ -159,6 +197,8 @@ fn build_doctor_report_for_cwd_with_home(
     let (status, issues, advice) = build_doctor_health(
         &agents_error,
         &knowledge_layout,
+        &project_bridge,
+        &bootstrap_catalog,
         &probes,
         &version_pins,
         &ambient_isolation,
@@ -174,6 +214,8 @@ fn build_doctor_report_for_cwd_with_home(
         workspace_policy_hints,
         ambient_isolation,
         knowledge_layout,
+        project_bridge,
+        bootstrap_catalog,
         version_pins,
         status,
         issues,
@@ -184,6 +226,8 @@ fn build_doctor_report_for_cwd_with_home(
 fn build_doctor_health(
     agents_error: &Option<String>,
     knowledge_layout: &KnowledgeLayoutHealth,
+    project_bridge: &ProjectBridgeHealth,
+    bootstrap_catalog: &BootstrapCatalogHealth,
     probes: &[ProviderProbe],
     version_pins: &ProviderVersionPinReport,
     ambient_isolation: &AmbientIsolationReport,
@@ -210,6 +254,74 @@ fn build_doctor_health(
             suggestion: Some(
                 "Create PLAN.md / PROJECT.md and archive plans under docs/plans/.".to_string(),
             ),
+        });
+    }
+
+    match project_bridge.status.as_str() {
+        "missing" if project_bridge.repair_command.is_some() => issues.push(DoctorIssue {
+            level: "warning".to_string(),
+            code: "project_bridge_missing".to_string(),
+            message: "project bridge config is missing for the current generated root".to_string(),
+            suggestion: project_bridge.repair_command.clone(),
+        }),
+        "unconfigured" if project_bridge.repair_command.is_some() => issues.push(DoctorIssue {
+            level: "warning".to_string(),
+            code: "project_bridge_unconfigured".to_string(),
+            message:
+                "project bridge config exists but does not declare [paths].agents_dirs/state_dir"
+                    .to_string(),
+            suggestion: project_bridge.repair_command.clone(),
+        }),
+        "invalid" => issues.push(DoctorIssue {
+            level: "warning".to_string(),
+            code: "project_bridge_invalid".to_string(),
+            message: project_bridge
+                .warnings
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "project bridge config is invalid".to_string()),
+            suggestion: project_bridge.repair_command.clone(),
+        }),
+        "drifted" => issues.push(DoctorIssue {
+            level: "warning".to_string(),
+            code: "project_bridge_drifted".to_string(),
+            message: "project bridge config does not match the active runtime target".to_string(),
+            suggestion: project_bridge.repair_command.clone(),
+        }),
+        _ => {}
+    }
+
+    if !bootstrap_catalog.drifted_templates.is_empty() {
+        let legacy_active_plan_count = bootstrap_catalog
+            .drifted_templates
+            .iter()
+            .filter(|entry| entry.legacy_active_plan)
+            .count();
+        let suggestion = match bootstrap_catalog.refresh_commands.as_slice() {
+            [command] => format!(
+                "Review drifted generated-root templates first; if the drift is accidental, run `{command}` to resync built-in templates while preserving custom agents. Doctor only reports drift and will not overwrite files."
+            ),
+            [] => "Review drifted generated-root templates first; if the drift is accidental, resync that generated root with `mcp-subagent init --refresh-bootstrap --root-dir <generated-root>`. Doctor only reports drift and will not overwrite files.".to_string(),
+            _ => "Review drifted generated-root templates first; if the drift is accidental, run the matching `refresh_command` listed under `bootstrap_catalog.drifted_templates`. Doctor only reports drift and will not overwrite files.".to_string(),
+        };
+        let message = if legacy_active_plan_count > 0 {
+            format!(
+                "{} drifted bootstrap template(s) detected; {} still reference legacy active_plan injection",
+                bootstrap_catalog.drifted_templates.len(),
+                legacy_active_plan_count
+            )
+        } else {
+            format!(
+                "{} drifted bootstrap template(s) detected against catalog {}",
+                bootstrap_catalog.drifted_templates.len(),
+                bootstrap_catalog.catalog_version
+            )
+        };
+        issues.push(DoctorIssue {
+            level: "warning".to_string(),
+            code: "bootstrap_template_drift".to_string(),
+            message,
+            suggestion: Some(suggestion),
         });
     }
 
@@ -307,6 +419,217 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+fn build_project_bridge_health(
+    cwd: &Path,
+    runtime_agents_dirs: &[PathBuf],
+    runtime_state_dir: &Path,
+) -> ProjectBridgeHealth {
+    let config_path = cwd.join(".mcp-subagent/config.toml");
+    let runtime_agents_dirs = runtime_agents_dirs
+        .iter()
+        .map(|path| resolve_bridge_path(cwd, path))
+        .collect::<Vec<_>>();
+    let runtime_state_dir = resolve_bridge_path(cwd, runtime_state_dir);
+    let runtime_generated_root =
+        infer_generated_root_from_paths(&runtime_agents_dirs, &runtime_state_dir);
+
+    match load_project_bridge_config(cwd, &config_path) {
+        ProjectBridgeConfigLoad::Missing => ProjectBridgeHealth {
+            config_path,
+            status: "missing".to_string(),
+            configured_agents_dirs: Vec::new(),
+            configured_state_dir: None,
+            runtime_agents_dirs,
+            runtime_state_dir,
+            generated_root: runtime_generated_root.clone(),
+            root_scope: runtime_generated_root
+                .as_ref()
+                .map(|root| classify_root_scope(cwd, root)),
+            repair_command: runtime_generated_root
+                .as_ref()
+                .map(|root| build_sync_project_bridge_command(root, false)),
+            warnings: runtime_generated_root
+                .as_ref()
+                .map(|root| {
+                    vec![format!(
+                        "project bridge config is missing; current runtime target resolves to generated root {}",
+                        root.display()
+                    )]
+                })
+                .unwrap_or_default(),
+        },
+        ProjectBridgeConfigLoad::Unconfigured => ProjectBridgeHealth {
+            config_path,
+            status: "unconfigured".to_string(),
+            configured_agents_dirs: Vec::new(),
+            configured_state_dir: None,
+            runtime_agents_dirs,
+            runtime_state_dir,
+            generated_root: runtime_generated_root.clone(),
+            root_scope: runtime_generated_root
+                .as_ref()
+                .map(|root| classify_root_scope(cwd, root)),
+            repair_command: runtime_generated_root
+                .as_ref()
+                .map(|root| build_sync_project_bridge_command(root, true)),
+            warnings: vec![
+                "project bridge config exists but does not declare [paths].agents_dirs/state_dir"
+                    .to_string(),
+            ],
+        },
+        ProjectBridgeConfigLoad::Invalid(reason) => ProjectBridgeHealth {
+            config_path,
+            status: "invalid".to_string(),
+            configured_agents_dirs: Vec::new(),
+            configured_state_dir: None,
+            runtime_agents_dirs,
+            runtime_state_dir,
+            generated_root: runtime_generated_root.clone(),
+            root_scope: runtime_generated_root
+                .as_ref()
+                .map(|root| classify_root_scope(cwd, root)),
+            repair_command: runtime_generated_root
+                .as_ref()
+                .map(|root| build_sync_project_bridge_command(root, true)),
+            warnings: vec![reason],
+        },
+        ProjectBridgeConfigLoad::Configured {
+            agents_dirs,
+            state_dir,
+        } => {
+            let configured_generated_root =
+                infer_generated_root_from_paths(&agents_dirs, &state_dir);
+            let matches_runtime =
+                agents_dirs == runtime_agents_dirs && state_dir == runtime_state_dir;
+            let generated_root = configured_generated_root.or(runtime_generated_root.clone());
+            let root_scope = generated_root
+                .as_ref()
+                .map(|root| classify_root_scope(cwd, root));
+            let warnings = if matches_runtime {
+                Vec::new()
+            } else {
+                vec!["configured bridge paths differ from the active runtime target".to_string()]
+            };
+
+            ProjectBridgeHealth {
+                config_path,
+                status: if matches_runtime {
+                    "synced".to_string()
+                } else {
+                    "drifted".to_string()
+                },
+                configured_agents_dirs: agents_dirs,
+                configured_state_dir: Some(state_dir),
+                runtime_agents_dirs,
+                runtime_state_dir,
+                generated_root,
+                root_scope,
+                repair_command: if matches_runtime {
+                    None
+                } else {
+                    runtime_generated_root
+                        .as_ref()
+                        .map(|root| build_sync_project_bridge_command(root, true))
+                },
+                warnings,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ProjectBridgeConfigLoad {
+    Missing,
+    Unconfigured,
+    Invalid(String),
+    Configured {
+        agents_dirs: Vec<PathBuf>,
+        state_dir: PathBuf,
+    },
+}
+
+fn load_project_bridge_config(cwd: &Path, config_path: &Path) -> ProjectBridgeConfigLoad {
+    if !config_path.exists() {
+        return ProjectBridgeConfigLoad::Missing;
+    }
+    if !config_path.is_file() {
+        return ProjectBridgeConfigLoad::Invalid(format!(
+            "project bridge config path is not a file: {}",
+            config_path.display()
+        ));
+    }
+
+    let raw = match std::fs::read_to_string(config_path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            return ProjectBridgeConfigLoad::Invalid(format!(
+                "failed to read project bridge config: {err}"
+            ));
+        }
+    };
+    let parsed = match raw.parse::<toml::Value>() {
+        Ok(value) => value,
+        Err(err) => {
+            return ProjectBridgeConfigLoad::Invalid(format!(
+                "failed to parse project bridge config: {err}"
+            ));
+        }
+    };
+    let Some(paths) = parsed.get("paths").and_then(|value| value.as_table()) else {
+        return ProjectBridgeConfigLoad::Unconfigured;
+    };
+    let agents_value = paths.get("agents_dirs");
+    let state_value = paths.get("state_dir");
+
+    match (agents_value, state_value) {
+        (None, None) => ProjectBridgeConfigLoad::Unconfigured,
+        (Some(_), None) | (None, Some(_)) => ProjectBridgeConfigLoad::Invalid(
+            "project bridge config must define both [paths].agents_dirs and [paths].state_dir"
+                .to_string(),
+        ),
+        (Some(agents_value), Some(state_value)) => {
+            let Some(raw_agents) = agents_value.as_array() else {
+                return ProjectBridgeConfigLoad::Invalid(
+                    "[paths].agents_dirs must be an array of strings".to_string(),
+                );
+            };
+            if raw_agents.is_empty() {
+                return ProjectBridgeConfigLoad::Invalid(
+                    "[paths].agents_dirs must contain at least one entry".to_string(),
+                );
+            }
+            let mut agents_dirs = Vec::with_capacity(raw_agents.len());
+            for entry in raw_agents {
+                let Some(raw_path) = entry.as_str() else {
+                    return ProjectBridgeConfigLoad::Invalid(
+                        "[paths].agents_dirs entries must be strings".to_string(),
+                    );
+                };
+                agents_dirs.push(resolve_bridge_path(cwd, Path::new(raw_path)));
+            }
+
+            let Some(raw_state_dir) = state_value.as_str() else {
+                return ProjectBridgeConfigLoad::Invalid(
+                    "[paths].state_dir must be a string".to_string(),
+                );
+            };
+            let state_dir = resolve_bridge_path(cwd, Path::new(raw_state_dir));
+            ProjectBridgeConfigLoad::Configured {
+                agents_dirs,
+                state_dir,
+            }
+        }
+    }
+}
+
+fn resolve_bridge_path(cwd: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
 }
 
 fn build_ambient_isolation_report(
@@ -595,6 +918,102 @@ fn build_provider_version_pin_report(
         source: pin_config.source,
         entries,
     }
+}
+
+fn build_bootstrap_catalog_health(loaded_specs: &[LoadedAgentSpec]) -> BootstrapCatalogHealth {
+    let drifted_templates = loaded_specs
+        .iter()
+        .filter_map(analyze_bootstrap_template_drift)
+        .collect::<Vec<_>>();
+    let refresh_commands = drifted_templates
+        .iter()
+        .map(|entry| entry.refresh_command.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    BootstrapCatalogHealth {
+        catalog_version: preset_catalog_version().to_string(),
+        drifted_templates,
+        refresh_commands,
+    }
+}
+
+fn analyze_bootstrap_template_drift(loaded: &LoadedAgentSpec) -> Option<BootstrapTemplateDrift> {
+    let bootstrap_root = generated_root_for_agent_path(&loaded.path)?;
+    let file_name = loaded.path.file_name()?.to_str()?;
+    let expected = builtin_agent_template(file_name)?;
+    let actual = std::fs::read_to_string(&loaded.path).ok()?;
+    if actual == expected {
+        return None;
+    }
+
+    let legacy_active_plan = actual.contains("active_plan");
+    let reason = if legacy_active_plan {
+        "differs from current built-in template and still references legacy active_plan memory injection"
+    } else {
+        "differs from current built-in template"
+    };
+    Some(BootstrapTemplateDrift {
+        path: loaded.path.clone(),
+        bootstrap_root: bootstrap_root.clone(),
+        template_name: file_name.to_string(),
+        reason: reason.to_string(),
+        legacy_active_plan,
+        refresh_command: build_refresh_bootstrap_command(&bootstrap_root),
+    })
+}
+
+fn generated_root_for_agent_path(path: &Path) -> Option<PathBuf> {
+    let agents_dir = path.parent()?;
+    if agents_dir.file_name().and_then(|name| name.to_str()) != Some("agents") {
+        return None;
+    }
+    let root = agents_dir.parent()?;
+    if is_generated_root(root) {
+        return Some(root.to_path_buf());
+    }
+    None
+}
+
+fn infer_generated_root_from_paths(agents_dirs: &[PathBuf], state_dir: &Path) -> Option<PathBuf> {
+    let [agents_dir] = agents_dirs else {
+        return None;
+    };
+    if agents_dir.file_name().and_then(|name| name.to_str()) != Some("agents") {
+        return None;
+    }
+    let root = agents_dir.parent()?;
+    if state_dir != root.join(".mcp-subagent/state") {
+        return None;
+    }
+    if is_generated_root(root) {
+        return Some(root.to_path_buf());
+    }
+    None
+}
+
+fn classify_root_scope(cwd: &Path, root: &Path) -> String {
+    if root.strip_prefix(cwd).is_ok() {
+        "project_internal".to_string()
+    } else {
+        "project_external".to_string()
+    }
+}
+
+fn build_refresh_bootstrap_command(root: &Path) -> String {
+    format!(
+        "mcp-subagent init --refresh-bootstrap --root-dir {}",
+        shell_escape_path(root)
+    )
+}
+
+fn build_sync_project_bridge_command(root: &Path, force: bool) -> String {
+    let force_suffix = if force { " --force" } else { "" };
+    format!(
+        "mcp-subagent init --root-dir {} --sync-project-config-only{}",
+        shell_escape_path(root),
+        force_suffix
+    )
 }
 
 #[derive(Debug, Default)]
@@ -933,6 +1352,105 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
         }
     }
 
+    out.push_str("\nproject_bridge:\n");
+    out.push_str(&format!(
+        "  config_path: {}\n",
+        report.project_bridge.config_path.display()
+    ));
+    out.push_str(&format!("  status: {}\n", report.project_bridge.status));
+    if report.project_bridge.configured_agents_dirs.is_empty() {
+        out.push_str("  configured_agents_dirs: []\n");
+    } else {
+        out.push_str("  configured_agents_dirs:\n");
+        for path in &report.project_bridge.configured_agents_dirs {
+            out.push_str(&format!("    - {}\n", path.display()));
+        }
+    }
+    out.push_str(&format!(
+        "  configured_state_dir: {}\n",
+        report
+            .project_bridge
+            .configured_state_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".to_string())
+    ));
+    if report.project_bridge.runtime_agents_dirs.is_empty() {
+        out.push_str("  runtime_agents_dirs: []\n");
+    } else {
+        out.push_str("  runtime_agents_dirs:\n");
+        for path in &report.project_bridge.runtime_agents_dirs {
+            out.push_str(&format!("    - {}\n", path.display()));
+        }
+    }
+    out.push_str(&format!(
+        "  runtime_state_dir: {}\n",
+        report.project_bridge.runtime_state_dir.display()
+    ));
+    out.push_str(&format!(
+        "  generated_root: {}\n",
+        report
+            .project_bridge
+            .generated_root
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".to_string())
+    ));
+    out.push_str(&format!(
+        "  root_scope: {}\n",
+        report
+            .project_bridge
+            .root_scope
+            .as_deref()
+            .unwrap_or("none")
+    ));
+    out.push_str(&format!(
+        "  repair_command: {}\n",
+        report
+            .project_bridge
+            .repair_command
+            .as_deref()
+            .unwrap_or("none")
+    ));
+    if report.project_bridge.warnings.is_empty() {
+        out.push_str("  warnings: []\n");
+    } else {
+        out.push_str("  warnings:\n");
+        for warning in &report.project_bridge.warnings {
+            out.push_str(&format!("    - {warning}\n"));
+        }
+    }
+
+    out.push_str("\nbootstrap_catalog:\n");
+    out.push_str(&format!(
+        "  catalog_version: {}\n",
+        report.bootstrap_catalog.catalog_version
+    ));
+    if report.bootstrap_catalog.drifted_templates.is_empty() {
+        out.push_str("  drifted_templates: []\n");
+    } else {
+        out.push_str("  drifted_templates:\n");
+        for drift in &report.bootstrap_catalog.drifted_templates {
+            out.push_str(&format!(
+                "    - path: {}\n      bootstrap_root: {}\n      template_name: {}\n      reason: {}\n      legacy_active_plan: {}\n      refresh_command: {}\n",
+                drift.path.display(),
+                drift.bootstrap_root.display(),
+                drift.template_name,
+                drift.reason,
+                drift.legacy_active_plan,
+                drift.refresh_command,
+            ));
+        }
+    }
+    if report.bootstrap_catalog.refresh_commands.is_empty() {
+        out.push_str("  refresh_commands: []\n");
+    } else {
+        out.push_str("  refresh_commands:\n");
+        for command in &report.bootstrap_catalog.refresh_commands {
+            out.push_str(&format!("    - {command}\n"));
+        }
+    }
+
     if !report.advice.is_empty() {
         out.push_str("\nadvice:\n");
         for advice in &report.advice {
@@ -959,7 +1477,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::probe::{ProbeStatus, ProviderCapabilities, ProviderProbe, ProviderProber};
+    use crate::{
+        init::{init_workspace, InitPreset},
+        probe::{ProbeStatus, ProviderCapabilities, ProviderProbe, ProviderProber},
+    };
 
     use super::{
         build_doctor_report, build_doctor_report_for_cwd, build_doctor_report_for_cwd_with_home,
@@ -1052,6 +1573,7 @@ instructions = "review"
         assert!(rendered.contains("workspace_policy_hints"));
         assert!(rendered.contains("ambient_isolation"));
         assert!(rendered.contains("knowledge_layout_health"));
+        assert!(rendered.contains("project_bridge"));
     }
 
     #[test]
@@ -1254,6 +1776,295 @@ native_discovery = "inherit"
                 .iter()
                 .any(|issue| issue.code == "ambient_skill_conflicts"),
             "expected ambient conflict issue"
+        );
+    }
+
+    #[test]
+    fn doctor_reports_synced_internal_project_bridge() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join(".mcp-subagent/bootstrap");
+        init_workspace(&root, InitPreset::CodexPrimaryBuilder, false).expect("init root");
+        fs::create_dir_all(temp.path().join(".mcp-subagent")).expect("create project config dir");
+        fs::write(
+            temp.path().join(".mcp-subagent/config.toml"),
+            r#"[paths]
+agents_dirs = ["./.mcp-subagent/bootstrap/agents"]
+state_dir = "./.mcp-subagent/bootstrap/.mcp-subagent/state"
+"#,
+        )
+        .expect("write bridge config");
+
+        let report = build_doctor_report_for_cwd(
+            temp.path().to_path_buf(),
+            vec![root.join("agents")],
+            root.join(".mcp-subagent/state"),
+            &FakeProber::default(),
+        );
+
+        assert_eq!(report.project_bridge.status, "synced");
+        assert_eq!(report.project_bridge.generated_root, Some(root));
+        assert_eq!(
+            report.project_bridge.root_scope.as_deref(),
+            Some("project_internal")
+        );
+        assert!(report.project_bridge.repair_command.is_none());
+    }
+
+    #[test]
+    fn doctor_reports_missing_external_project_bridge_with_repair_command() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let root = temp.path().join("custom-root");
+        fs::create_dir_all(&project).expect("create project");
+        init_workspace(&root, InitPreset::CodexPrimaryBuilder, false).expect("init root");
+
+        let report = build_doctor_report_for_cwd(
+            project.clone(),
+            vec![root.join("agents")],
+            root.join(".mcp-subagent/state"),
+            &FakeProber::default(),
+        );
+
+        assert_eq!(report.project_bridge.status, "missing");
+        assert_eq!(report.project_bridge.generated_root, Some(root.clone()));
+        assert_eq!(
+            report.project_bridge.root_scope.as_deref(),
+            Some("project_external")
+        );
+        let expected = format!(
+            "mcp-subagent init --root-dir '{}' --sync-project-config-only",
+            root.display()
+        );
+        assert_eq!(
+            report.project_bridge.repair_command.as_deref(),
+            Some(expected.as_str())
+        );
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "project_bridge_missing")
+            .expect("missing project bridge issue");
+        assert_eq!(
+            issue.message,
+            "project bridge config is missing for the current generated root"
+        );
+        assert!(
+            issue
+                .suggestion
+                .as_deref()
+                .is_some_and(|value| value == expected),
+            "expected exact bridge-only repair command"
+        );
+    }
+
+    #[test]
+    fn doctor_reports_unconfigured_project_bridge_with_force_repair() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let root = temp.path().join("custom-root");
+        fs::create_dir_all(project.join(".mcp-subagent")).expect("create project config dir");
+        init_workspace(&root, InitPreset::CodexPrimaryBuilder, false).expect("init root");
+        fs::write(
+            project.join(".mcp-subagent/config.toml"),
+            r#"[provider_version_pins]
+enabled = false
+"#,
+        )
+        .expect("write partial project config");
+
+        let report = build_doctor_report_for_cwd(
+            project,
+            vec![root.join("agents")],
+            root.join(".mcp-subagent/state"),
+            &FakeProber::default(),
+        );
+
+        assert_eq!(report.project_bridge.status, "unconfigured");
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "project_bridge_unconfigured")
+            .expect("unconfigured project bridge issue");
+        assert_eq!(
+            issue.message,
+            "project bridge config exists but does not declare [paths].agents_dirs/state_dir"
+        );
+        assert!(
+            report
+                .project_bridge
+                .repair_command
+                .as_deref()
+                .is_some_and(|command| command.contains("--sync-project-config-only --force")),
+            "expected --force repair command"
+        );
+    }
+
+    #[test]
+    fn doctor_reports_synced_external_project_bridge() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let root = temp.path().join("custom-root");
+        fs::create_dir_all(project.join(".mcp-subagent")).expect("create project config dir");
+        init_workspace(&root, InitPreset::CodexPrimaryBuilder, false).expect("init root");
+        fs::write(
+            project.join(".mcp-subagent/config.toml"),
+            format!(
+                "[paths]\nagents_dirs = [\"{}/agents\"]\nstate_dir = \"{}/.mcp-subagent/state\"\n",
+                root.display(),
+                root.display()
+            ),
+        )
+        .expect("write synced bridge config");
+
+        let report = build_doctor_report_for_cwd(
+            project,
+            vec![root.join("agents")],
+            root.join(".mcp-subagent/state"),
+            &FakeProber::default(),
+        );
+
+        assert_eq!(report.project_bridge.status, "synced");
+        assert_eq!(
+            report.project_bridge.root_scope.as_deref(),
+            Some("project_external")
+        );
+        assert!(report.project_bridge.repair_command.is_none());
+    }
+
+    #[test]
+    fn doctor_reports_bootstrap_template_drift_without_overwriting() {
+        let temp = tempdir().expect("tempdir");
+        let agents_dir = temp.path().join(".mcp-subagent/bootstrap/agents");
+        fs::create_dir_all(&agents_dir).expect("create bootstrap agents");
+        fs::write(
+            agents_dir.join("backend-coder.agent.toml"),
+            r#"[core]
+name = "backend-coder"
+description = "Implements backend and Rust changes from an approved plan."
+provider = "codex"
+model = "gpt-5.3-codex"
+instructions = "Implement scoped changes from PLAN.md. Keep diffs minimal and reference plan steps in summary."
+tags = ["build", "backend", "rust", "codex"]
+
+[runtime]
+context_mode = { selected_files = ["src/**", "Cargo.toml", "PLAN.md"] }
+delegation_context = "selected_files"
+memory_sources = ["auto_project_memory", "active_plan"]
+native_discovery = "minimal"
+working_dir_policy = "auto"
+file_conflict_policy = "serialize"
+sandbox = "workspace_write"
+approval = "deny_by_default"
+timeout_secs = 1200
+output_mode = "both"
+parse_policy = "best_effort"
+spawn_policy = "async"
+
+[provider_overrides.codex]
+model_reasoning_effort = "medium"
+
+[workflow]
+enabled = true
+stages = ["build", "review"]
+max_runtime_depth = 1
+"#,
+        )
+        .expect("write drifted agent");
+
+        let report = build_doctor_report_for_cwd(
+            temp.path().to_path_buf(),
+            vec![agents_dir],
+            temp.path()
+                .join(".mcp-subagent/bootstrap/.mcp-subagent/state"),
+            &FakeProber::default(),
+        );
+
+        assert_eq!(report.bootstrap_catalog.catalog_version, "v0.10.0");
+        assert_eq!(report.bootstrap_catalog.drifted_templates.len(), 1);
+        assert_eq!(report.bootstrap_catalog.refresh_commands.len(), 1);
+        let drift = &report.bootstrap_catalog.drifted_templates[0];
+        assert_eq!(
+            drift.bootstrap_root,
+            temp.path().join(".mcp-subagent/bootstrap")
+        );
+        assert_eq!(drift.template_name, "backend-coder.agent.toml");
+        assert!(drift.legacy_active_plan);
+        assert!(drift.reason.contains("legacy active_plan"));
+        assert!(drift.refresh_command.contains("--refresh-bootstrap"));
+        assert!(drift.refresh_command.contains("--root-dir"));
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "bootstrap_template_drift"),
+            "expected bootstrap drift warning"
+        );
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "bootstrap_template_drift")
+            .expect("drift issue");
+        assert!(
+            issue
+                .suggestion
+                .as_deref()
+                .is_some_and(|suggestion| suggestion.contains("init --refresh-bootstrap")),
+            "expected refresh-bootstrap suggestion, got {:?}",
+            issue.suggestion
+        );
+
+        let rendered = render_doctor_report(&report);
+        assert!(rendered.contains("bootstrap_catalog"));
+        assert!(rendered.contains("backend-coder.agent.toml"));
+        assert!(rendered.contains("bootstrap_root:"));
+        assert!(rendered.contains("refresh_command:"));
+        assert!(rendered.contains("legacy_active_plan: true"));
+    }
+
+    #[test]
+    fn doctor_detects_drift_for_generated_custom_root_and_emits_exact_refresh_command() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("custom-bootstrap-root");
+        init_workspace(&root, InitPreset::CodexPrimaryBuilder, false).expect("init root");
+        let backend_path = root.join("agents/backend-coder.agent.toml");
+        let drifted = fs::read_to_string(&backend_path)
+            .expect("read backend template")
+            .replacen(
+                "memory_sources = [\"auto_project_memory\"]",
+                "memory_sources = [\"auto_project_memory\", \"active_plan\"]",
+                1,
+            );
+        fs::write(&backend_path, drifted).expect("write drifted builtin");
+
+        let report = build_doctor_report_for_cwd(
+            temp.path().to_path_buf(),
+            vec![root.join("agents")],
+            root.join(".mcp-subagent/state"),
+            &FakeProber::default(),
+        );
+
+        assert_eq!(report.bootstrap_catalog.drifted_templates.len(), 1);
+        let drift = &report.bootstrap_catalog.drifted_templates[0];
+        assert_eq!(drift.bootstrap_root, root);
+        assert_eq!(
+            drift.refresh_command,
+            format!(
+                "mcp-subagent init --refresh-bootstrap --root-dir '{}'",
+                drift.bootstrap_root.display()
+            )
+        );
+        assert_eq!(
+            report.bootstrap_catalog.refresh_commands,
+            vec![drift.refresh_command.clone()]
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .find(|issue| issue.code == "bootstrap_template_drift")
+                .and_then(|issue| issue.suggestion.as_deref())
+                .is_some_and(|suggestion| suggestion.contains(&drift.refresh_command)),
+            "expected exact refresh command in issue suggestion"
         );
     }
 }

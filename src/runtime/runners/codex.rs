@@ -11,13 +11,16 @@ use tokio::io::AsyncWriteExt;
 
 use crate::{
     error::{McpSubagentError, Result},
-    runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
+    runtime::runners::{
+        streaming::collect_streaming_output, AgentRunner, RunnerExecution, RunnerOutputObserver,
+        RunnerTerminalState,
+    },
     spec::{
         provider_overrides::{CodexSandboxMode, ReasoningEffort},
         runtime_policy::{ApprovalPolicy, SandboxPolicy},
         AgentSpec,
     },
-    types::{CompiledContext, RunRequest},
+    types::{CompiledContext, TaskSpec, WorkflowHints},
 };
 
 #[derive(Debug, Clone)]
@@ -38,11 +41,12 @@ impl CodexRunner {
         Self { executable }
     }
 
-    pub async fn execute(
+    async fn execute_internal(
         &self,
         spec: &AgentSpec,
-        request: &RunRequest,
+        task_spec: &TaskSpec,
         compiled: &CompiledContext,
+        observer: Option<&mut dyn RunnerOutputObserver>,
     ) -> Result<RunnerExecution> {
         let prompt = compose_prompt(compiled);
         let output_file = std::env::temp_dir().join(format!(
@@ -65,7 +69,7 @@ impl CodexRunner {
             .arg("--sandbox")
             .arg(resolve_sandbox(spec))
             .arg("--cd")
-            .arg(&request.working_dir)
+            .arg(&task_spec.working_dir)
             .arg("--output-last-message")
             .arg(&output_file)
             .arg("--output-schema")
@@ -99,21 +103,56 @@ impl CodexRunner {
                 .map_err(McpSubagentError::Io)?;
         }
 
-        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(waited) => waited.map_err(McpSubagentError::Io)?,
-            Err(_) => {
-                let _ = fs::remove_file(&output_file);
-                let _ = fs::remove_file(&schema_file);
-                return Ok(RunnerExecution {
-                    terminal_state: RunnerTerminalState::TimedOut,
-                    stdout: String::new(),
-                    stderr: format!("codex execution exceeded timeout of {}s", timeout.as_secs()),
-                });
+        let (status, mut stdout, stderr, timed_out) = match observer {
+            Some(output_observer) => {
+                let observed =
+                    collect_streaming_output(&mut child, timeout, output_observer).await?;
+                (
+                    observed.status,
+                    observed.stdout,
+                    observed.stderr,
+                    observed.timed_out,
+                )
             }
+            None => match tokio::time::timeout(timeout, child.wait_with_output()).await {
+                Ok(waited) => {
+                    let output = waited.map_err(McpSubagentError::Io)?;
+                    (
+                        output.status,
+                        String::from_utf8_lossy(&output.stdout).to_string(),
+                        String::from_utf8_lossy(&output.stderr).to_string(),
+                        false,
+                    )
+                }
+                Err(_) => {
+                    let _ = fs::remove_file(&output_file);
+                    let _ = fs::remove_file(&schema_file);
+                    return Ok(RunnerExecution {
+                        terminal_state: RunnerTerminalState::TimedOut,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "codex execution exceeded timeout of {}s",
+                            timeout.as_secs()
+                        ),
+                    });
+                }
+            },
         };
 
-        let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if timed_out {
+            let _ = fs::remove_file(&output_file);
+            let _ = fs::remove_file(&schema_file);
+            return Ok(RunnerExecution {
+                terminal_state: RunnerTerminalState::TimedOut,
+                stdout,
+                stderr: if stderr.is_empty() {
+                    format!("codex execution exceeded timeout of {}s", timeout.as_secs())
+                } else {
+                    stderr
+                },
+            });
+        }
+
         if let Ok(last_message) = fs::read_to_string(&output_file) {
             if !last_message.trim().is_empty() {
                 if !stdout.is_empty() && !stdout.ends_with('\n') {
@@ -125,10 +164,10 @@ impl CodexRunner {
         let _ = fs::remove_file(&output_file);
         let _ = fs::remove_file(&schema_file);
 
-        let terminal_state = if output.status.success() {
+        let terminal_state = if status.success() {
             RunnerTerminalState::Succeeded
         } else {
-            let exit_code = output.status.code().unwrap_or(-1);
+            let exit_code = status.code().unwrap_or(-1);
             let mut message = format!("codex exited with code {exit_code}");
             if let Some(summary_line) = summarize_codex_stderr(&stderr) {
                 message.push_str(": ");
@@ -143,17 +182,52 @@ impl CodexRunner {
             stderr,
         })
     }
+
+    pub async fn execute_task(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        _hints: &WorkflowHints,
+        compiled: &CompiledContext,
+    ) -> Result<RunnerExecution> {
+        self.execute_internal(spec, task_spec, compiled, None).await
+    }
+
+    pub async fn execute_task_with_observer(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        _hints: &WorkflowHints,
+        compiled: &CompiledContext,
+        observer: &mut dyn RunnerOutputObserver,
+    ) -> Result<RunnerExecution> {
+        self.execute_internal(spec, task_spec, compiled, Some(observer))
+            .await
+    }
 }
 
 #[async_trait]
 impl AgentRunner for CodexRunner {
-    async fn execute(
+    async fn execute_task(
         &self,
         spec: &AgentSpec,
-        request: &RunRequest,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
         compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
-        CodexRunner::execute(self, spec, request, compiled).await
+        CodexRunner::execute_task(self, spec, task_spec, hints, compiled).await
+    }
+
+    async fn execute_task_with_observer(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
+        compiled: &CompiledContext,
+        observer: &mut dyn RunnerOutputObserver,
+    ) -> Result<RunnerExecution> {
+        CodexRunner::execute_task_with_observer(self, spec, task_spec, hints, compiled, observer)
+            .await
     }
 }
 
@@ -166,7 +240,7 @@ fn compose_prompt(compiled: &CompiledContext) -> String {
 }
 
 fn build_codex_output_schema_json() -> Result<String> {
-    let schema = schemars::schema_for!(crate::runtime::summary::SummaryEnvelope);
+    let schema = schemars::schema_for!(crate::runtime::summary::ProviderSummary);
     let mut schema_value = serde_json::to_value(schema).map_err(McpSubagentError::Json)?;
     normalize_openai_strict_schema(&mut schema_value);
     serde_json::to_string_pretty(&schema_value).map_err(McpSubagentError::Json)
@@ -286,14 +360,14 @@ mod tests {
                 build_codex_output_schema_json, normalize_openai_strict_schema,
                 summarize_codex_stderr, CodexRunner,
             },
-            runners::RunnerTerminalState,
+            runners::{AgentRunner, RunnerOutputObserver, RunnerOutputStream, RunnerTerminalState},
         },
         spec::{
             core::{AgentSpecCore, Provider},
             runtime_policy::{ApprovalPolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy},
             AgentSpec,
         },
-        types::{CompiledContext, RunMode, RunRequest},
+        types::{CompiledContext, RunMode, TaskSpec, WorkflowHints},
     };
 
     fn sample_spec() -> AgentSpec {
@@ -321,17 +395,31 @@ mod tests {
         }
     }
 
-    fn sample_request(working_dir: PathBuf) -> RunRequest {
-        RunRequest {
+    fn sample_task_spec(working_dir: PathBuf) -> TaskSpec {
+        TaskSpec {
             task: "review parser".to_string(),
             task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir,
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir,
+        }
+    }
+
+    fn sample_hints() -> WorkflowHints {
+        WorkflowHints {
+            run_mode: RunMode::Sync,
+            ..WorkflowHints::default()
+        }
+    }
+
+    #[derive(Default)]
+    struct CollectingObserver {
+        events: Vec<(RunnerOutputStream, String)>,
+    }
+
+    impl RunnerOutputObserver for CollectingObserver {
+        fn on_output(&mut self, stream: RunnerOutputStream, chunk: &str) {
+            self.events.push((stream, chunk.to_string()));
         }
     }
 
@@ -362,7 +450,6 @@ cat >"$output_file" <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": ["next"],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": ["src/lib.rs"]
 }
@@ -378,9 +465,10 @@ exit 0
 
         let runner = CodexRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -428,7 +516,6 @@ cat >"$output_file" <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": ["next"],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": ["src/lib.rs"],
   "plan_refs": []
@@ -444,9 +531,10 @@ exit 0
 
         let runner = CodexRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -475,9 +563,10 @@ exit 7
 
         let runner = CodexRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -497,6 +586,86 @@ exit 7
     }
 
     #[tokio::test]
+    async fn codex_runner_execute_with_observer_streams_output_chunks() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("fake-codex-stream.sh");
+        let script = r#"#!/bin/sh
+set -eu
+output_file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output-last-message)
+      output_file="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+cat >/dev/null
+echo "stdout-chunk-1"
+sleep 0.1
+echo "stdout-chunk-2"
+echo "stderr-chunk-1" >&2
+sleep 0.1
+echo "stderr-chunk-2" >&2
+cat >"$output_file" <<'EOF'
+<<<MCP_SUBAGENT_SUMMARY_JSON_START>>>
+{
+  "summary": "ok",
+  "key_findings": [],
+  "artifacts": [],
+  "open_questions": [],
+  "next_steps": [],
+  "verification_status": "Passed",
+  "touched_files": [],
+  "plan_refs": []
+}
+<<<MCP_SUBAGENT_SUMMARY_JSON_END>>>
+EOF
+exit 0
+"#;
+        fs::write(&script_path, script).expect("write script");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod");
+
+        let runner = CodexRunner::new(script_path);
+        let mut observer = CollectingObserver::default();
+        let execution = <CodexRunner as AgentRunner>::execute_task_with_observer(
+            &runner,
+            &sample_spec(),
+            &sample_task_spec(dir.path().to_path_buf()),
+            &sample_hints(),
+            &CompiledContext {
+                system_prefix: "sys".to_string(),
+                injected_prompt: "prompt".to_string(),
+                source_manifest: Vec::new(),
+            },
+            &mut observer,
+        )
+        .await
+        .expect("execute with observer");
+
+        assert_eq!(execution.terminal_state, RunnerTerminalState::Succeeded);
+        assert!(
+            observer.events.iter().any(|(stream, chunk)| matches!(
+                stream,
+                RunnerOutputStream::Stdout
+            ) && chunk.contains("stdout-chunk")),
+            "observer should receive stdout chunks"
+        );
+        assert!(
+            observer.events.iter().any(|(stream, chunk)| matches!(
+                stream,
+                RunnerOutputStream::Stderr
+            ) && chunk.contains("stderr-chunk")),
+            "observer should receive stderr chunks"
+        );
+    }
+
+    #[tokio::test]
     async fn codex_runner_rejects_unvalidated_approval_policy() {
         let dir = tempdir().expect("tempdir");
         let mut spec = sample_spec();
@@ -504,9 +673,10 @@ exit 7
         let runner = CodexRunner::new(PathBuf::from("codex"));
 
         let err = runner
-            .execute(
+            .execute_task(
                 &spec,
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),

@@ -9,12 +9,15 @@ use async_trait::async_trait;
 
 use crate::{
     error::{McpSubagentError, Result},
-    runtime::runners::{AgentRunner, RunnerExecution, RunnerTerminalState},
+    runtime::runners::{
+        streaming::collect_streaming_output, AgentRunner, RunnerExecution, RunnerOutputObserver,
+        RunnerTerminalState,
+    },
     spec::{
         runtime_policy::{ApprovalPolicy, NativeDiscoveryPolicy, SandboxPolicy},
         AgentSpec,
     },
-    types::{CompiledContext, RunRequest},
+    types::{CompiledContext, TaskSpec, WorkflowHints},
 };
 
 const GEMINI_DISCOVERY_TEMP_PREFIX: &str = "mcp-subagent-gemini-discovery";
@@ -24,6 +27,14 @@ const ISOLATED_FALLBACK_NOTE: &str =
 #[derive(Debug, Clone)]
 pub struct GeminiRunner {
     executable: PathBuf,
+}
+
+struct GeminiExecuteOptions<'a> {
+    prompt: &'a str,
+    approval_mode: &'a str,
+    timeout: Duration,
+    discovery_policy: &'a NativeDiscoveryPolicy,
+    observer: Option<&'a mut dyn RunnerOutputObserver>,
 }
 
 impl Default for GeminiRunner {
@@ -39,25 +50,65 @@ impl GeminiRunner {
         Self { executable }
     }
 
-    pub async fn execute(
+    async fn execute_internal(
         &self,
         spec: &AgentSpec,
-        request: &RunRequest,
+        task_spec: &TaskSpec,
         compiled: &CompiledContext,
+        observer: Option<&mut dyn RunnerOutputObserver>,
     ) -> Result<RunnerExecution> {
         let prompt = compose_prompt(compiled);
         let timeout = Duration::from_secs(spec.runtime.timeout_secs.max(1));
         let approval_mode = resolve_approval_mode(spec)?;
         let discovery_policy = spec.runtime.native_discovery.clone();
 
+        if let Some(observer_ref) = observer {
+            let execution = self
+                .execute_once(
+                    spec,
+                    task_spec,
+                    GeminiExecuteOptions {
+                        prompt: &prompt,
+                        approval_mode,
+                        timeout,
+                        discovery_policy: &discovery_policy,
+                        observer: Some(&mut *observer_ref),
+                    },
+                )
+                .await?;
+            if matches!(discovery_policy, NativeDiscoveryPolicy::Isolated)
+                && should_retry_isolated_with_minimal(&execution)
+            {
+                let mut retried = self
+                    .execute_once(
+                        spec,
+                        task_spec,
+                        GeminiExecuteOptions {
+                            prompt: &prompt,
+                            approval_mode,
+                            timeout,
+                            discovery_policy: &NativeDiscoveryPolicy::Minimal,
+                            observer: Some(&mut *observer_ref),
+                        },
+                    )
+                    .await?;
+                retried.stderr = merge_fallback_stderr(&execution.stderr, &retried.stderr);
+                return Ok(retried);
+            }
+            return Ok(execution);
+        }
+
         let execution = self
             .execute_once(
                 spec,
-                request,
-                &prompt,
-                approval_mode,
-                timeout,
-                &discovery_policy,
+                task_spec,
+                GeminiExecuteOptions {
+                    prompt: &prompt,
+                    approval_mode,
+                    timeout,
+                    discovery_policy: &discovery_policy,
+                    observer: None,
+                },
             )
             .await?;
 
@@ -67,11 +118,14 @@ impl GeminiRunner {
             let mut retried = self
                 .execute_once(
                     spec,
-                    request,
-                    &prompt,
-                    approval_mode,
-                    timeout,
-                    &NativeDiscoveryPolicy::Minimal,
+                    task_spec,
+                    GeminiExecuteOptions {
+                        prompt: &prompt,
+                        approval_mode,
+                        timeout,
+                        discovery_policy: &NativeDiscoveryPolicy::Minimal,
+                        observer: None,
+                    },
                 )
                 .await?;
             retried.stderr = merge_fallback_stderr(&execution.stderr, &retried.stderr);
@@ -81,24 +135,43 @@ impl GeminiRunner {
         Ok(execution)
     }
 
+    pub async fn execute_task(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        _hints: &WorkflowHints,
+        compiled: &CompiledContext,
+    ) -> Result<RunnerExecution> {
+        self.execute_internal(spec, task_spec, compiled, None).await
+    }
+
+    pub async fn execute_task_with_observer(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        _hints: &WorkflowHints,
+        compiled: &CompiledContext,
+        observer: &mut dyn RunnerOutputObserver,
+    ) -> Result<RunnerExecution> {
+        self.execute_internal(spec, task_spec, compiled, Some(observer))
+            .await
+    }
+
     async fn execute_once(
         &self,
         spec: &AgentSpec,
-        request: &RunRequest,
-        prompt: &str,
-        approval_mode: &str,
-        timeout: Duration,
-        discovery_policy: &NativeDiscoveryPolicy,
+        task_spec: &TaskSpec,
+        options: GeminiExecuteOptions<'_>,
     ) -> Result<RunnerExecution> {
-        let launch = prepare_discovery_launch(discovery_policy, &request.working_dir)?;
+        let launch = prepare_discovery_launch(options.discovery_policy, &task_spec.working_dir)?;
         let mut command = tokio::process::Command::new(&self.executable);
         command
             .arg("--prompt")
-            .arg(prompt)
+            .arg(options.prompt)
             .arg("--output-format")
             .arg("text")
             .arg("--approval-mode")
-            .arg(approval_mode)
+            .arg(options.approval_mode)
             .arg("--include-directories")
             .arg(&launch.include_dir)
             .current_dir(&launch.current_dir)
@@ -114,29 +187,62 @@ impl GeminiRunner {
             command.env(key, value);
         }
 
-        let output = match tokio::time::timeout(timeout, command.output()).await {
-            Ok(waited) => waited.map_err(McpSubagentError::Io)?,
-            Err(_) => {
-                cleanup_discovery_dirs(&launch.cleanup_dirs);
-                return Ok(RunnerExecution {
-                    terminal_state: RunnerTerminalState::TimedOut,
-                    stdout: String::new(),
-                    stderr: format!(
-                        "gemini execution exceeded timeout of {}s",
-                        timeout.as_secs()
-                    ),
-                });
+        let (status, stdout, stderr, timed_out) = match options.observer {
+            Some(output_observer) => {
+                let mut child = command.spawn().map_err(McpSubagentError::Io)?;
+                let observed =
+                    collect_streaming_output(&mut child, options.timeout, output_observer).await?;
+                (
+                    observed.status,
+                    observed.stdout,
+                    observed.stderr,
+                    observed.timed_out,
+                )
             }
+            None => match tokio::time::timeout(options.timeout, command.output()).await {
+                Ok(waited) => {
+                    let output = waited.map_err(McpSubagentError::Io)?;
+                    (
+                        output.status,
+                        String::from_utf8_lossy(&output.stdout).to_string(),
+                        String::from_utf8_lossy(&output.stderr).to_string(),
+                        false,
+                    )
+                }
+                Err(_) => {
+                    cleanup_discovery_dirs(&launch.cleanup_dirs);
+                    return Ok(RunnerExecution {
+                        terminal_state: RunnerTerminalState::TimedOut,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "gemini execution exceeded timeout of {}s",
+                            options.timeout.as_secs()
+                        ),
+                    });
+                }
+            },
         };
         cleanup_discovery_dirs(&launch.cleanup_dirs);
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if timed_out {
+            return Ok(RunnerExecution {
+                terminal_state: RunnerTerminalState::TimedOut,
+                stdout,
+                stderr: if stderr.is_empty() {
+                    format!(
+                        "gemini execution exceeded timeout of {}s",
+                        options.timeout.as_secs()
+                    )
+                } else {
+                    stderr
+                },
+            });
+        }
 
-        let terminal_state = if output.status.success() {
+        let terminal_state = if status.success() {
             RunnerTerminalState::Succeeded
         } else {
-            let exit_code = output.status.code().unwrap_or(-1);
+            let exit_code = status.code().unwrap_or(-1);
             let mut message = format!("gemini exited with code {exit_code}");
             if !stderr.trim().is_empty() {
                 let first_line = stderr
@@ -281,13 +387,26 @@ fn merge_fallback_stderr(primary_stderr: &str, retried_stderr: &str) -> String {
 
 #[async_trait]
 impl AgentRunner for GeminiRunner {
-    async fn execute(
+    async fn execute_task(
         &self,
         spec: &AgentSpec,
-        request: &RunRequest,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
         compiled: &CompiledContext,
     ) -> Result<RunnerExecution> {
-        GeminiRunner::execute(self, spec, request, compiled).await
+        GeminiRunner::execute_task(self, spec, task_spec, hints, compiled).await
+    }
+
+    async fn execute_task_with_observer(
+        &self,
+        spec: &AgentSpec,
+        task_spec: &TaskSpec,
+        hints: &WorkflowHints,
+        compiled: &CompiledContext,
+        observer: &mut dyn RunnerOutputObserver,
+    ) -> Result<RunnerExecution> {
+        GeminiRunner::execute_task_with_observer(self, spec, task_spec, hints, compiled, observer)
+            .await
     }
 }
 
@@ -338,7 +457,10 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        runtime::{runners::gemini::GeminiRunner, runners::RunnerTerminalState},
+        runtime::runners::{
+            gemini::GeminiRunner, AgentRunner, RunnerOutputObserver, RunnerOutputStream,
+            RunnerTerminalState,
+        },
         spec::{
             core::{AgentSpecCore, Provider},
             runtime_policy::{
@@ -347,7 +469,7 @@ mod tests {
             },
             AgentSpec,
         },
-        types::{CompiledContext, RunMode, RunRequest},
+        types::{CompiledContext, RunMode, TaskSpec, WorkflowHints},
     };
 
     fn sample_spec(timeout_secs: u64, native_discovery: NativeDiscoveryPolicy) -> AgentSpec {
@@ -376,17 +498,31 @@ mod tests {
         }
     }
 
-    fn sample_request(working_dir: PathBuf) -> RunRequest {
-        RunRequest {
+    fn sample_task_spec(working_dir: PathBuf) -> TaskSpec {
+        TaskSpec {
             task: "investigate parser".to_string(),
             task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir,
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir,
+        }
+    }
+
+    fn sample_hints() -> WorkflowHints {
+        WorkflowHints {
+            run_mode: RunMode::Sync,
+            ..WorkflowHints::default()
+        }
+    }
+
+    #[derive(Default)]
+    struct CollectingObserver {
+        events: Vec<(RunnerOutputStream, String)>,
+    }
+
+    impl RunnerOutputObserver for CollectingObserver {
+        fn on_output(&mut self, stream: RunnerOutputStream, chunk: &str) {
+            self.events.push((stream, chunk.to_string()));
         }
     }
 
@@ -405,7 +541,6 @@ cat <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": ["next"],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": ["src/lib.rs"]
 }
@@ -420,9 +555,10 @@ exit 0
 
         let runner = GeminiRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(30, NativeDiscoveryPolicy::Inherit),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -466,7 +602,6 @@ cat <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": [],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": []
 }
@@ -481,9 +616,10 @@ exit 0
 
         let runner = GeminiRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(30, NativeDiscoveryPolicy::Inherit),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -512,9 +648,10 @@ exit 9
 
         let runner = GeminiRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(30, NativeDiscoveryPolicy::Inherit),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -534,6 +671,72 @@ exit 9
     }
 
     #[tokio::test]
+    async fn gemini_runner_execute_with_observer_streams_output_chunks() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("fake-gemini-stream.sh");
+        let script = r#"#!/bin/sh
+set -eu
+echo "stdout-chunk-1"
+sleep 0.1
+echo "stdout-chunk-2"
+echo "stderr-chunk-1" >&2
+sleep 0.1
+echo "stderr-chunk-2" >&2
+cat <<'EOF'
+<<<MCP_SUBAGENT_SUMMARY_JSON_START>>>
+{
+  "summary": "ok",
+  "key_findings": [],
+  "artifacts": [],
+  "open_questions": [],
+  "next_steps": [],
+  "verification_status": "Passed",
+  "touched_files": []
+}
+<<<MCP_SUBAGENT_SUMMARY_JSON_END>>>
+EOF
+exit 0
+"#;
+        fs::write(&script_path, script).expect("write script");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod");
+
+        let runner = GeminiRunner::new(script_path);
+        let mut observer = CollectingObserver::default();
+        let execution = <GeminiRunner as AgentRunner>::execute_task_with_observer(
+            &runner,
+            &sample_spec(30, NativeDiscoveryPolicy::Inherit),
+            &sample_task_spec(dir.path().to_path_buf()),
+            &sample_hints(),
+            &CompiledContext {
+                system_prefix: "sys".to_string(),
+                injected_prompt: "prompt".to_string(),
+                source_manifest: Vec::new(),
+            },
+            &mut observer,
+        )
+        .await
+        .expect("execute with observer");
+
+        assert_eq!(execution.terminal_state, RunnerTerminalState::Succeeded);
+        assert!(
+            observer.events.iter().any(|(stream, chunk)| matches!(
+                stream,
+                RunnerOutputStream::Stdout
+            ) && chunk.contains("stdout-chunk")),
+            "observer should receive stdout chunks"
+        );
+        assert!(
+            observer.events.iter().any(|(stream, chunk)| matches!(
+                stream,
+                RunnerOutputStream::Stderr
+            ) && chunk.contains("stderr-chunk")),
+            "observer should receive stderr chunks"
+        );
+    }
+
+    #[tokio::test]
     async fn gemini_runner_marks_timeout() {
         let dir = tempdir().expect("tempdir");
         let script_path = dir.path().join("fake-gemini-timeout.sh");
@@ -548,9 +751,10 @@ sleep 2
 
         let runner = GeminiRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(1, NativeDiscoveryPolicy::Inherit),
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -571,9 +775,10 @@ sleep 2
         let runner = GeminiRunner::new(PathBuf::from("gemini"));
 
         let err = runner
-            .execute(
+            .execute_task(
                 &spec,
-                &sample_request(dir.path().to_path_buf()),
+                &sample_task_spec(dir.path().to_path_buf()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -616,7 +821,6 @@ cat <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": [],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": []
 }
@@ -633,9 +837,10 @@ exit 0
         fs::create_dir_all(&working_dir).expect("workspace");
         let runner = GeminiRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(30, NativeDiscoveryPolicy::Minimal),
-                &sample_request(working_dir.clone()),
+                &sample_task_spec(working_dir.clone()),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),
@@ -677,7 +882,6 @@ cat <<'EOF'
   "artifacts": [],
   "open_questions": [],
   "next_steps": [],
-  "exit_code": 0,
   "verification_status": "Passed",
   "touched_files": []
 }
@@ -694,9 +898,10 @@ exit 0
         fs::create_dir_all(&working_dir).expect("workspace");
         let runner = GeminiRunner::new(script_path);
         let execution = runner
-            .execute(
+            .execute_task(
                 &sample_spec(30, NativeDiscoveryPolicy::Isolated),
-                &sample_request(working_dir),
+                &sample_task_spec(working_dir),
+                &sample_hints(),
                 &CompiledContext {
                     system_prefix: "sys".to_string(),
                     injected_prompt: "prompt".to_string(),

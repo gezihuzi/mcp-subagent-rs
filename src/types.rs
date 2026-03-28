@@ -14,31 +14,46 @@ pub enum RunMode {
 #[serde(deny_unknown_fields)]
 pub struct SelectedFile {
     pub path: PathBuf,
-    #[serde(default)]
     pub rationale: Option<String>,
-    #[serde(default)]
     pub content: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// TaskSpec — 前置不可变，描述"做什么"
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RunRequest {
+pub struct TaskSpec {
     pub task: String,
-    #[serde(default)]
     pub task_brief: Option<String>,
-    #[serde(default)]
-    pub parent_summary: Option<String>,
-    #[serde(default)]
-    pub selected_files: Vec<SelectedFile>,
-    #[serde(default)]
-    pub stage: Option<String>,
-    #[serde(default)]
-    pub plan_ref: Option<String>,
-    pub working_dir: PathBuf,
-    #[serde(default)]
-    pub run_mode: RunMode,
-    #[serde(default)]
     pub acceptance_criteria: Vec<String>,
+    pub selected_files: Vec<SelectedFile>,
+    pub working_dir: PathBuf,
+}
+
+// ---------------------------------------------------------------------------
+// WorkflowHints — 可选的协调路由信息
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowHints {
+    pub stage: Option<String>,
+    pub plan_ref: Option<String>,
+    pub parent_summary: Option<String>,
+    pub run_mode: RunMode,
+}
+
+impl Default for WorkflowHints {
+    fn default() -> Self {
+        Self {
+            stage: None,
+            plan_ref: None,
+            parent_summary: None,
+            run_mode: RunMode::Sync,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,18 +61,14 @@ pub struct RunRequest {
 pub struct MemorySnippet {
     pub label: String,
     pub content: String,
-    #[serde(default)]
     pub source_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedMemory {
-    #[serde(default)]
     pub project_memories: Vec<MemorySnippet>,
-    #[serde(default)]
     pub additional_memories: Vec<MemorySnippet>,
-    #[serde(default)]
     pub native_passthrough_paths: Vec<PathBuf>,
 }
 
@@ -73,7 +84,6 @@ pub enum InjectionMode {
 #[serde(deny_unknown_fields)]
 pub struct ContextSourceRef {
     pub label: String,
-    #[serde(default)]
     pub path: Option<PathBuf>,
     pub injection_mode: InjectionMode,
 }
@@ -83,6 +93,5 @@ pub struct ContextSourceRef {
 pub struct CompiledContext {
     pub system_prefix: String,
     pub injected_prompt: String,
-    #[serde(default)]
     pub source_manifest: Vec<ContextSourceRef>,
 }

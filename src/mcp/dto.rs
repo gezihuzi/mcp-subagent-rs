@@ -36,7 +36,6 @@ pub struct RunAgentInput {
     pub task: String,
     pub task_brief: Option<String>,
     pub parent_summary: Option<String>,
-    #[serde(default)]
     pub selected_files: Vec<RunAgentSelectedFileInput>,
     pub stage: Option<String>,
     pub plan_ref: Option<String>,
@@ -60,67 +59,8 @@ pub struct ArtifactOutput {
     pub kind: String,
     pub description: String,
     pub media_type: Option<String>,
-    #[serde(default)]
     pub producer: Option<String>,
-    #[serde(default)]
     pub created_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
-pub struct SummaryOutput {
-    pub contract_version: String,
-    pub parse_status: String,
-    pub summary: String,
-    pub key_findings: Vec<String>,
-    pub open_questions: Vec<String>,
-    pub next_steps: Vec<String>,
-    pub exit_code: i32,
-    pub verification_status: String,
-    pub touched_files: Vec<String>,
-    pub plan_refs: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
-pub struct RunAgentOutput {
-    pub handle_id: String,
-    pub status: String,
-    pub structured_summary: SummaryOutput,
-    pub artifact_index: Vec<ArtifactOutput>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
-pub struct SpawnAgentOutput {
-    pub handle_id: String,
-    pub status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
-pub struct AgentStatusOutput {
-    pub handle_id: String,
-    pub status: String,
-    pub updated_at: String,
-    pub error_message: Option<String>,
-    pub structured_summary: Option<SummaryOutput>,
-    pub artifact_index: Vec<ArtifactOutput>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
-pub struct CancelAgentOutput {
-    pub handle_id: String,
-    pub status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
-pub struct ReadAgentArtifactOutput {
-    pub handle_id: String,
-    pub path: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
-pub struct ListRunsInput {
-    #[serde(default)]
-    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -141,19 +81,49 @@ pub struct RunUsageOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
-pub struct RunListingOutput {
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum OutcomeView {
+    Succeeded {
+        summary: String,
+        key_findings: Vec<String>,
+        touched_files: Vec<String>,
+        artifacts: Vec<ArtifactOutput>,
+        usage: RunUsageOutput,
+    },
+    Failed {
+        error: String,
+        retry_classification: String,
+        partial_summary: Option<String>,
+        usage: RunUsageOutput,
+    },
+    Cancelled {
+        reason: String,
+    },
+    TimedOut {
+        elapsed_secs: u64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct RunView {
     pub handle_id: String,
-    pub status: String,
+    pub agent_name: String,
+    pub task_brief: Option<String>,
+    pub phase: String,
+    pub terminal: bool,
+    pub outcome: Option<OutcomeView>,
+    pub created_at: String,
     pub updated_at: String,
-    pub provider: Option<String>,
-    pub agent: Option<String>,
-    pub task: String,
-    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct ListRunsInput {
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ListRunsOutput {
-    pub runs: Vec<RunListingOutput>,
+    pub runs: Vec<RunView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -162,30 +132,8 @@ pub struct GetRunResultInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
-pub struct GetRunResultOutput {
-    pub contract_version: String,
-    pub handle_id: String,
-    pub status: String,
-    pub updated_at: String,
-    pub error_message: Option<String>,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub normalization_status: String,
-    pub summary: Option<String>,
-    pub native_result: Option<String>,
-    pub normalized_result: Option<SummaryOutput>,
-    pub provider_exit_code: Option<i32>,
-    pub retries: u32,
-    pub retry_classification: String,
-    pub classification_reason: Option<String>,
-    pub usage: RunUsageOutput,
-    pub artifact_index: Vec<ArtifactOutput>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ReadRunLogsInput {
     pub handle_id: String,
-    #[serde(default)]
     pub stream: Option<String>,
 }
 
@@ -199,18 +147,96 @@ pub struct ReadRunLogsOutput {
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct WatchRunInput {
     pub handle_id: String,
-    #[serde(default)]
     pub interval_ms: Option<u64>,
-    #[serde(default)]
     pub timeout_secs: Option<u64>,
+    pub phase: Option<String>,
+    pub phase_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct WatchRunOutput {
+    pub run: RunView,
+    pub timed_out: bool,
+    pub phase_timeout_hit: bool,
+    pub block_reason: Option<String>,
+    pub advice: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct WatchAgentEventsInput {
+    pub handle_id: String,
+    pub since_seq: Option<u64>,
+    pub limit: Option<usize>,
+    pub phase: Option<String>,
+    pub phase_timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct RunEventOutput {
+    pub seq: Option<u64>,
+    pub event: String,
+    pub timestamp: String,
+    pub state: Option<String>,
+    pub phase: Option<String>,
+    pub source: Option<String>,
+    pub message: Option<String>,
+    pub detail: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct WatchAgentEventsOutput {
     pub handle_id: String,
     pub status: String,
     pub updated_at: String,
-    pub error_message: Option<String>,
     pub terminal: bool,
-    pub timed_out: bool,
+    pub events: Vec<RunEventOutput>,
+    pub next_seq: Option<u64>,
+    pub current_phase: Option<String>,
+    pub current_phase_age_ms: Option<u64>,
+    pub phase_timeout_hit: bool,
+    pub block_reason: Option<String>,
+    pub advice: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct GetAgentStatsInput {
+    pub handle_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct GetAgentStatsOutput {
+    pub handle_id: String,
+    pub status: String,
+    pub state: Option<String>,
+    pub phase: Option<String>,
+    pub last_event_at: Option<String>,
+    pub last_event_age_ms: Option<u64>,
+    pub stalled: bool,
+    pub block_reason: Option<String>,
+    pub advice: Vec<String>,
+    pub queue_ms: Option<u64>,
+    pub provider_probe_ms: Option<u64>,
+    pub workspace_prepare_ms: Option<u64>,
+    pub provider_boot_ms: Option<u64>,
+    pub execution_ms: Option<u64>,
+    pub first_output_ms: Option<u64>,
+    pub first_output_warned: bool,
+    pub first_output_warning_at: Option<String>,
+    pub current_wait_reason: Option<String>,
+    pub wait_reasons: Vec<String>,
+    pub wall_ms: Option<u64>,
+    pub usage: RunUsageOutput,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct CancelAgentOutput {
+    pub handle_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct ReadAgentArtifactOutput {
+    pub handle_id: String,
+    pub path: String,
+    pub content: String,
 }

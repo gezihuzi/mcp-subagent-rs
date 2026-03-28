@@ -1,31 +1,34 @@
 use std::path::Path;
 
 use rmcp::ErrorData;
-use uuid::Uuid;
 
 use crate::{
-    mcp::state::{build_memory_resolution_snapshot, MemoryResolutionRecord, WorkspaceRecord},
+    mcp::{
+        persistence::{append_run_event, RuntimeEventInput},
+        state::{build_memory_resolution_snapshot, MemoryResolutionRecord, WorkspaceRecord},
+    },
     runtime::{
         cleanup::WorkspaceCleanupGuard,
         context::DefaultContextCompiler,
-        dispatcher::{DispatchResult, Dispatcher},
-        memory::resolve_memory,
+        dispatcher::{Dispatcher, RunExecutionResult},
+        memory::resolve_memory_for_task,
         runners::{
             self,
             mock::{MockRunPlan, MockRunner},
-            AgentRunner,
+            AgentRunner, RunnerOutputObserver, RunnerOutputStream,
         },
         workspace::{prepare_workspace, PreparedWorkspace, WorkspaceMode},
     },
-    spec::runtime_policy::DelegationContextPolicy,
+    spec::runtime_policy::{DelegationContextPolicy, NativeDiscoveryPolicy},
     spec::AgentSpec,
     spec::Provider,
-    types::RunRequest,
+    types::{TaskSpec, WorkflowHints},
 };
+use serde_json::json;
 
 #[derive(Debug)]
-pub(crate) struct DispatchEnvelope {
-    pub(crate) result: DispatchResult,
+pub(crate) struct RunDispatchData {
+    pub(crate) result: RunExecutionResult,
     pub(crate) workspace: WorkspaceRecord,
     pub(crate) memory_resolution: MemoryResolutionRecord,
     pub(crate) _workspace_cleanup: Option<WorkspaceCleanupGuard>,
@@ -33,38 +36,237 @@ pub(crate) struct DispatchEnvelope {
 
 pub(crate) async fn run_dispatch(
     spec: &crate::spec::AgentSpec,
-    request: &RunRequest,
+    task_spec: &TaskSpec,
+    hints: &WorkflowHints,
     handle_id: &str,
     state_dir: &Path,
     lock_keys: Vec<String>,
-) -> std::result::Result<DispatchEnvelope, ErrorData> {
-    let prepared_workspace = prepare_workspace(spec, request, state_dir, handle_id)
+) -> std::result::Result<RunDispatchData, ErrorData> {
+    let mut prepared_workspace = prepare_workspace(spec, task_spec, hints, state_dir, handle_id)
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+    let _ = append_run_event(
+        state_dir,
+        handle_id,
+        RuntimeEventInput {
+            event: "workspace.prepare.completed",
+            state: "preparing",
+            phase: "workspace_prepare",
+            source: "workspace",
+            message: "workspace preparation completed",
+            detail: json!({}),
+        },
+    );
+    let effective_spec = apply_workspace_runtime_overrides(spec, &mut prepared_workspace);
     let workspace_cleanup = WorkspaceCleanupGuard::for_workspace(&prepared_workspace);
     let workspace_record = to_workspace_record(&prepared_workspace, lock_keys);
 
-    let mut effective_request = request.clone();
-    effective_request.working_dir = prepared_workspace.workspace_path;
-    let resolved_memory = resolve_memory(spec, &effective_request)
+    let mut effective_task_spec = task_spec.clone();
+    effective_task_spec.working_dir = prepared_workspace.workspace_path;
+    let effective_hints = hints.clone();
+    let resolved_memory = resolve_memory_for_task(&effective_spec, &effective_task_spec)
         .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
-    attach_plan_section_acceptance_criteria(spec, &mut effective_request, &resolved_memory);
+    attach_plan_section_acceptance_criteria(
+        &effective_spec,
+        &mut effective_task_spec,
+        &effective_hints,
+        &resolved_memory,
+    );
     let memory_resolution = build_memory_resolution_snapshot(&resolved_memory);
 
-    let runner = select_runner(&spec.core.provider);
+    let runner = select_runner(&effective_spec.core.provider);
     let dispatcher = Dispatcher::new(DefaultContextCompiler, runner);
+    let mut delta_observer = RunDeltaEventObserver::new(state_dir, handle_id);
     let mut result = dispatcher
-        .run(spec, &effective_request, resolved_memory)
+        .run_with_observers(
+            &effective_spec,
+            &effective_task_spec,
+            &effective_hints,
+            resolved_memory,
+            |prev, current| {
+                if matches!(
+                    current,
+                    crate::runtime::dispatcher::RunPhase::CompilingContext
+                ) {
+                    let _ = append_run_event(
+                        state_dir,
+                        handle_id,
+                        RuntimeEventInput {
+                            event: "context.compile.started",
+                            state: "preparing",
+                            phase: "context_compile",
+                            source: "context",
+                            message: "context compile started",
+                            detail: json!({}),
+                        },
+                    );
+                }
+                if matches!(current, crate::runtime::dispatcher::RunPhase::Launching) {
+                    let _ = append_run_event(
+                        state_dir,
+                        handle_id,
+                        RuntimeEventInput {
+                            event: "provider.boot.started",
+                            state: "running",
+                            phase: "provider_boot",
+                            source: "provider",
+                            message: "provider boot started",
+                            detail: json!({}),
+                        },
+                    );
+                }
+                if matches!(
+                    current,
+                    crate::runtime::dispatcher::RunPhase::ParsingSummary
+                ) {
+                    let _ = append_run_event(
+                        state_dir,
+                        handle_id,
+                        RuntimeEventInput {
+                            event: "parse.started",
+                            state: "running",
+                            phase: "parse",
+                            source: "parser",
+                            message: "summary parse started",
+                            detail: json!({}),
+                        },
+                    );
+                }
+                if prev.as_ref().is_some_and(|status| {
+                    matches!(
+                        status,
+                        crate::runtime::dispatcher::RunPhase::CompilingContext
+                    )
+                }) && !matches!(
+                    current,
+                    crate::runtime::dispatcher::RunPhase::CompilingContext
+                ) {
+                    let _ = append_run_event(
+                        state_dir,
+                        handle_id,
+                        RuntimeEventInput {
+                            event: "context.compile.completed",
+                            state: "preparing",
+                            phase: "context_compile",
+                            source: "context",
+                            message: "context compile completed",
+                            detail: json!({}),
+                        },
+                    );
+                }
+                if prev.as_ref().is_some_and(|status| {
+                    matches!(status, crate::runtime::dispatcher::RunPhase::ParsingSummary)
+                }) && !matches!(
+                    current,
+                    crate::runtime::dispatcher::RunPhase::ParsingSummary
+                ) {
+                    let _ = append_run_event(
+                        state_dir,
+                        handle_id,
+                        RuntimeEventInput {
+                            event: "parse.completed",
+                            state: "running",
+                            phase: "parse",
+                            source: "parser",
+                            message: "summary parse completed",
+                            detail: json!({}),
+                        },
+                    );
+                }
+            },
+            Some(&mut delta_observer),
+        )
         .await
         .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
-    result.metadata.handle_id = parse_handle_id(handle_id);
-    result.metadata.workspace_path = effective_request.working_dir.clone();
+    result.workspace_path = effective_task_spec.working_dir.clone();
 
-    Ok(DispatchEnvelope {
+    Ok(RunDispatchData {
         result,
         workspace: workspace_record,
         memory_resolution,
         _workspace_cleanup: workspace_cleanup,
     })
+}
+
+struct RunDeltaEventObserver<'a> {
+    state_dir: &'a Path,
+    handle_id: &'a str,
+    first_output_emitted: bool,
+}
+
+impl<'a> RunDeltaEventObserver<'a> {
+    fn new(state_dir: &'a Path, handle_id: &'a str) -> Self {
+        Self {
+            state_dir,
+            handle_id,
+            first_output_emitted: false,
+        }
+    }
+}
+
+impl RunnerOutputObserver for RunDeltaEventObserver<'_> {
+    fn on_output(&mut self, stream: RunnerOutputStream, chunk: &str) {
+        if chunk.trim().is_empty() {
+            return;
+        }
+        if !self.first_output_emitted {
+            self.first_output_emitted = true;
+            let _ = append_run_event(
+                self.state_dir,
+                self.handle_id,
+                RuntimeEventInput {
+                    event: "provider.first_output",
+                    state: "running",
+                    phase: "running",
+                    source: "provider",
+                    message: "provider produced output",
+                    detail: json!({
+                        "stdout_bytes": if matches!(stream, RunnerOutputStream::Stdout) { chunk.len() } else { 0 },
+                        "stderr_bytes": if matches!(stream, RunnerOutputStream::Stderr) { chunk.len() } else { 0 },
+                    }),
+                },
+            );
+        }
+        let (event, message) = match stream {
+            RunnerOutputStream::Stdout => ("provider.stdout.delta", "provider stdout received"),
+            RunnerOutputStream::Stderr => ("provider.stderr.delta", "provider stderr received"),
+        };
+        let _ = append_run_event(
+            self.state_dir,
+            self.handle_id,
+            RuntimeEventInput {
+                event,
+                state: "running",
+                phase: "running",
+                source: "provider",
+                message,
+                detail: json!({
+                    "bytes": chunk.len(),
+                    "lines": chunk.lines().count(),
+                }),
+            },
+        );
+    }
+}
+
+fn apply_workspace_runtime_overrides(
+    spec: &AgentSpec,
+    prepared: &mut PreparedWorkspace,
+) -> AgentSpec {
+    let mut effective_spec = spec.clone();
+    if matches!(prepared.mode, WorkspaceMode::StableScratch)
+        && matches!(effective_spec.core.provider, Provider::Gemini)
+        && matches!(
+            effective_spec.runtime.native_discovery,
+            NativeDiscoveryPolicy::Isolated
+        )
+    {
+        effective_spec.runtime.native_discovery = NativeDiscoveryPolicy::Minimal;
+        prepared.notes.push(
+            "runtime override: stable_scratch forces Gemini native_discovery from isolated to minimal to avoid auth/trust startup loops"
+                .to_string(),
+        );
+    }
+    effective_spec
 }
 
 fn select_runner(provider: &Provider) -> Box<dyn AgentRunner> {
@@ -82,6 +284,7 @@ fn to_workspace_record(prepared: &PreparedWorkspace, lock_keys: Vec<String>) -> 
     WorkspaceRecord {
         mode: match prepared.mode {
             WorkspaceMode::InPlace => "in_place",
+            WorkspaceMode::StableScratch => "stable_scratch",
             WorkspaceMode::TempCopy => "temp_copy",
             WorkspaceMode::GitWorktree => "git_worktree",
             WorkspaceMode::GitWorktreeFallbackTempCopy => "git_worktree_fallback_temp_copy",
@@ -95,16 +298,13 @@ fn to_workspace_record(prepared: &PreparedWorkspace, lock_keys: Vec<String>) -> 
     }
 }
 
-fn parse_handle_id(handle_id: &str) -> Uuid {
-    Uuid::parse_str(handle_id).unwrap_or_else(|_| Uuid::now_v7())
-}
-
 fn attach_plan_section_acceptance_criteria(
     spec: &AgentSpec,
-    request: &mut RunRequest,
+    task_spec: &mut TaskSpec,
+    hints: &WorkflowHints,
     memory: &crate::types::ResolvedMemory,
 ) {
-    if !should_attach_plan_acceptance_criteria(spec, request) {
+    if !should_attach_plan_acceptance_criteria(spec, hints) {
         return;
     }
 
@@ -122,25 +322,25 @@ fn attach_plan_section_acceptance_criteria(
     }
 
     for item in extracted {
-        if request
+        if task_spec
             .acceptance_criteria
             .iter()
             .any(|existing| existing.eq_ignore_ascii_case(&item))
         {
             continue;
         }
-        request.acceptance_criteria.push(item);
+        task_spec.acceptance_criteria.push(item);
     }
 }
 
-fn should_attach_plan_acceptance_criteria(spec: &AgentSpec, request: &RunRequest) -> bool {
+fn should_attach_plan_acceptance_criteria(spec: &AgentSpec, hints: &WorkflowHints) -> bool {
     if matches!(
         spec.runtime.delegation_context,
         DelegationContextPolicy::PlanSection
     ) {
         return true;
     }
-    if request
+    if hints
         .stage
         .as_deref()
         .is_some_and(|stage| stage.eq_ignore_ascii_case("review"))
@@ -197,15 +397,16 @@ mod tests {
 
     use crate::{
         mcp::service::run_dispatch,
+        runtime::workspace::{PreparedWorkspace, WorkspaceMode},
         spec::{
             core::{AgentSpecCore, Provider},
             runtime_policy::{
                 ContextMode, DelegationContextPolicy, FileConflictPolicy, MemorySource,
-                RuntimePolicy, SandboxPolicy, WorkingDirPolicy,
+                NativeDiscoveryPolicy, RuntimePolicy, SandboxPolicy, WorkingDirPolicy,
             },
             AgentSpec,
         },
-        types::{RunMode, RunRequest},
+        types::{RunMode, TaskSpec, WorkflowHints},
     };
 
     fn sample_spec(
@@ -238,18 +439,53 @@ mod tests {
         }
     }
 
-    fn sample_request(working_dir: std::path::PathBuf) -> RunRequest {
-        RunRequest {
+    fn sample_task_spec(working_dir: std::path::PathBuf) -> TaskSpec {
+        TaskSpec {
             task: "task".to_string(),
             task_brief: None,
-            parent_summary: None,
-            selected_files: Vec::new(),
-            stage: None,
-            plan_ref: None,
-            working_dir,
-            run_mode: RunMode::Sync,
             acceptance_criteria: Vec::new(),
+            selected_files: Vec::new(),
+            working_dir,
         }
+    }
+
+    fn sample_hints() -> WorkflowHints {
+        WorkflowHints {
+            run_mode: RunMode::Sync,
+            ..WorkflowHints::default()
+        }
+    }
+
+    #[test]
+    fn stable_scratch_overrides_gemini_isolated_discovery_to_minimal() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let scratch = temp.path().join("scratch");
+        fs::create_dir_all(&source).expect("create source");
+        fs::create_dir_all(&scratch).expect("create scratch");
+
+        let mut spec = sample_spec(
+            WorkingDirPolicy::Auto,
+            vec![MemorySource::AutoProjectMemory],
+        );
+        spec.core.provider = Provider::Gemini;
+        spec.runtime.native_discovery = NativeDiscoveryPolicy::Isolated;
+        let mut prepared = PreparedWorkspace {
+            source_path: source.clone(),
+            workspace_path: scratch,
+            mode: WorkspaceMode::StableScratch,
+            notes: Vec::new(),
+        };
+
+        let effective = super::apply_workspace_runtime_overrides(&spec, &mut prepared);
+        assert_eq!(
+            effective.runtime.native_discovery,
+            NativeDiscoveryPolicy::Minimal
+        );
+        assert!(prepared
+            .notes
+            .iter()
+            .any(|note| note.contains("forces Gemini native_discovery")));
     }
 
     #[tokio::test]
@@ -263,11 +499,12 @@ mod tests {
             WorkingDirPolicy::TempCopy,
             vec![MemorySource::AutoProjectMemory],
         );
-        let request = sample_request(source);
+        let task_spec = sample_task_spec(source);
+        let hints = sample_hints();
         let handle = "run-success-cleanup";
         let state_dir = temp.path().join("state");
 
-        let dispatch = run_dispatch(&spec, &request, handle, &state_dir, Vec::new())
+        let dispatch = run_dispatch(&spec, &task_spec, &hints, handle, &state_dir, Vec::new())
             .await
             .expect("dispatch succeeds");
         let workspace_path = dispatch.workspace.workspace_path.clone();
@@ -288,11 +525,12 @@ mod tests {
             WorkingDirPolicy::TempCopy,
             vec![MemorySource::Glob("missing/**/*.md".to_string())],
         );
-        let request = sample_request(source);
+        let task_spec = sample_task_spec(source);
+        let hints = sample_hints();
         let handle = "run-error-cleanup";
         let state_dir = temp.path().join("state");
 
-        let err = run_dispatch(&spec, &request, handle, &state_dir, Vec::new())
+        let err = run_dispatch(&spec, &task_spec, &hints, handle, &state_dir, Vec::new())
             .await
             .expect_err("dispatch should fail at memory resolve");
         assert!(err
@@ -327,11 +565,12 @@ mod tests {
         spec.runtime.delegation_context = DelegationContextPolicy::PlanSection;
         spec.runtime.plan_section_selector = Some("Acceptance Criteria".to_string());
         spec.core.tags = vec!["review".to_string()];
-        let request = sample_request(source);
+        let task_spec = sample_task_spec(source);
+        let hints = sample_hints();
         let handle = "run-plan-section-acceptance";
         let state_dir = temp.path().join("state");
 
-        let dispatch = run_dispatch(&spec, &request, handle, &state_dir, Vec::new())
+        let dispatch = run_dispatch(&spec, &task_spec, &hints, handle, &state_dir, Vec::new())
             .await
             .expect("dispatch succeeds");
 

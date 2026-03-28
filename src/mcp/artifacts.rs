@@ -9,7 +9,10 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::{
     mcp::dto::ArtifactOutput,
-    runtime::summary::{ArtifactKind, ArtifactRef, SummaryEnvelope},
+    runtime::{
+        outcome::RunOutcome,
+        summary::{ArtifactKind, ArtifactRef},
+    },
 };
 
 pub(crate) fn run_root_dir(state_dir: &Path) -> PathBuf {
@@ -66,7 +69,7 @@ pub(crate) fn read_artifact_from_disk(
 }
 
 pub(crate) fn build_runtime_artifacts(
-    summary: &SummaryEnvelope,
+    outcome: &RunOutcome,
     stdout: &str,
     stderr: &str,
     workspace_root: Option<&Path>,
@@ -75,8 +78,8 @@ pub(crate) fn build_runtime_artifacts(
     let mut index = Vec::new();
     let mut payloads = HashMap::new();
 
-    if let Some(root) = workspace_root {
-        for artifact in &summary.summary.artifacts {
+    if let (Some(root), RunOutcome::Succeeded(success)) = (workspace_root, outcome) {
+        for artifact in &success.artifacts {
             let Some(content) = read_declared_artifact_content(root, &artifact.path) else {
                 continue;
             };
@@ -86,7 +89,7 @@ pub(crate) fn build_runtime_artifacts(
         }
     }
 
-    if let Ok(summary_json) = serde_json::to_string_pretty(summary) {
+    if let Ok(summary_json) = serde_json::to_string_pretty(outcome) {
         index.push(ArtifactOutput {
             path: "summary.json".to_string(),
             kind: format!("{}", ArtifactKind::SummaryJson),
@@ -98,8 +101,12 @@ pub(crate) fn build_runtime_artifacts(
         payloads.insert("summary.json".to_string(), summary_json);
     }
 
-    if let Some(raw_text) = &summary.raw_fallback_text {
-        if !raw_text.trim().is_empty() {
+    if let RunOutcome::Failed(failure) = outcome {
+        if let Some(raw_text) = failure
+            .partial_summary
+            .as_deref()
+            .filter(|text| !text.is_empty())
+        {
             index.push(ArtifactOutput {
                 path: "summary.raw.txt".to_string(),
                 kind: format!("{}", ArtifactKind::StderrText),
@@ -108,7 +115,7 @@ pub(crate) fn build_runtime_artifacts(
                 producer: Some("runtime".to_string()),
                 created_at: Some(created_at.clone()),
             });
-            payloads.insert("summary.raw.txt".to_string(), raw_text.clone());
+            payloads.insert("summary.raw.txt".to_string(), raw_text.to_string());
         }
     }
 

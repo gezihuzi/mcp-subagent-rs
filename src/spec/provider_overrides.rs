@@ -3,18 +3,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderOverrides {
-    #[serde(default)]
     pub claude: Option<ClaudeOverrides>,
-    #[serde(default)]
     pub codex: Option<CodexOverrides>,
-    #[serde(default)]
     pub gemini: Option<GeminiOverrides>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaudeOverrides {
-    #[serde(default)]
     pub permission_mode: Option<String>,
 }
 
@@ -37,15 +33,33 @@ pub enum CodexSandboxMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CodexOverrides {
-    #[serde(default)]
     pub model_reasoning_effort: Option<ReasoningEffort>,
-    #[serde(default)]
     pub sandbox_mode: Option<CodexSandboxMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeminiOverrides {
-    #[serde(default)]
     pub experimental_subagents: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderOverrides;
+
+    #[test]
+    fn provider_overrides_option_fields_deserialize_without_default_annotations() {
+        let overrides: ProviderOverrides = toml::from_str(
+            r#"
+[codex]
+"#,
+        )
+        .expect("provider overrides should parse");
+
+        assert!(overrides.claude.is_none());
+        let codex = overrides.codex.expect("codex override should exist");
+        assert!(codex.model_reasoning_effort.is_none());
+        assert!(codex.sandbox_mode.is_none());
+        assert!(overrides.gemini.is_none());
+    }
 }

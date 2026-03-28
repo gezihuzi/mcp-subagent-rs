@@ -86,13 +86,10 @@ impl ProviderCapabilities {
 pub struct ProviderProbe {
     pub provider: Provider,
     pub executable: PathBuf,
-    #[serde(default)]
     pub version: Option<String>,
     pub status: ProbeStatus,
     pub capabilities: ProviderCapabilities,
-    #[serde(default)]
     pub validated_flags: Vec<String>,
-    #[serde(default)]
     pub notes: Vec<String>,
 }
 

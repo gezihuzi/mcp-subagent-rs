@@ -2234,3 +2234,1924 @@
   - 新增测试覆盖分类判定与结果字段输出，并更新 MCP e2e 断言。
 - 已通过回归：
   - `cargo fmt && cargo test -q`（`167 + 41 + 3` tests passed）。
+
+## T-086 V0.10-P0-SpawnAcceptedOnlyAsyncProbe (Completed 2026-03-25)
+
+任务：将 `spawn` 收口为 accepted-only：同步路径只做 spec/request 组装并落盘，provider probe 后移到后台 worker，避免前台卡住。  
+验收标准：
+
+1. `spawn_agent` 同步路径不再执行 provider probe，调用可在 slow probe 场景快速返回。
+2. `run_agent` 仍保留同步 provider 可用性校验，不改变原有拒绝语义。
+3. provider 不可用时，`spawn_agent` 先返回 handle，再在后台将 run 置为 `failed` 并写入明确 unavailable 错误。
+4. `run.json` 的 `probe_result` 在异步路径成功/失败都能持久化，不丢 probe 快照。
+5. 新增测试覆盖“slow probe 快速返回”与“spawn accept 后异步失败”，`cargo test -q` 全量通过。
+完成记录：
+
+- 已完成执行链重构：
+  - `src/mcp/server.rs::prepare_run` 去除同步 probe，仅返回 `loaded + request + execution_policy`；
+  - `src/mcp/tools.rs::run_agent` 显式保留 `ensure_provider_ready`；
+  - `src/mcp/tools.rs::spawn_agent` 改为 worker 内 probe，并在 unavailable 时写入失败摘要与错误信息。
+- 已补运行态与持久化一致性：
+  - async 成功/失败路径都会写入 `probe_result`；
+  - unavailable 失败路径保留标准错误文案 `provider \`...\` is unavailable (...)` 并落盘。
+- 已新增回归测试：
+  - `spawn_agent_returns_before_slow_probe_completes`
+  - `spawn_agent_accepts_then_fails_when_provider_unavailable`
+- 已通过回归：
+  - `cargo fmt`
+  - `cargo test -q`（`170 + 42 + 3` tests passed）。
+
+## T-087 V0.10-P0-RunEventsJsonlAndHeartbeat (Completed 2026-03-25)
+
+任务：落地 run 事件流最小闭环：事件文件升级为 `events.jsonl`、`spawn` accepted/queued/probe/heartbeat 可见，并让 CLI `watch` 直接消费增量事件。  
+验收标准：
+
+1. 每个 run 目录生成 `events.jsonl`，并兼容保留 `events.ndjson`（旧读取链路不破坏）。
+2. `spawn_agent` 在 accepted-only 路径写入 `run.accepted` / `run.queued` 事件。
+3. 后台 worker 写入 `provider.probe.started/completed`，运行中定期写入 heartbeat，终态写入 `run.completed|run.failed|run.timed_out|run.cancelled`。
+4. `watch` 在非 JSON 模式下不再只输出状态变化，而是能持续打印新增事件。
+5. `timeline` 读取优先 `events.jsonl`，缺失时自动回退 `events.ndjson`。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已完成事件持久化升级：
+  - `src/mcp/persistence.rs` 事件主文件改为 `events.jsonl`；
+  - 同步写入 legacy `events.ndjson`；
+  - 新增 `append_run_event(...)`，支持带 `seq/ts/level/state/phase/source/message` 的增量事件行。
+- 已完成 `spawn` 事件链路接入：
+  - `src/mcp/tools.rs::spawn_agent` 在同步返回前写入 `run.accepted`/`run.queued`；
+  - worker 侧写入 `provider.probe.started/completed`、`workspace.prepare.started`、`provider.heartbeat` 与终态 `run.*` 事件；
+  - provider unavailable 的异步失败路径也写入明确失败事件。
+- 已完成 CLI 消费面增强：
+  - `src/main.rs` 的 `load_run_events` 改为优先 `events.jsonl`，自动回退 `events.ndjson`；
+  - `watch` 改为实时打印新增事件（并保留状态行）。
+- 已通过回归：
+  - `cargo fmt`
+  - `cargo test -q`（`170 + 42 + 3` tests passed）。
+
+## T-088 V0.10-P0-EventsStatsWaitCliSurface (Completed 2026-03-25)
+
+任务：把 v0.10 可观察命令面补齐到可直接使用：新增 `events/stats/wait`，并与现有 `watch/timeline` 兼容协同。  
+验收标准：
+
+1. CLI 新增 `events <handle> [--event ...] [--follow] [--interval-ms] [--timeout-secs] [--json]`。
+2. CLI 新增 `stats <handle> [--json]`，输出阶段耗时、last event、stall 信号与 token usage。
+3. CLI 新增 `wait <handle> [--interval-ms] [--timeout-secs] [--json]`，阻塞到终态并按状态返回退出码。
+4. `events/timeline/watch` 统一优先读取 `events.jsonl`，兼容回退 `events.ndjson`。
+5. 补测试覆盖：命令解析、`events.jsonl` 优先级、stats 时序计算。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已补齐命令面：
+  - `src/main.rs` 新增 `Commands::Events/Stats/Wait`；
+  - 主命令分发新增 `read_events/read_stats/wait_run` 执行链；
+  - `wait` 退出码映射：`succeeded=0`、`cancelled=2`、`timed_out=124`、其他失败=1。
+- 已增强事件消费能力：
+  - `events --follow` 支持增量输出（文本/JSON 行）；
+  - `watch` 保留状态输出并实时打印新增事件；
+  - `load_run_events` 统一优先读取 `events.jsonl`，缺失回退 legacy `events.ndjson`。
+- 已补 stats 结果模型：
+  - 新增 `RunStatsOutput` 与 `build_run_stats_output`；
+  - 汇总 `queue_ms/provider_probe_ms/execution_ms/wall_ms/last_event_age_ms/stalled`；
+  - 复用现有 usage 输出，保持 token 口径一致。
+- 已同步文档命令面：
+  - `README.md` 命令表新增 `events/stats/wait`；
+  - 示例链路切换为 `events`，并标注 `timeline` 为兼容别名。
+- 已新增测试：
+  - `parses_events_command_flags`
+  - `parses_wait_command_flags`
+  - `parses_stats_command_flags`
+  - `build_run_stats_output_derives_phase_and_durations_from_events`
+  - `load_run_events_prefers_jsonl_when_both_formats_exist`
+- 已通过回归：
+  - `cargo fmt`
+  - `cargo test -q`（`170 + 46 + 3` tests passed）。
+
+## T-089 V0.10-P1-McpWatchEventsAndStatsTools (Completed 2026-03-25)
+
+任务：在 MCP 协议面补齐 v0.10 可观察能力：新增增量事件读取与统计读取工具，供 Host 侧低成本轮询。  
+验收标准：
+
+1. MCP 新增 `watch_agent_events(handle_id, since_seq?, limit?)`，支持按 seq 增量读取。
+2. MCP 新增 `get_agent_stats(handle_id)`，返回阶段耗时、last event/stalled 与 usage。
+3. 事件读取优先 `events.jsonl`，缺失时回退 `events.ndjson`。
+4. 现有 MCP tool 链路不回退，新增 tool 与旧 tool 可同时工作。
+5. MCP roundtrip 测试覆盖新工具调用与关键字段断言。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 MCP DTO：
+  - `src/mcp/dto.rs` 新增 `WatchAgentEventsInput/Output`、`RunEventOutput`、`GetAgentStatsInput/Output`。
+- 已落地工具实现：
+  - `src/mcp/tools.rs` 新增 `watch_agent_events`（支持 `since_seq/limit`）与 `get_agent_stats`；
+  - 增加事件文件解析与 stats 计算辅助函数（queue/probe/execution/wall + stalled）。
+- 已完成兼容读取策略：
+  - MCP 事件读取优先 `events.jsonl`，自动回退 `events.ndjson`。
+- 已补协议级回归：
+  - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 新增工具名断言；
+  - roundtrip 新增 `get_agent_stats` 与 `watch_agent_events` 调用断言。
+- 已同步文档：
+  - `README.md` MCP tools 列表新增 `watch_agent_events`、`get_agent_stats`。
+- 已通过回归：
+  - `cargo fmt`
+  - `cargo test -q`（`170 + 46 + 3` tests passed）。
+
+## T-090 V0.10-P1-StatusPsObservabilitySurface (Completed 2026-03-25)
+
+任务：补齐状态面的人类可读可观察输出：`status/ps` 显示 phase、last event age、stalled 与 elapsed，减少“只看到 running”的黑盒感。  
+验收标准：
+
+1. CLI `status` 文本输出包含 `state/phase/last_event/last_event_age/stalled`。
+2. CLI `ps` 文本输出对 running 任务展示 `phase/elapsed/last_event/stalled`。
+3. MCP `get_agent_status` 输出新增可观察字段（可选，不破坏兼容）。
+4. MCP `list_runs` 输出新增可观察字段（可选，不破坏兼容）。
+5. MCP e2e roundtrip 覆盖新字段存在性断言。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 DTO（兼容可选字段）：
+  - `src/mcp/dto.rs::AgentStatusOutput` 新增 `state/phase/last_event_at/last_event_age_ms/stalled`；
+  - `src/mcp/dto.rs::RunListingOutput` 新增 `state/phase/last_event_at/last_event_age_ms/stalled/elapsed_ms`。
+- 已升级 MCP 工具输出：
+  - `src/mcp/tools.rs::get_agent_status` 基于事件流填充 phase/age/stalled；
+  - `src/mcp/tools.rs::list_runs` 为每条 run 填充 phase/age/stalled/elapsed。
+- 已升级 CLI 展示面：
+  - `src/main.rs::get_status` 文本输出补充状态观测字段；
+  - `src/main.rs::list_runs` 文本输出改为 `phase + elapsed + last_event + stalled` 形态；
+  - 新增短时间格式化函数 `format_elapsed_short`。
+- 已补协议回归：
+  - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 增加 `get_agent_status/list_runs` 新字段断言。
+- 已同步文档：
+  - `README.md` 补充 `ps` 可观察字段说明。
+- 已通过回归：
+  - `cargo fmt`
+  - `cargo test -q`（`170 + 46 + 3` tests passed）。
+
+## T-091 V0.10-P1-BlockReasonAndLogsFollow (Completed 2026-03-25)
+
+任务：补齐运行期阻塞原因输出与 `logs --follow`，让“运行中卡在哪里”可解释且可持续观察。  
+验收标准：
+
+1. MCP `get_agent_status/list_runs/get_agent_stats` 输出包含 `block_reason`（可选字段，兼容旧调用）。
+2. CLI `status/ps/stats` 文本输出显示 `block_reason`。
+3. 新增 `logs --follow`（支持 `--interval-ms/--timeout-secs`），可持续输出 runtime events 与 stdout/stderr 增量。
+4. `logs --follow --json` 输出机器可读 JSON 行（event + stream 两类）。
+5. README 命令面与示例更新包含 `logs --follow` 与 `block_reason` 说明。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 MCP DTO：`AgentStatusOutput/RunListingOutput/GetAgentStatsOutput` 新增 `block_reason`。
+- 已在 `src/mcp/tools.rs` 落地 `block_reason` 归因：
+  - 错误文本与事件启发式识别（`trust/auth/tool approval/skill discovery/workspace scan/provider unavailable/normalization/network`）；
+  - stalled + phase 回退（`queueing/workspace_prepare/provider_probe/provider_boot/provider_output_wait`）。
+- 已在 CLI 落地阻塞原因输出：
+  - `status` 新增 `block_reason` 行；
+  - `ps` 行输出新增 `block_reason`；
+  - `stats` 新增 `block_reason` 字段与文本输出。
+- 已新增 `logs --follow`：
+  - 支持 `--follow --interval-ms --timeout-secs`；
+  - 文本模式合并输出 runtime events 与 `stdout/stderr` 增量；
+  - `--json` 模式输出 `kind=event|stream` 的 JSON 行。
+- 已补测试：
+  - `parses_logs_command_stderr_mode`（默认值校验）；
+  - `parses_logs_follow_flags`；
+  - `classify_block_reason_detects_provider_unavailable_from_error_text`；
+  - `classify_block_reason_uses_stalled_phase_fallback`；
+  - MCP roundtrip 新增 `block_reason` 字段存在性断言。
+- 已同步 README：命令面新增 `logs --follow` 参数与示例，`ps` 字段说明补 `block_reason`。
+
+## T-092 V0.10-P1-ProviderWaitSignalsAndFirstOutputWatchdog (Completed 2026-03-25)
+
+任务：补齐 provider 启动阻塞信号事件与 first-byte watchdog，让 `events/watch/logs` 能看到“卡在哪一层”。  
+验收标准：
+
+1. 异步执行链新增 `provider.boot.started` 事件。
+2. 异步执行链新增 first-byte watchdog：超过阈值无输出时写入 `provider.first_output.warning` 事件。
+3. 从 provider 输出/错误文本识别并写入 `provider.waiting_for_trust/auth/tool_approval/skill_discovery/workspace_scan` 事件。
+4. `block_reason` 归因逻辑支持上述新增事件（CLI + MCP 一致）。
+5. README 示例补充 first-byte warning 事件跟随命令。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已在 `src/mcp/tools.rs` 的 spawn worker 事件流增加：
+  - `provider.boot.started`（进入 provider 启动阶段）；
+  - `provider.first_output.warning`（默认 8s 无输出触发一次）。
+- 已新增 provider wait signal 识别：
+  - 文本命中后落盘 `provider.waiting_for_trust/auth/tool_approval/skill_discovery/workspace_scan` 事件；
+  - 识别来源覆盖 dispatch `stdout/stderr` 与错误路径 `error_message`。
+- 已更新 `block_reason` 规则：
+  - MCP 与 CLI 都支持从新增 wait 事件和 first-output warning 直接归因。
+- 已补测试：
+  - `src/mcp/tools.rs` 新增 wait signal / first-output warning 归因单测；
+  - `src/main.rs` 新增 wait event 归因单测。
+- 已同步 README 示例：
+  - 新增 `events --event provider.first_output.warning --follow`。
+
+## T-093 V0.10-P1-StatsPhaseSplitsAndWaitSummary (Completed 2026-03-25)
+
+任务：增强 `stats` 结果面，补齐 phase 细分耗时和 wait 信号汇总，降低“只有总耗时”的排障成本。  
+验收标准：
+
+1. `get_agent_stats`（MCP）新增：`workspace_prepare_ms`、`provider_boot_ms`、`first_output_warned`、`first_output_warning_at`、`current_wait_reason`、`wait_reasons`。
+2. CLI `stats` 文本输出展示上述新增字段。
+3. CLI `build_run_stats_output` 与 MCP `build_agent_stats_output` 都基于事件流计算新增字段，口径一致。
+4. MCP roundtrip 测试新增 stats 字段存在性断言。
+5. README 说明补充 stats 新字段能力。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 stats 数据模型：
+  - `src/mcp/dto.rs::GetAgentStatsOutput` 新增 phase split 与 wait summary 字段。
+- 已升级 MCP stats 计算：
+  - `src/mcp/tools.rs` 新增 `workspace_prepare_ms/provider_boot_ms` 计算；
+  - 新增 `first_output_warned/first_output_warning_at`；
+  - 新增 `wait_reasons/current_wait_reason` 汇总（由 `provider.waiting_for_*` 事件派生）。
+- 已升级 CLI stats：
+  - `src/main.rs::RunStatsOutput` 同步新增字段；
+  - `read_stats` 文本输出新增字段打印；
+  - `build_run_stats_output` 计算口径与 MCP 对齐。
+- 已补测试：
+  - `build_run_stats_output_derives_phase_and_durations_from_events` 覆盖新增时序字段；
+  - `mcp_transport_roundtrip_for_all_tools` 新增 stats 字段断言；
+  - 保留并通过 wait reason/block reason 相关测试。
+- 已同步 README：
+  - 新增 stats 能力说明（phase splits + first-output watchdog + wait reasons）。
+
+## T-094 V0.10-P1-PhaseProgressViewForFollowCommands (Completed 2026-03-25)
+
+任务：为 `watch/events/logs` 的 follow 视图补齐 phase 聚合进度行，降低“事件很多但看不出整体进展”的认知成本。  
+验收标准：
+
+1. 新增 phase 聚合函数，按事件序列计算各 phase 累计时长并标记当前 phase。
+2. `watch` 文本模式在 follow 循环中输出滚动 `phase_progress` 行（变化时输出）。
+3. `events --follow` 文本模式输出滚动 `phase_progress` 行（变化时输出）。
+4. `logs --follow` 文本模式输出滚动 `phase_progress` 行（变化时输出）。
+5. JSON 模式行为保持兼容（不插入额外文本污染 JSON 行）。
+6. README 说明补充 phase progress 行为。
+7. `cargo test -q` 全量通过。
+完成记录：
+
+- 已在 `src/main.rs` 新增 phase 聚合能力：
+  - `build_phase_progress_line(events, terminal, now)` 统一生成进度摘要；
+  - 输出格式：`phase_progress: <phase=duration ... current*=...> wall=<...>`。
+- 已接入 follow 命令：
+  - `watch`、`events --follow`、`logs --follow` 都在文本模式下输出 `phase_progress`；
+  - 仅在进度行变化时输出，避免刷屏。
+- JSON 兼容保持：
+  - `events --follow --json` 与 `logs --follow --json` 继续仅输出 JSON 行。
+- 已补测试：
+  - `build_phase_progress_line_marks_current_phase`；
+  - `build_phase_progress_line_terminal_has_no_current_marker`。
+- 已同步 README：
+  - 增加 `watch/events/logs --follow` phase_progress 说明。
+
+## T-095 V0.10-P1-PhaseFilterAndPhaseTimeout (Completed 2026-03-25)
+
+任务：为 follow 观察命令补充阶段过滤与阶段超时，提升“只盯某阶段排障”的效率。  
+验收标准：
+
+1. `watch/events/logs` 新增 `--phase <name>` 过滤参数（事件输出按 phase 过滤）。
+2. `watch/events/logs` 新增 `--phase-timeout-secs <n>`（阶段长期不变化时超时退出）。
+3. `events` 非 follow 模式也支持 `--phase` 过滤。
+4. `phase_progress` 与 `--phase` 联动（非目标 phase 时不输出 progress 行）。
+5. JSON 模式兼容不破坏：`events/logs --json` 仍只输出 JSON。
+6. 命令解析与 progress/filter 行为有测试覆盖。
+7. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 CLI 命令面：
+  - `Commands::Watch/Events/Logs` 新增 `phase` 与 `phase_timeout_secs`；
+  - `read_events/read_logs/watch_run` 执行链同步接入。
+- 已实现 phase 过滤：
+  - `filter_timeline_events` 新增 phase 过滤参数；
+  - `events` follow 与非 follow 均可按 phase 过滤事件输出；
+  - `watch/logs --follow` 文本事件输出按 phase 过滤。
+- 已实现 phase timeout：
+  - 在 `watch/events/logs --follow` 循环维护 `observed_phase + observed_phase_started_at`；
+  - 超过 `--phase-timeout-secs` 后返回 `124` 并输出超时原因。
+- 已升级 phase progress：
+  - `build_phase_progress_line` 新增 `phase_filter` 参数；
+  - phase filter 不匹配时不输出 progress 行，避免噪音。
+- 已补测试：
+  - `parses_logs_command_stderr_mode/parses_logs_follow_flags`（新增 phase/phase-timeout 断言）；
+  - `parses_events_command_flags`（新增 phase/phase-timeout 断言）；
+  - `parses_watch_command_flags/parses_watch_phase_timeout_flags`；
+  - `build_phase_progress_line_*` 增加 phase filter 场景。
+- 已同步 README：
+  - 命令面新增 `--phase` / `--phase-timeout-secs`；
+  - 增加 phase-timeout 使用说明。
+
+## T-096 V0.10-P1-McpPhaseFilterAndWatchdog (Completed 2026-03-25)
+
+任务：将 phase 过滤与 phase watchdog 能力对齐到 MCP 事件工具面，避免 Host 侧只能自行拼接状态逻辑。  
+验收标准：
+
+1. MCP `watch_agent_events` 入参新增 `phase` 与 `phase_timeout_secs`。
+2. MCP `watch_agent_events` 出参新增 `current_phase`、`current_phase_age_ms`、`phase_timeout_hit`。
+3. `watch_agent_events` 支持按 phase 过滤事件返回。
+4. `phase_timeout_hit` 基于“当前 phase 持续时长”计算，可被 Host 直接消费。
+5. MCP roundtrip 测试覆盖新增字段存在性与 phase 过滤调用路径。
+6. README MCP 工具说明更新。
+7. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 DTO：
+  - `src/mcp/dto.rs::WatchAgentEventsInput` 新增 `phase/phase_timeout_secs`；
+  - `src/mcp/dto.rs::WatchAgentEventsOutput` 新增 `current_phase/current_phase_age_ms/phase_timeout_hit`。
+- 已升级工具实现：
+  - `src/mcp/tools.rs::watch_agent_events` 支持 phase 过滤；
+  - 新增 `current_phase_age_ms` 计算；
+  - 新增 phase timeout 命中计算（`phase_timeout_hit`）。
+- 已补单测：
+  - `current_phase_age_ms_tracks_latest_phase_window`。
+- 已补 MCP roundtrip：
+  - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 使用 `phase + phase_timeout_secs` 调用并断言新增输出字段。
+- 已同步 README：
+  - MCP tools 段新增 `watch_agent_events` phase/watchdog 能力说明。
+
+## T-097 V0.10-P1-McpWatchRunPhaseWatchdog (Completed 2026-03-25)
+
+任务：将 phase watchdog 能力从 `watch_agent_events` 扩展到 `watch_run`，减少 Host 端双工具拼装复杂度。  
+验收标准：
+
+1. `WatchRunInput` 新增 `phase`、`phase_timeout_secs`。
+2. `WatchRunOutput` 新增 `current_phase`、`current_phase_age_ms`、`phase_timeout_hit`。
+3. `watch_run` 在轮询过程中计算当前 phase 持续时长，并支持 phase timeout 命中返回。
+4. 终态返回仍保持兼容（`terminal=true`、`timed_out=false`），并带上 phase 观测字段。
+5. MCP roundtrip 覆盖 `watch_run` 新参数调用与新增字段断言。
+6. README MCP tools 说明同步更新。
+7. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 DTO：
+  - `src/mcp/dto.rs::WatchRunInput` 新增 `phase/phase_timeout_secs`；
+  - `src/mcp/dto.rs::WatchRunOutput` 新增 `current_phase/current_phase_age_ms/phase_timeout_hit`。
+- 已升级 `watch_run`：
+  - `src/mcp/tools.rs::watch_run` 每轮读取事件并计算当前 phase age；
+  - 支持 phase scoped timeout，命中后返回 `timed_out=true` 与 `phase_timeout_hit=true`；
+  - 普通 timeout/终态路径均返回 phase 观测字段。
+- 已补 MCP roundtrip：
+  - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 对 `watch_run` 传入 `phase + phase_timeout_secs`；
+  - 新增 `current_phase/current_phase_age_ms/phase_timeout_hit` 字段断言。
+- 已同步 README：
+  - MCP tools 段补充 `watch_run` phase/watchdog 能力说明。
+
+## T-098 V0.10-P1-WatchAdviceSurface (Completed 2026-03-25)
+
+任务：为 MCP watch 工具补齐统一 `advice` 输出，降低 Host 端“拿到状态但不知道下一步做什么”的集成成本。  
+验收标准：
+
+1. `WatchRunOutput` 与 `WatchAgentEventsOutput` 新增 `block_reason` 与 `advice` 字段。
+2. `watch_run/watch_agent_events` 统一生成建议：
+   - phase timeout 命中时给出阶段排障建议；
+   - 常见阻塞原因（trust/auth/approval/workspace/skills/network/provider unavailable）给出操作建议；
+   - 终态给出下一步动作建议（如 `get_run_result` / 查 `stderr`）。
+3. MCP roundtrip 断言新增字段存在。
+4. README MCP 工具说明更新到 `advice`。
+5. 新增单测覆盖建议生成逻辑。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 DTO：
+  - `src/mcp/dto.rs::WatchRunOutput` 新增 `block_reason/advice`；
+  - `src/mcp/dto.rs::WatchAgentEventsOutput` 新增 `block_reason/advice`。
+- 已升级工具实现：
+  - `src/mcp/tools.rs` 新增 `build_watch_advice`；
+  - `watch_run/watch_agent_events` 接入 `build_event_runtime_snapshot` 的 `block_reason`；
+  - 输出 `advice` 支持 phase-timeout + reason + terminal next step 组合。
+- 已补测试：
+  - `build_watch_advice_includes_timeout_and_reason_guidance`；
+  - `build_watch_advice_includes_terminal_next_step`；
+  - MCP roundtrip 新增 `watch_run/watch_agent_events` 的 `block_reason/advice` 字段断言。
+- 已同步 README：
+  - `watch_run/watch_agent_events` 输出说明补充 `block_reason/advice`。
+
+## T-099 V0.10-P1-StatusStatsAdviceSurface (Completed 2026-03-25)
+
+任务：把 `advice` 能力从 MCP watch 工具扩展到 `get_agent_status/get_agent_stats`，让仅轮询状态的 Host 也能拿到下一步建议。  
+验收标准：
+
+1. `AgentStatusOutput` 与 `GetAgentStatsOutput` 新增 `advice` 字段（默认空数组）。
+2. `get_agent_status/get_agent_stats` 复用统一建议生成逻辑（基于 status/phase/block_reason）。
+3. 新字段保持协议兼容（`serde(default)`，旧客户端可忽略）。
+4. MCP roundtrip 测试补齐 `get_agent_status/get_agent_stats` 的 `advice` 字段断言。
+5. README MCP 工具说明同步到 polling 能力。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 DTO：
+  - `src/mcp/dto.rs::AgentStatusOutput` 新增 `advice`；
+  - `src/mcp/dto.rs::GetAgentStatsOutput` 新增 `advice`；
+  - 两处均使用 `#[serde(default)]` 保持兼容。
+- 已升级工具实现：
+  - `src/mcp/tools.rs::get_agent_status` 接入 `build_watch_advice`；
+  - `src/mcp/tools.rs::build_agent_stats_output` 接入 `build_watch_advice`。
+- 已补 MCP roundtrip：
+  - `src/mcp/server.rs::mcp_transport_roundtrip_for_all_tools` 新增 `status_after_done` 与 `stats` 的 `advice` 字段断言。
+- 已同步 README：
+  - MCP 工具说明补充 `get_agent_status/get_agent_stats` 返回 `block_reason/advice`。
+
+## T-100 V0.10-P1-GeminiResearchStableScratchWorkspace (Completed 2026-03-25)
+
+任务：把 Gemini 简单 research 任务从“默认继承当前仓库 working_dir”改为“默认长期复用 stable scratch workspace”，降低 trust/skills/discovery 噪音。  
+验收标准：
+
+1. `working_dir_policy=auto` 下，满足以下条件时默认切到 stable scratch workspace：
+   - provider=`gemini`
+   - sandbox=`read_only`
+   - delegation_context=`minimal`
+   - 无 `selected_files`、无 `plan_ref`
+   - 任务有 research 信号（`stage=research|plan` 或 agent tag 含 `research`）
+2. scratch 路径长期复用，默认落到 `~/.mcp-subagent/provider-workspaces/gemini/research`，并支持环境变量覆盖。
+3. run metadata `workspace.mode` 能区分该路径（新增 `stable_scratch`）。
+4. cleanup 不会删除 stable scratch 目录。
+5. 新增单测覆盖：scratch 路由命中、selected_files 保护分支、scratch 路径解析、cleanup 语义。
+6. README 补充默认行为与覆盖方式说明。
+7. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/runtime/workspace.rs`：
+  - 新增 `WorkspaceMode::StableScratch`；
+  - 新增 Gemini research-only 自动路由判定；
+  - 新增 stable scratch 路径解析逻辑（默认 HOME 下路径，支持 `MCP_SUBAGENT_GEMINI_RESEARCH_SCRATCH_DIR` 覆盖）。
+- 已升级 `src/runtime/cleanup.rs`：
+  - `StableScratch` 与 `InPlace` 一样不创建 cleanup guard，不做目录删除。
+- 已升级 `src/mcp/service.rs`：
+  - workspace metadata 映射新增 `stable_scratch`。
+- 已补测试：
+  - `auto_policy_routes_gemini_research_profile_to_stable_scratch`
+  - `auto_policy_keeps_in_place_when_gemini_research_has_selected_files`
+  - `resolve_stable_gemini_scratch_dir_uses_home_when_unset`
+  - `stable_scratch_workspace_has_no_cleanup_guard`
+- 已同步 README：
+  - 配置环境变量段新增 `MCP_SUBAGENT_GEMINI_RESEARCH_SCRATCH_DIR`；
+  - 推荐命令流补充 stable scratch 默认行为说明。
+
+## T-101 V0.10-P1-GeminiStableScratchDiscoveryOverride (Completed 2026-03-25)
+
+任务：解决 stable scratch 命中后 Gemini 仍因 `native_discovery=isolated` 触发 auth fallback 慢启动的问题，在运行时自动降级 discovery 策略。  
+验收标准：
+
+1. 当 workspace mode=`stable_scratch` 且 provider=`gemini` 且 `native_discovery=isolated` 时，运行时自动改为 `minimal`。
+2. override 仅作用于本次执行，不改写 agent 文件。
+3. workspace notes 记录 override 原因，便于 run 审计。
+4. 新增单测覆盖 override 触发与 notes 写入。
+5. README 补充 stable scratch + discovery override 行为说明。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/mcp/service.rs`：
+  - 新增 `apply_workspace_runtime_overrides`；
+  - `run_dispatch` 改为基于 `effective_spec` 执行（memory resolve + dispatcher + runner 统一吃 override 后 spec）；
+  - 命中 stable scratch 时把 Gemini `native_discovery` 从 `isolated` 降级到 `minimal`，并写入 workspace note。
+- 已补测试：
+  - `stable_scratch_overrides_gemini_isolated_discovery_to_minimal`。
+- 已同步 README：
+  - stable scratch 段补充“自动降级 isolated->minimal 避免 auth/trust fallback loops”说明。
+
+## T-102 V0.10-P1-GlobalEventsFollow (Completed 2026-03-25)
+
+任务：补齐全局事件流命令面，让排障时不必先拿单个 handle，再能直接观察所有 run 的事件推进。  
+验收标准：
+
+1. `events` 子命令支持 `--all`，形成命令面：`events [<handle-id>] [--all] ...`。
+2. `events --all`（非 follow）可聚合输出所有 run 的事件（支持 `--event/--phase` 过滤）。
+3. `events --all --follow` 支持跨 run 增量输出（含 handle 前缀），并支持 `--timeout-secs/--phase-timeout-secs`。
+4. 单 handle 行为保持兼容（原有 `events <handle-id>` 路径不变）。
+5. CLI 解析测试覆盖 `events --all` 参数组合。
+6. 新增聚合快照测试覆盖多 handle 事件加载与过滤。
+7. README 命令面和示例补充 `events --all --follow`。
+8. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/main.rs`：
+  - `Commands::Events` 新增 `all: bool`，`handle_id` 改为可选并与 `--all` 互斥；
+  - `read_events` 新增 all 分支校验与分流；
+  - 新增 `collect_run_event_snapshots` 与 `read_events_all`，实现全局一次性/跟随模式；
+  - follow 全局模式支持 `--event/--phase` 过滤、全局 timeout、phase-timeout。
+- 已补测试：
+  - `parses_events_all_command_flags`；
+  - `collect_run_event_snapshots_loads_all_handles_and_filters`。
+- 已同步 README：
+  - command surface 改为 `events [<handle-id>] [--all] ...`；
+  - 示例新增 `mcp-subagent events --all --follow`。
+
+## T-103 V0.10-P1-GlobalEventsContinuousFollow (Completed 2026-03-25)
+
+任务：修复 `events --all --follow` 的“非连续流”行为，避免在当前活跃 run 结束后自动退出导致看起来像一次性拉取。  
+验收标准：
+
+1. `events --all --follow` 默认持续监听（不因当前 active run 归零自动退出）。
+2. 仅在显式超时（`--timeout-secs` / `--phase-timeout-secs`）或用户中断时退出。
+3. 单 handle `events <handle-id> --follow` 语义保持不变。
+4. README 明确 `events --all --follow` 是 continuous stream 模式。
+5. `cargo test -q` 全量通过。
+完成记录：
+
+- 已修复 `src/main.rs::read_events_all`：
+  - 移除“active runs 清空即退出”的逻辑；
+  - 全局 follow 改为持续轮询并输出增量事件。
+- 已同步 README：
+  - 在示例段明确 `events --all --follow` 会持续监听直到 Ctrl-C 或 timeout。
+
+## T-104 V0.10-P1-GlobalEventsNoiseAndAuthFalsePositiveFix (Completed 2026-03-25)
+
+任务：修复全局事件流的两类可用性问题：`phase_progress` 噪音刷屏、以及成功任务误判 `auth_required`。  
+验收标准：
+
+1. `events --all --follow` 的 `phase_progress` 只在对应 handle 有新增事件时更新，不再按轮询周期对旧 run 刷屏。
+2. `auth_required` 检测不再把“已加载凭证”日志误判为阻塞（如 `Loaded cached credentials` / keychain fallback）。
+3. `succeeded` 终态不再输出 `block_reason=auth_required` 这类误导阻塞原因。
+4. provider heartbeat 在首输出前保持 `provider_boot` phase，避免早期误切到 `running` 造成 phase 抖动。
+5. 新增单测覆盖 cached credential 误判防护与 succeeded block_reason 行为。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/main.rs`：
+  - 新增 `auth_is_ready_signal/auth_is_wait_signal`；
+  - `classify_block_reason_from_text` 收紧 auth 识别；
+  - `classify_block_reason` 对 `status=succeeded` 直接返回 `None`；
+  - `read_events_all` 改为仅在 handle 有新增事件时更新该 handle 的 `phase_progress`。
+- 已升级 `src/mcp/tools.rs`：
+  - 新增同等 auth 信号判定函数，`detect_provider_wait_signal` 与 `classify_block_reason_from_text` 共用；
+  - `classify_block_reason` 对 `RunStatus::Succeeded` 返回 `None`；
+  - dispatch 心跳事件 phase 从 `running` 调整为 `provider_boot`（首输出前阶段语义更准确）。
+- 已补测试：
+  - main: `classify_block_reason_ignores_cached_credentials_text`、`classify_block_reason_is_none_for_succeeded_status`
+  - mcp/tools: `detect_provider_wait_signal_ignores_cached_credentials_log`、`classify_block_reason_is_none_for_succeeded_status`、`classify_block_reason_from_text_ignores_cached_credentials_log`
+
+## T-105 V0.10-P1-SpawnAcceptedEnvelopeAndCoreEventCoverage (Completed 2026-03-25)
+
+任务：收口 `spawn` accepted 返回语义，并补齐 v0.10 必备事件里的关键缺口（context/parse/cancel/output delta）。  
+验收标准：
+
+1. `spawn_agent` 输出包含 accepted envelope：`status/state/phase/queued_at`（且 `status=accepted`）。
+2. 运行成功路径事件流补齐：`workspace.prepare.completed`、`context.compile.started/completed`、`parse.started/completed`。
+3. provider 输出事件补齐：`provider.stdout.delta` 与 `provider.stderr.delta`（至少包含 bytes/lines 指标）。
+4. `cancel_agent` 会写入 `run.cancelled` 事件，Host 可直接观察取消终态事件。
+5. CLI/README 与测试同步更新，`cargo test -q` 全量通过。
+完成记录：
+
+- 已扩展 `src/mcp/dto.rs::SpawnAgentOutput`：新增 `state/phase/queued_at` 字段，并保持 `status` 兼容。
+- 已升级 `src/mcp/tools.rs::spawn_agent`：
+  - 返回 accepted envelope（`status/state/phase=accepted` + `queued_at`）；
+  - 新增 `append_transition_derived_events`，从 `status_history` 衍生补齐 `workspace.prepare.completed`、`context.compile.*`、`parse.*`；
+  - 新增 `append_provider_output_delta_events`，输出 `provider.stdout.delta` / `provider.stderr.delta`（bytes/lines）。
+- 已升级 `src/mcp/tools.rs::cancel_agent`：取消路径追加 `run.cancelled` 事件。
+- 已同步 `src/main.rs` 非 JSON spawn 输出，补充 `state/phase/queued_at` 展示。
+- 已同步 MCP/集成测试与工具单测：
+  - `src/mcp/server.rs` 断言 spawn accepted envelope；
+  - roundtrip 断言取消后可观测 `run.cancelled`；
+  - `src/mcp/tools.rs` 新增 transition-derived events 与 provider delta events 单测。
+- 已同步 `README.md`：说明 `spawn/submit --json` 的 accepted envelope 字段。
+- 已通过 `cargo fmt && cargo test -q`（186 + 58 + 3 全通过）。
+
+## T-106 V0.10-P1-IncrementalFollowEventCursor (Completed 2026-03-25)
+
+任务：将 `events --follow` 从“每轮全量重读 events 文件”改为“基于文件 offset 的增量消费”，降低轮询开销并让事件流语义更接近实时 tail。  
+验收标准：
+
+1. `events <handle-id> --follow` 使用增量 cursor，只消费新增事件，不重复解析历史全量文件。
+2. `events --all --follow` 同样使用 per-handle 增量 cursor，不再每轮扫描全量历史事件。
+3. 保持现有行为兼容：首次进入 follow 仍可看到已有历史事件，过滤参数 `--event/--phase` 继续生效。
+4. phase timeout / global timeout / phase_progress 输出语义保持不变。
+5. 新增单测覆盖增量读取和 partial line 场景。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已在 `src/main.rs` 增加增量读取基础设施：
+  - `EventStreamCursor`、`FollowEventState`
+  - `resolve_events_file_path`
+  - `parse_timeline_event_line`
+  - `load_run_events_incremental`（offset + trailing partial line 处理）
+- 已改造 `read_events`（单 handle follow）：
+  - 用 cursor + in-memory accumulated events 替代每轮 `load_run_events` 全量读取。
+- 已改造 `read_events_all`（全局 follow）：
+  - 用 per-handle `FollowEventState` 增量消费事件；
+  - 保留 `--event/--phase` 过滤、phase timeout 和 `phase_progress` 输出逻辑。
+- 已新增测试：
+  - `load_run_events_incremental_only_returns_appended_events`
+  - `load_run_events_incremental_handles_partial_trailing_line`
+- 已通过 `cargo fmt && cargo test -q`（186 + 60 + 3 全通过）。
+
+## T-107 V0.10-P1-SyntheticEventProgressNoiseFix (Completed 2026-03-25)
+
+任务：修复你实测日志里 `phase_progress` 被 synthetic 衍生事件污染导致尾部出现多个 `0ms` phase 段的问题。  
+验收标准：
+
+1. 衍生事件（`workspace.prepare.completed/context.compile*/parse*`）保留事件可观测性，但显式标记 synthetic。
+2. `phase_progress` 计算忽略 synthetic 事件，不再出现末尾 `context_compile/parse=0ms` 抖动。
+3. 新增单测覆盖 synthetic 事件不会进入 phase_progress 分段。
+4. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/mcp/tools.rs::append_transition_derived_events`：
+  - 为衍生事件 detail 增加 `{ synthetic: true, derived_from: "status_history" }`。
+- 已升级 `src/main.rs`：
+  - 新增 `is_synthetic_progress_event`；
+  - `build_phase_progress_line` 跳过 synthetic 事件。
+- 已新增测试：
+  - `build_phase_progress_line_ignores_synthetic_events`。
+- 已通过 `cargo fmt && cargo test -q`（186 + 61 + 3 全通过）。
+
+## T-108 V0.10-P1-CliSpawnAcceptedOnlyNoWait (Completed 2026-03-25)
+
+任务：移除 CLI `spawn/submit` 的 `wait_for_run` 阻塞，让命令行也符合 accepted-only 语义。  
+验收标准：
+
+1. `mcp-subagent spawn ... --json` 返回后进程立即退出，不等待 run 完成。
+2. 输出保持 accepted envelope（`handle_id/status/state/phase/queued_at`）。
+3. `submit` 与 `spawn` 行为保持一致。
+4. README 命令行为说明同步更新。
+5. 新增测试覆盖 CLI spawn 不等待（最少覆盖逻辑级行为）。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/main.rs::spawn_agent`：
+  - 去除默认 `wait_for_run` 阻塞；
+  - 以 `cli_spawn_waits_for_completion()` 统一控制（当前固定为 `false`），CLI `spawn/submit` 立即返回 accepted 结果。
+- 已新增测试：
+  - `cli_spawn_does_not_wait_for_completion`（逻辑级行为锁定）。
+- 已同步 `README.md`：
+  - 补充说明 CLI `spawn/submit` accepted 后立即退出，后续用 `watch/events/stats/result` 观察。
+- 已通过 `cargo fmt && cargo test -q`（186 + 62 + 3 全通过）。
+
+## T-109 V0.10-P1-RealtimeContextParseWorkspaceEvents (Completed 2026-03-25)
+
+任务：将 `workspace/context/parse` 事件从 synthetic 尾部补写改为运行时实时事件。  
+验收标准：
+
+1. `workspace.prepare.completed` 在 workspace 准备完成时即时写入。
+2. `context.compile.started/completed` 在编译前后即时写入。
+3. `parse.started/completed` 在 summary 解析前后即时写入。
+4. 移除相应 synthetic 补写路径，不再依赖 `status_history` 回填。
+5. 新增测试覆盖事件时间顺序（probe -> workspace -> context -> parse -> completed）。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/mcp/service.rs::run_dispatch`：
+  - `workspace.prepare.completed` 在 workspace 准备完成后实时写入；
+  - 通过 `dispatcher.run_with_observers(..., on_transition, ...)` 在状态切换时实时写入
+    `context.compile.started/completed` 与 `parse.started/completed`。
+- 已升级 `src/runtime/dispatcher.rs`：
+  - 新增 `run_with_observers`，统一承载 transition observer（并为后续输出 observer 预留能力）。
+- 已移除 `src/mcp/tools.rs` 里依赖 `status_history` 的 synthetic 事件回填路径。
+- 已补齐/更新测试：
+  - `src/mcp/server.rs` 验证事件顺序覆盖 `probe -> workspace -> context -> parse -> completed`。
+- 已通过 `cargo test -q`（187 + 64 + 3 全通过）。
+
+## T-110 V0.10-P1-ProviderDeltaStreamingRuntimePath (Completed 2026-03-25)
+
+任务：把 `provider.stdout.delta/provider.stderr.delta` 从结束后一次性写入改成运行期流式增量写入。  
+验收标准：
+
+1. provider 执行期间可持续看到 stdout/stderr delta 事件，不等 run 结束。
+2. `provider.first_output` 保留并在首次真实输出时触发。
+3. 失败/取消路径下也不丢已产生的 delta 事件。
+4. `watch/events/logs` 能在任务进行中消费到这些 delta 事件。
+5. 新增测试覆盖至少一个 provider runner 的增量输出路径（可用 fake runner fixture）。
+6. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 runner 输出观察器链路：
+  - `src/runtime/runners/mod.rs` 新增 `RunnerOutputObserver/RunnerOutputStream`；
+  - `AgentRunner` 新增 `execute_with_observer` 默认实现（兼容旧 runner）。
+- 已在 `src/runtime/runners/codex.rs`、`src/runtime/runners/gemini.rs`、`src/runtime/runners/claude.rs`
+  落地真实增量输出路径：
+  - `execute_with_observer` 使用流式读取 child stdout/stderr，按 chunk 回调 observer；
+  - 保留超时/失败语义与既有 runner 特性（Codex `--output-last-message`、Gemini discovery fallback）。
+- 已在 `src/mcp/service.rs` 增加运行期事件观察器：
+  - 首次 chunk 实时发 `provider.first_output`；
+  - 持续发 `provider.stdout.delta/provider.stderr.delta`。
+- 已升级 `src/mcp/tools.rs`：
+  - 保留完成态 fallback，但按事件去重，避免与实时流重复写入。
+- 已新增测试：
+  - `codex_runner_execute_with_observer_streams_output_chunks`
+  - `gemini_runner_execute_with_observer_streams_output_chunks`
+  - `claude_runner_execute_with_observer_streams_output_chunks`
+- 已通过 `cargo test -q`（187 + 64 + 3 全通过）。
+
+## T-111 V0.10-P1-WatchIncrementalCursorParity (Completed 2026-03-25)
+
+任务：将 `watch` 路径与 `events --follow` 对齐为增量 cursor 消费，消除全量轮询读取。  
+验收标准：
+
+1. `watch <handle> --follow`（默认）不再每轮全量 `load_run_events`。
+2. 保持 phase_progress、phase_timeout、terminal 退出语义不变。
+3. 与 `events --follow` 输出一致性保持（同一 run 同阶段不产生自相矛盾）。
+4. 新增测试覆盖 `watch` 增量读取与超时行为。
+5. `cargo test -q` 全量通过。
+完成记录：
+
+- 已升级 `src/main.rs::watch_run`：
+  - 从全量 `load_run_events` 轮询改为 `EventStreamCursor` 增量消费；
+  - 保持原有 `phase_progress/phase_timeout/terminal` 退出语义。
+- 已新增 watch 专属增量辅助函数：
+  - `collect_watch_events_incremental`（与 `events --follow` 共用增量读取模型）。
+- 已新增测试：
+  - `collect_watch_events_incremental_only_returns_new_events`；
+  - `watch_run_timeout_keeps_existing_timeout_semantics`。
+- 已通过 `cargo test -q`（187 + 64 + 3 全通过）。
+
+## T-112 Refactor-TaskData-Step4-DispatcherOutcomeBridge (Completed 2026-03-26)
+
+任务：按 `docs/refactor_task_data_structures.md` Step 4 继续推进 `dispatcher.rs` 迁移，先提供 `DispatchResult -> RunOutcome` 桥接并保证可编译可验证。  
+验收标准：
+
+1. `DispatchResult::to_run_outcome()` 可覆盖 `Succeeded/Failed/Cancelled/TimedOut` 终态映射。
+2. `RetryClassification` 在 `runtime/outcome.rs` 侧可复用（迁移期 re-export），避免重复定义。
+3. 桥接转换中的 usage 字段与现有结构兼容，不引用不存在字段。
+4. 至少有桥接转换回归测试（成功/失败各一条）。
+5. `cargo check` 通过。
+完成记录：
+
+- 已修复 `src/runtime/outcome.rs` 的 `RetryClassification` 重复导入，保留迁移期 `pub use`。
+- 已修复 `src/runtime/dispatcher.rs::build_usage_from_dispatch`，`provider_exit_code` 改为来自 `summary.summary.exit_code`，去除对不存在的 `NativeUsage.exit_code` 访问。
+- 已新增桥接测试：
+  - `dispatch_result_to_run_outcome_maps_success_fields`
+  - `dispatch_result_to_run_outcome_maps_failure_retry_fields`
+- 已验证：
+  - `cargo check` 通过（当前仍有与 Step 3 迁移中间态相关的 warning，不影响本步验收）。
+  - `cargo test dispatch_result_to_run_outcome -- --nocapture` 通过（2 passed）。
+
+## T-113 Refactor-TaskData-Step5-SummaryToSuccessOutcome (Completed 2026-03-26)
+
+任务：按 `docs/refactor_task_data_structures.md` Step 5 调整 `src/runtime/summary.rs`，让解析结果可直接生成 `SuccessOutcome` 字段，减少 dispatcher 侧手工字段搬运。  
+验收标准：
+
+1. `summary.rs` 提供 `SummaryEnvelope -> SuccessOutcome` 的直接转换入口。
+2. `StructuredSummary` 字段到 `SuccessOutcome` 字段映射集中在 summary 层，不再在 dispatcher 成功分支逐字段拷贝。
+3. 新增 summary 层测试覆盖直接转换行为（含 parse_status 与 usage 透传）。
+4. 与 Step 4 的 `DispatchResult::to_run_outcome()` 桥接保持兼容并通过回归测试。
+5. `cargo check` 通过。
+完成记录：
+
+- 已在 `src/runtime/summary.rs` 新增转换方法：
+  - `StructuredSummary::{into_success_outcome,to_success_outcome}`
+  - `SummaryEnvelope::{into_success_outcome,to_success_outcome}`
+- 已在 `src/runtime/dispatcher.rs` 将成功分支改为直接调用 `self.summary.to_success_outcome(usage)`，删除成功分支内手工字段映射。
+- 已新增测试：
+  - `runtime::summary::tests::converts_parsed_envelope_to_success_outcome`
+- 已回归验证：
+  - `cargo check` 通过。
+  - `cargo test converts_parsed_envelope_to_success_outcome -- --nocapture` 通过（1 passed）。
+  - `cargo test to_run_outcome_maps -- --nocapture` 通过（2 passed）。
+
+## T-114 Refactor-TaskData-Step6-SignatureChainTaskSpecHints (Completed 2026-03-26)
+
+任务：按 `docs/refactor_task_data_structures.md` Step 6 调整签名链 `context.rs -> memory.rs -> runners/mod.rs -> 5 runners`，让主执行链可直接消费 `TaskSpec + WorkflowHints`，同时保留 `RunRequest` 迁移桥接。  
+验收标准：
+
+1. `context` 层提供 `compile_task(spec, task_spec, hints, memory)` 主签名。
+2. `memory` 层提供基于 `TaskSpec` 的解析入口，调用链可不依赖 `RunRequest`。
+3. `runners/mod.rs` trait 提供 `execute_task/execute_task_with_observer` 主签名。
+4. `codex/gemini/claude/mock/ollama` 五个 runner 均接入 `TaskSpec + WorkflowHints` 路径，保留旧 `RunRequest` 兼容入口。
+5. dispatcher/service 主链切到新签名，`cargo check` 与关键回归测试通过。
+完成记录：
+
+- 已升级 `src/runtime/context.rs`：
+  - `ContextCompiler` 新增 `compile_task(...)`；
+  - 旧 `compile(...RunRequest...)` 改为默认桥接实现（通过 `to_task_spec/to_workflow_hints` 转换）；
+  - `DefaultContextCompiler` 主实现迁移到 `compile_task`。
+- 已升级 `src/runtime/memory.rs`：
+  - 新增 `resolve_memory_for_task(spec, task_spec)`；
+  - 旧 `resolve_memory(spec, request)` 改为桥接调用。
+- 已升级 `src/runtime/runners/mod.rs`：
+  - `AgentRunner` 新增 `execute_task/execute_task_with_observer` 默认桥接；
+  - `Box<dyn AgentRunner>` 同步透传新方法。
+- 已升级五个 runner：
+  - `src/runtime/runners/codex.rs`
+  - `src/runtime/runners/gemini.rs`
+  - `src/runtime/runners/claude.rs`
+  - `src/runtime/runners/mock.rs`
+  - `src/runtime/runners/ollama.rs`
+  - 均新增或接入 `TaskSpec + WorkflowHints` 执行入口，`RunRequest` 路径保留为兼容桥接。
+- 已升级调用链：
+  - `src/runtime/dispatcher.rs` 改用 `compile_task + execute_task*`。
+  - `src/mcp/service.rs` 改用 `resolve_memory_for_task`。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test compile_contains_required_sections -- --nocapture` 通过（1 passed）。
+  - `cargo test auto_project_memory_resolves_project_and_native_paths -- --nocapture` 通过（1 passed）。
+  - `cargo test mock_runner_success_wraps_summary_json -- --nocapture` 通过（1 passed）。
+  - `cargo test codex_runner_execute_with_observer_streams_output_chunks -- --nocapture` 通过（1 passed）。
+  - `cargo test gemini_runner_execute_with_observer_streams_output_chunks -- --nocapture` 通过（1 passed）。
+  - `cargo test claude_runner_execute_with_observer_streams_output_chunks -- --nocapture` 通过（1 passed）。
+  - `cargo test dispatch_reaches_succeeded -- --nocapture` 通过（1 passed）。
+
+## T-115 Refactor-TaskData-Step7-8-DTORunViewAndToolsHardCut (Completed 2026-03-26)
+
+任务：按 `docs/refactor_task_data_structures.md` Step 7/8 完成 MCP DTO 与 tools 输出面重构，统一 `RunView + OutcomeView`，移除旧 output struct 依赖与旧字段断言。  
+验收标准：
+
+1. `src/mcp/dto.rs` 仅保留 `RunView/OutcomeView` 作为 run 返回主模型。
+2. `run_agent/spawn_agent/get_agent_status/get_run_result/list_runs/watch_run` 输出统一到新 DTO。
+3. server/e2e 相关测试不再依赖 `status/state/queued_at/structured_summary` 旧字段。
+4. 事件读取路径不再依赖 `events.ndjson` fallback。
+5. `cargo test --workspace` 可通过。
+完成记录：
+
+- 已完成 `src/mcp/server.rs` 测试迁移：断言改为 `terminal + outcome.status`，移除旧 DTO 字段断言。
+- 已完成 `tests/e2e_workflow_examples.rs` 迁移：改用 `phase/terminal/outcome`。
+- 已确认 `src/mcp/tools.rs::load_run_events` 仅读取 `events.jsonl`（无 `events.ndjson` fallback）。
+- 已通过 `cargo test --workspace`（194 + 64 + 3 全通过）。
+
+## T-116 Refactor-TaskData-Step9-PersistenceNoLegacyEvents (Completed 2026-03-26)
+
+任务：按 Step 9 收口落盘链路，去除旧事件文件兼容与旧测试假设，保持新结构可落盘可恢复。  
+验收标准：
+
+1. 运行期事件仅写 `events.jsonl`，不再写 `events.ndjson`。
+2. persistence 层测试不再验证 legacy ndjson 镜像行为。
+3. server 落盘测试改为验证新文件布局（`run.json/events.jsonl/stdout.log/stderr.log/compiled-context.md`）。
+4. 恢复路径仍可从 `run.json` 加载并对外查询。
+5. `cargo test --workspace` 通过。
+完成记录：
+
+- 已更新 `src/mcp/persistence.rs` 测试：
+  - `append_run_event_writes_jsonl_with_incrementing_seq` 仅校验 `events.jsonl`；
+  - legacy ndjson 断言已移除。
+- 已更新 `src/mcp/server.rs::run_agent_tempcopy_persists_workspace_metadata`：
+  - 新增新布局断言；
+  - 移除 `events.ndjson/request.json/status.json/workspace.meta.json` 等旧文件断言。
+- 已将 persistence 读取测试更新为当前 `run.json` 必填结构（不再验证旧 run.json 兼容）。
+- 已通过 `cargo test --workspace`（194 + 64 + 3 全通过）。
+
+## T-117 Refactor-TaskData-Step10-12-MainTestsAndQualityGate (Completed 2026-03-26)
+
+任务：完成 Step 10 适配并收口质量门禁（Step 11/12），确保 main/test 与新模型一致、全量测试与 clippy 均通过。  
+验收标准：
+
+1. `main`/测试链路不再依赖旧 DTO 字段约定。
+2. 全量 `cargo test --workspace` 通过。
+3. `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+4. 清理本轮迁移引入的 dead code / unused warnings。
+完成记录：
+
+- 已清理 `src/mcp/state.rs` 中未接入的新旧迁移残留类型（`RunPhase/PhaseEntry/TaskSpecSnapshot`）与未使用导入。
+- 已收敛 `src/mcp/tools.rs::EventRuntimeSnapshot` 到实际使用字段，消除 dead fields。
+- 已修复 `src/main.rs` 的 clippy 报警（bool 表达式最小化）并为多参数 CLI helper 增加局部 allow。
+- 已对 `src/mcp/persistence.rs` 与 `src/runtime/runners/gemini.rs` 的必要多参数函数增加局部 allow（仅限 clippy `too_many_arguments`）。
+- 已验证：
+  - `cargo test --workspace` 通过。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-118 Refactor-TaskData-HardCut-DispatcherResultModel (Completed 2026-03-26)
+
+任务：继续硬切 dispatcher 返回模型，删除 `RunMetadata/DispatchResult` 和 `to_run_outcome()` 迁移桥接，改为 dispatcher 直接产出 `RunOutcome`。  
+验收标准：
+
+1. `RetryClassification` 从 `dispatcher.rs` 迁出，归属 `runtime/outcome.rs`。
+2. `dispatcher` 不再定义/返回 `RunMetadata` 与 `DispatchResult`。
+3. dispatcher 结束时直接构建 `RunOutcome`（成功/失败/超时/取消）并随执行结果返回。
+4. `mcp/service.rs` 与 `mcp/tools.rs` 消费新结果结构，不再访问 `result.metadata.*`。
+5. 全量 `cargo test --workspace` 和 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已在 `src/runtime/outcome.rs` 定义 `RetryClassification`，移除对 dispatcher re-export 的依赖。
+- 已重构 `src/runtime/dispatcher.rs`：
+  - 删除 `RunMetadata`、`DispatchResult` 和 `to_run_outcome()` 迁移桥接；
+  - 新增 `DispatchRunResult`，直接携带 `outcome: RunOutcome` 与运行统计字段；
+  - dispatcher 在终态分支直接构建 `RunOutcome`（含失败 retry 信息与 usage）。
+- 已改造调用链：
+  - `src/mcp/service.rs` 使用 `DispatchRunResult`；
+  - `src/mcp/tools.rs` 从 `DispatchRunResult` 读取状态/重试字段并写入 `RunRecord`，不再依赖 `RunMetadata`。
+- 已更新 `dispatcher` 测试断言到新字段访问路径（`result.status/result.outcome`）。
+- 已验证：
+  - `cargo test --workspace` 通过。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-119 Refactor-TaskData-HardCut-MainRunJsonAndWarningFree (Completed 2026-03-26)
+
+任务：继续按“无兼容硬切”收口 Step 10-12，移除 `main.rs` 对旧 run.json 扁平字段依赖，并在不使用 `#[allow]` 的前提下解决 clippy 多参数告警。  
+验收标准：
+
+1. `src/main.rs` 的 `StoredRunRecord` 仅按新结构读取（`task_spec + state + outcome + artifact_index + spec_snapshot`），不再读取旧顶层 `status/summary/task`。
+2. `ps/show/result/stats/watch/wait` 读状态与摘要来源改为 `state/outcome`，不再依赖旧 `summary` 字段。
+3. `src/mcp/server.rs` 落盘测试断言改为新 run.json 路径（`state.created_at/state.updated_at/task_spec.task` 等）。
+4. `clippy::too_many_arguments` 通过重构签名解决，不新增 `#[allow(clippy::too_many_arguments)]`。
+5. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已升级 `src/main.rs`：
+  - `StoredRunRecord` 切换为 `task_spec/state/outcome` 新模型；
+  - 新增 `StoredRunOutcome`/`StoredRunState` 等本地读取模型；
+  - `show/result/ps/stats/watch/wait` 全链路改为消费 `state` 与 `outcome`；
+  - `normalized` 结果由 `RunOutcome::Succeeded` 直接生成，不再读取旧 `summary` 落盘字段。
+- 已更新 `src/mcp/server.rs::run_agent_tempcopy_persists_workspace_metadata`：
+  - 断言从顶层旧字段迁移到 `state.*` 与 `task_spec.*`。
+- 已重构 `src/mcp/archive.rs`：
+  - `apply_archive_hook` 改为 `ArchiveHookInput` 上下文入参，消除多参数告警；
+  - `src/mcp/tools.rs` 与 `archive` 测试调用点已同步。
+- 已修复 `src/mcp/persistence.rs` 的 `collapsible_match` 告警（合并嵌套 `if let`）。
+- 已验证：
+  - `cargo test --workspace` 通过（194 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-120 Refactor-TaskData-HardCut-PersistenceEventFallbackRemoval (Completed 2026-03-26)
+
+任务：继续按“无兼容硬切”清理 `persistence.rs`，删除终态持久化时自动补写“legacy 事件”的兜底逻辑，仅保留运行期 `events.jsonl` 实时写入。  
+验收标准：
+
+1. `persist_run_record` 不再在终态调用 `build_run_events/write_events_file_if_missing` 生成补写事件。
+2. 删除 `RunEventRecord::legacy` 与相关 `legacy` 事件构造路径，统一由 `append_run_event` 生成 runtime 事件记录。
+3. persistence 测试文案不再出现 `legacy task` 等兼容语义命名。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/mcp/persistence.rs`：
+  - 删除终态补写事件分支（`build_run_events/write_events_file_if_missing`）；
+  - 删除 `RunEventRecord::legacy` 与整套补写事件构建函数；
+  - 新增 `RunEventRecord::runtime`，`append_run_event` 统一使用该构造器。
+- 已清理 persistence 测试命名：
+  - `loads_persisted_run_json_with_required_fields` 用例中的 `"legacy task"` 改为 `"sample task"`。
+- 已验证：
+  - `cargo test --workspace` 通过（194 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-121 Refactor-TaskData-HardCut-SummaryEnvelopeOnly (Completed 2026-03-26)
+
+任务：继续按“无兼容硬切”收口 summary 解析链路，关闭对旧 `StructuredSummary` 直读和任意 JSON payload 包装，强制仅接受 `SummaryEnvelope` 合约。  
+验收标准：
+
+1. `src/runtime/summary.rs::parse_json_candidate` 仅解析 `SummaryEnvelope`，不再接受裸 `StructuredSummary`。
+2. 移除“任意 JSON payload 自动 wrap 成摘要”的兼容逻辑。
+3. mock/dispatcher 测试产出的摘要 JSON 同步升级为 `SummaryEnvelope`，不依赖旧格式。
+4. 新增或更新测试覆盖“非合约 JSON 进入 Invalid”行为。
+5. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已升级 `src/runtime/summary.rs`：
+  - `parse_json_candidate` 仅保留 `SummaryEnvelope` 解析；
+  - 删除 `StructuredSummary` 直读分支和 payload wrap 兼容分支；
+  - 更新测试：`marks_invalid_when_json_payload_inside_sentinel_is_not_envelope_contract`。
+- 已升级 `src/runtime/runners/mock.rs`：
+  - mock 成功分支输出由裸 `StructuredSummary` 改为 `SummaryEnvelope(Validated)`。
+- 已升级 `src/runtime/dispatcher.rs` 测试 helper：
+  - `succeeded_execution` 改为写入 `SummaryEnvelope` JSON（非旧结构）。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-122 Refactor-TaskData-HardCut-SummarySentinelRegressionFix (Completed 2026-03-26)
+
+任务：修复 SummaryEnvelope 硬切后的测试回归，使 SuccessOutcome 转换测试与“只有 sentinel 包裹的 envelope 才算 Validated”策略一致。  
+验收标准：
+
+1. `converts_parsed_envelope_to_success_outcome` 使用带 sentinel 的 envelope 输入，不再依赖裸 JSON 直读。
+2. 该测试断言继续验证 `SuccessOutcome` 字段映射（summary/parse_status/verification/touched_files/usage）。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/runtime/summary.rs::converts_parsed_envelope_to_success_outcome`：
+  - 输入改为 `SUMMARY_START_SENTINEL ... SUMMARY_END_SENTINEL` 包裹的 `SummaryEnvelope` JSON；
+  - 保持成功映射断言不变，确保仍验证转换逻辑本身。
+- 已验证：
+  - `cargo test converts_parsed_envelope_to_success_outcome -- --nocapture` 通过（1 passed）。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-123 Refactor-TaskData-HardCut-RetrySourceUnificationAndStrictPersistedState (Completed 2026-03-26)
+
+任务：继续按“无兼容硬切”收口 run 状态模型，移除 `retry_classification` 的 state 冗余副本，统一以 `RunOutcome::Failed.retry` 为唯一来源；并收紧 `run.json` 的 state 读取，不再做旧字段兜底。  
+验收标准：
+
+1. `src/mcp/state.rs` 的 `RunRecord/PersistedRunState` 不再包含 `retry_classification` 字段。
+2. `src/mcp/tools.rs` 与 `src/main.rs` 的 retry 分类解析统一从 `RunOutcome::Failed.retry` 读取，不再回退 state 字段。
+3. `src/mcp/persistence.rs` 读取 `state.created_at/status_history` 不再做 legacy fallback（`created_at` 必填，`status_history` 直接使用持久化值）。
+4. 相关测试完成同步，`cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/mcp/state.rs`：
+  - 删除 `RetryClassificationRecord`；
+  - `RunRecord/PersistedRunState` 移除 `retry_classification` 字段；
+  - `PersistedRunState.created_at` 改为必填时间戳（非 `Option`）。
+- 已更新 `src/mcp/tools.rs`：
+  - 删除 state 侧 retry 映射写回逻辑；
+  - `resolve_retry_classification` 仅从 `RunOutcome::Failed.retry` 读取。
+- 已更新 `src/mcp/persistence.rs`：
+  - 删除 `created_at/status_history` 兼容兜底逻辑；
+  - 删除 `retry_classification` 的落盘/回读路径与测试样例字段。
+- 已更新 `src/main.rs`：
+  - 删除 `StoredRunState.retry_classification` 与相关兜底分支；
+  - `resolve_retry_classification` 仅依赖 failed outcome；
+  - 测试改为断言 failed outcome 路径。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-124 Refactor-TaskData-HardCut-StateSnapshotNamingCleanup (Completed 2026-03-26)
+
+任务：继续按“无兼容硬切”收口状态层命名，移除迁移期 `*Record` 命名残留，统一为快照语义（`PolicySnapshot`、`PersistedRun`），并同步持久化/消费链路字段名。  
+验收标准：
+
+1. `src/mcp/state.rs` 中 `ExecutionPolicyRecord` 重命名为 `PolicySnapshot`。
+2. `src/mcp/state.rs` 中 `PersistedRunRecord` 重命名为 `PersistedRun`，并保持落盘序列化结构正确。
+3. `RunRecord` 与 `PersistedRunState` 的 `execution_policy` 字段改为 `policy`，`server/tools/persistence/main` 全链路同步。
+4. server/persistence 相关测试断言同步到 `state.policy`。
+5. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/mcp/state.rs`：
+  - `ExecutionPolicyRecord -> PolicySnapshot`；
+  - `PersistedRunRecord -> PersistedRun`；
+  - `RunRecord/PersistedRunState` 字段 `execution_policy -> policy`；
+  - `apply_execution_policy_outcome` 入参类型同步为 `Option<PolicySnapshot>`。
+- 已更新 `src/mcp/persistence.rs`：
+  - 读写模型切换为 `PersistedRun`；
+  - 回读赋值从 `state.execution_policy` 改为 `state.policy`；
+  - 测试样例 JSON 字段同步改为 `"policy"`。
+- 已更新 `src/mcp/server.rs` / `src/mcp/tools.rs` / `src/main.rs`：
+  - 类型引用与字段读取统一切换到 `PolicySnapshot`/`policy`；
+  - server 落盘断言改为 `run_obj["state"]["policy"]`。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-125 Refactor-TaskData-HardCut-DispatchEnvelopeRemoval (Completed 2026-03-26)
+
+任务：移除 `mcp/service` 的迁移期包裹命名 `DispatchEnvelope`，改为中性结果载体，避免“旧 dispatch envelope”概念继续泄漏到 tools 链路。  
+验收标准：
+
+1. `src/mcp/service.rs` 不再定义/返回 `DispatchEnvelope`。
+2. `run_dispatch` 返回类型改为新命名结构，并保持字段语义不变（result/workspace/memory_resolution/workspace_cleanup）。
+3. `src/mcp/tools.rs` 的同步/异步执行路径完成新类型解构替换。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/mcp/service.rs`：
+  - `DispatchEnvelope` 重命名为 `RunDispatchData`；
+  - `run_dispatch` 返回类型切换到 `RunDispatchData`。
+- 已更新 `src/mcp/tools.rs`：
+  - `run_agent` 与 `spawn_agent` 路径中的解构类型从 `DispatchEnvelope` 同步改为 `RunDispatchData`。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-126 Refactor-TaskData-HardCut-MainRunJsonStrictDeser (Completed 2026-03-26)
+
+任务：继续执行“旧数据不支持”硬切，将 `main.rs` 对 `run.json` 的反序列化从宽松默认切换为严格字段要求，并同步测试夹具到新结构。  
+验收标准：
+
+1. `StoredTaskSpec/StoredRunState/StoredRunRecord` 不再使用 `#[serde(default)]` 进行整结构兜底反序列化。
+2. `watch` 与全局事件快照相关测试夹具不再写旧扁平 `run.json`（仅 `status/updated_at`），改为新结构 `task_spec + state + outcome + artifact_index + spec_snapshot`。
+3. 全量测试和 clippy 在严格模式下通过。
+完成记录：
+
+- 已更新 `src/main.rs`：
+  - 移除 `StoredTaskSpec/StoredRunState/StoredRunRecord` 的 `#[serde(default)]` 结构级兜底。
+  - 更新测试 `watch_run_timeout_keeps_existing_timeout_semantics` 与
+    `collect_run_event_snapshots_loads_all_handles_and_filters` 的 run.json fixture：
+    从旧扁平字段改为新结构化字段。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-127 Refactor-TaskData-HardCut-SummaryEnvelopeSurfaceAndStructuredSummarySink (Completed 2026-03-26)
+
+任务：按“硬切不兼容”继续收口 summary 层，外部调用链不再直接依赖 `StructuredSummary` 中间结构，统一通过 `SummaryEnvelope` 方法与 `SuccessOutcome` 构造进入。  
+验收标准：
+
+1. `src/runtime/summary.rs` 提供 `SummaryEnvelope::from_success_outcome(...)` 和字段访问方法（summary/verification/parse_status/artifacts 等）。
+2. 生产代码中不再出现 `StructuredSummary` 的直接依赖（仅允许 `summary.rs` 内部实现持有）。
+3. `mock runner` 成功路径改为持有/输出 `SummaryEnvelope`，不再通过 `MockRunPlan::Succeeded { summary: StructuredSummary }` 传递中间层。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/runtime/summary.rs`：
+  - 将 `StructuredSummary` 下沉为模块内部类型；
+  - 新增 `SummaryEnvelope::from_success_outcome(...)`；
+  - 新增访问方法：`parse_status/summary_text/key_findings/artifacts/open_questions/next_steps/exit_code/verification_status/touched_files/plan_refs/raw_fallback_text`。
+- 已更新调用链：
+  - `src/mcp/helpers.rs` 的 `failed_summary/cancelled_summary` 改为 `SuccessOutcome -> SummaryEnvelope::from_success_outcome`；
+  - `src/runtime/runners/mock.rs` 的 `MockRunPlan::Succeeded` 改为携带 `SummaryEnvelope`；
+  - `src/mcp/artifacts.rs`、`src/mcp/archive.rs`、`src/mcp/review.rs`、`src/runtime/dispatcher.rs` 等读取路径改为调用 `SummaryEnvelope` 方法，不再访问嵌套字段实现细节。
+- 已同步测试夹具：
+  - `src/mcp/server.rs`、`src/mcp/archive.rs`、`src/mcp/review.rs`、`src/runtime/dispatcher.rs`、`src/runtime/runners/mock.rs` 改为通过 `SuccessOutcome` 构造 `SummaryEnvelope`。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-128 Refactor-TaskData-HardCut-RunStatusToRunPhaseTypeCut (Completed 2026-03-26)
+
+任务：推进运行阶段语义收口，把 `RunStatus` 类型硬切为 `RunPhase`，统一调度器、状态、MCP 服务与 CLI 侧类型命名。  
+验收标准：
+
+1. 代码中不再保留 `RunStatus` 类型定义和引用，统一使用 `RunPhase`。
+2. `dispatcher` 及其结果模型、`mcp/state|tools|service|persistence`、`main` 与测试链路全部完成类型替换。
+3. 不引入兼容别名（不保留 `type RunStatus = ...`）。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成全仓类型替换：`RunStatus -> RunPhase`（`src/` 内无 `RunStatus` 残留）。
+- 已同步所有引用路径：
+  - `runtime/dispatcher` 调度状态流与测试；
+  - `mcp/state` 运行记录与持久化结构；
+  - `mcp/tools/service/server/persistence` 消费和事件写入；
+  - `main`/CLI 读取与测试断言。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-129 Refactor-TaskData-HardCut-DispatcherOutcomeOnlyConsumerChain (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，删除 dispatcher 结果中的 `SummaryEnvelope/retry_*` 冗余输出，消费链统一基于 `RunOutcome` 读写与产物构建。  
+验收标准：
+
+1. `src/runtime/dispatcher.rs::DispatchRunResult` 不再包含 `summary`、`retry_classification`、`retry_classification_reason` 字段。
+2. `src/mcp/artifacts.rs`、`src/mcp/review.rs`、`src/mcp/archive.rs` 与 `src/mcp/tools.rs` 主链改为直接消费 `RunOutcome`，不再依赖 `SummaryEnvelope` 输入。
+3. 删除由旧桥接遗留且已无调用的辅助函数，不保留 dead code。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/runtime/dispatcher.rs`：
+  - `DispatchRunResult` 删除 `summary/retry_classification/retry_classification_reason`；
+  - 终态测试断言改为直接检查 `result.outcome`。
+- 已更新消费链为 outcome-first：
+  - `src/mcp/artifacts.rs`：`build_runtime_artifacts` 改为接收 `&RunOutcome`，成功态读取声明 artifacts，`summary.json` 直接序列化 outcome；
+  - `src/mcp/review.rs`：`apply_review_evidence_hook` 改为接收 `&RunOutcome` 并仅在 `Succeeded` 时写 evidence；
+  - `src/mcp/archive.rs`：`ArchiveHookInput` 改为携带 `&RunOutcome`，归档/metadata/decision-note 均从 `SuccessOutcome` 读取；
+  - `src/mcp/tools.rs`：同步/异步执行路径均改为把 `dispatch_result.outcome` 传入 artifacts/review/archive。
+- 已删除 `src/mcp/helpers.rs` 中无调用的 `failed_summary/cancelled_summary`，避免 dead code 警告残留。
+- 已同步测试：
+  - `src/runtime/dispatcher.rs`、`src/mcp/server.rs`、`src/mcp/review.rs`、`src/mcp/archive.rs`。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-130 Refactor-TaskData-HardCut-MainOutcomeSurfaceNoSummaryEnvelopeBridge (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，收口 `main.rs` 的 run 结果读取面，移除 `StoredSummaryEnvelope/StoredStructuredSummary` 旧桥接模型，CLI `show/result` 直接基于 `StoredRunOutcome` 读取 parse/sumary 字段。  
+验收标准：
+
+1. `src/main.rs` 不再定义 `StoredSummaryEnvelope` 与 `StoredStructuredSummary`，`StoredRunRecord` 不再通过 `normalized_summary()` 回包旧摘要结构。
+2. `show_run` 与 `read_result` 的 `normalization_status/summary/normalized_result` 均直接来自 `StoredRunOutcome`（成功态字段直接读 `StoredSuccessOutcome`）。
+3. Outcome 子结构反序列化收紧，不再依赖 `#[serde(default)]` 的宽松兜底（`StoredRetryInfo/StoredOutcomeUsage/StoredSuccessOutcome/StoredFailureOutcome`）。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/main.rs`：
+  - 删除 `StoredStructuredSummary`、`StoredSummaryEnvelope` 与 `StoredRunRecord::normalized_summary()`；
+  - `StoredRunOutcome` 新增 `success_outcome()/parse_status()` 访问方法；
+  - `RunResultOutput.normalized_result` 改为 `Option<StoredSuccessOutcome>`；
+  - `show_run/read_result` 改为直接从 `record.outcome` 提取 `parse_status` 与 `summary_text`；
+  - 移除 `SUMMARY_CONTRACT_VERSION` 在 `main.rs` 的桥接依赖。
+- 已收紧 main 侧 outcome 读取模型：
+  - 移除 `StoredRetryInfo/StoredOutcomeUsage/StoredSuccessOutcome/StoredFailureOutcome` 的 `#[serde(default)]` 宽松反序列化。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-131 Refactor-TaskData-HardCut-RuntimeSummaryContractNoEnvelope (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，移除 runtime 输入契约中的 `SummaryEnvelope`，改为 `ProviderSummary`（模型输出）+ `ParsedSummary`（runtime 解析结果）双层模型，`dispatcher/context/runners` 全链路切换。  
+验收标准：
+
+1. `src/runtime/summary.rs` 不再定义/导出 `SummaryEnvelope`、`parse_summary_envelope`、`SUMMARY_CONTRACT_VERSION`。
+2. `ContextCompiler::parse_summary` 返回类型改为新解析模型（非 `SummaryEnvelope`），模板契约文本同步为 `ProviderSummary`。
+3. `dispatcher` 不再依赖 `summary.exit_code`，`provider_exit_code` 由 runtime 终态推断；成功/失败 outcome 仍保持行为一致。
+4. `codex/claude/mock` runner 的 schema/输出夹具和 `mcp/server` 文案同步去 `SummaryEnvelope` 命名。
+5. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已重写 `src/runtime/summary.rs`：
+  - 新增 `ProviderSummary`（provider 输出契约）与 `ParsedSummary`（parse_status + raw_fallback + summary）；
+  - 新增 `parse_summary_contract`，删除 `SummaryEnvelope` 与 `parse_summary_envelope`；
+  - 保留并复用 `SummaryParseStatus/ArtifactRef/VerificationStatus`，`to_success_outcome` 桥接改为基于 `ParsedSummary`。
+- 已更新 `src/runtime/context.rs`：
+  - `ContextCompiler::parse_summary` 返回 `ParsedSummary`；
+  - 提示词契约和模板校验从 `SummaryEnvelope` 改为 `ProviderSummary`。
+- 已更新 `src/runtime/dispatcher.rs`：
+  - 解析输入改为 `ParsedSummary`；
+  - 删除对 `summary.exit_code` 的依赖，新增 `infer_provider_exit_code(RunnerTerminalState)`；
+  - outcome 构建保持原语义（成功/失败/取消/超时）。
+- 已更新 runner 与文案：
+  - `src/runtime/runners/codex.rs`、`src/runtime/runners/claude.rs` schema 目标改为 `ProviderSummary`；
+  - `src/runtime/runners/mock.rs` 成功计划载荷改为 `ProviderSummary`；
+  - `src/runtime/runners/codex.rs`、`src/runtime/runners/claude.rs`、`src/runtime/runners/gemini.rs`、`src/runtime/runners/ollama.rs` 测试夹具去除 `exit_code` 字段，和新契约保持一致；
+  - `src/mcp/server.rs` 固定指引文本改为 `ProviderSummary`。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-132 Refactor-TaskData-HardCut-StateSerdeDefaultRemoval (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，收紧 run state 持久化模型反序列化，移除 `mcp/state` 层对旧字段缺失的 `#[serde(default)]` 兜底，确保 `run.json` 严格按新结构读取。  
+验收标准：
+
+1. `src/mcp/state.rs` 中 `PolicySnapshot/WorkspaceRecord/RunSpecSnapshot/ProbeResultRecord/MemoryResolutionRecord/PersistedRunState/PersistedRun` 不再使用迁移期 `#[serde(default)]` 字段兜底。
+2. 删除仅用于旧数据兼容的默认函数（如 `default_delegation_context_snapshot`），快照字段改为必需输入。
+3. 在严格反序列化模式下，`cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/mcp/state.rs`：
+  - 移除上述结构体上与兼容兜底相关的 `#[serde(default)]`；
+  - 删除 `default_delegation_context_snapshot()` 旧兼容默认函数；
+  - 持久化快照字段保持当前新结构严格读写，不再回填缺失字段。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-133 Refactor-TaskData-HardCut-EventSchemaAndCliStrictDeser (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，收紧事件与 CLI 读盘模型的反序列化契约，移除 `ts` 时间戳兼容分支与结构级默认兜底，统一只读当前 schema。  
+验收标准：
+
+1. `src/mcp/persistence.rs` 事件写入模型不再输出 `ts` 兼容字段，仅保留 `timestamp`。
+2. `src/main.rs::RunTimelineEvent` 与 `src/mcp/tools.rs::StoredRunEventLine` 不再使用结构级 `#[serde(default)]`，且不再从 `ts` 回退时间戳。
+3. `src/main.rs` 的 `StoredRunSpecSnapshot/StoredExecutionPolicy/StoredNativeUsage` 去除结构级 `#[serde(default)]`，避免旧缺字段静默回填。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/mcp/persistence.rs`：
+  - `RunEventRecord` 删除 `ts` 字段，`append_run_event` 仅写 `timestamp` 时间戳。
+- 已更新 `src/main.rs`：
+  - 删除 `StoredRunSpecSnapshot/StoredExecutionPolicy/StoredNativeUsage` 的结构级 `#[serde(default)]`；
+  - `RunTimelineEvent` 移除 `#[serde(default)]` 与 `ts` 字段；
+  - `event_time/display_timestamp` 统一改为只读 `timestamp`。
+- 已更新 `src/mcp/tools.rs`：
+  - `StoredRunEventLine` 移除 `#[serde(default)]` 与 `ts` 字段；
+  - `into_output()` 不再走空 `timestamp` 的 `ts` 回退。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-134 Refactor-TaskData-HardCut-DispatchResultAndMainCreatedAtRequired (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，收紧 dispatcher 结果模型与 CLI run.json 读取字段要求，移除默认兜底并强制 `created_at` 必填。  
+验收标准：
+
+1. `src/runtime/dispatcher.rs::DispatchRunResult` 去除迁移期 `#[serde(default)]` 字段兜底（`error_message/attempts_used/retry_attempts/max_attempts/max_turns/native_usage`）。
+2. `src/main.rs::StoredRunState.created_at` 改为必填字符串，不再接受缺失字段。
+3. `main` 侧使用 `created_at` 的统计逻辑与测试构造同步更新，保持行为稳定。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/runtime/dispatcher.rs`：
+  - `DispatchRunResult` 删除兼容期 `#[serde(default)]` 字段标注，严格按当前结果结构反序列化。
+- 已更新 `src/main.rs`：
+  - `StoredRunState.created_at` 从 `Option<String>` 改为 `String`；
+  - `StoredRunRecord::created_at()` 改为返回必填 `&str`；
+  - `build_usage_output/list_runs/build_run_stats_output` 的 created_at 读取与时长计算路径同步到新签名。
+- 已更新 `src/main.rs` 测试：
+  - 相关 fixture 构造从 `created_at: Some(...)` 改为 `created_at: "...".to_string()`。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-135 Refactor-TaskData-HardCut-RuntimeSerdeDefaultCleanup (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，清理 runtime 层残留 `serde(default)`，避免核心运行结构继续依赖兼容兜底。  
+验收标准：
+
+1. `src/runtime/workspace.rs::PreparedWorkspace` 去除 `notes` 字段的 `#[serde(default)]`。
+2. `src/runtime/usage.rs::NativeUsage` 去除 token 字段上的 `#[serde(default)]`。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/runtime/workspace.rs`：
+  - `PreparedWorkspace.notes` 移除 `#[serde(default)]`。
+- 已更新 `src/runtime/usage.rs`：
+  - `NativeUsage.input_tokens/output_tokens/total_tokens` 移除 `#[serde(default)]`。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-136 Refactor-TaskData-HardCut-McpDtoStrictDeser (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，收紧 MCP DTO 的反序列化契约，移除 `mcp/dto.rs` 的 `#[serde(default)]` 兼容兜底。  
+验收标准：
+
+1. `src/mcp/dto.rs` 不再使用 `#[serde(default)]` 字段兜底。
+2. MCP transport roundtrip 与工具链测试在严格 DTO 输入下仍通过（必要时同步补齐请求字段）。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/mcp/dto.rs`：
+  - 移除全部 `#[serde(default)]` 标注，DTO 读取改为严格字段契约。
+- 已修复回归：
+  - `src/mcp/server.rs` 的 `mcp_transport_roundtrip_for_all_tools` 测试中第二次 `spawn_agent` 调用补齐 `selected_files: []`，避免缺字段反序列化失败。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-137 Refactor-TaskData-HardCut-MainCreatedAtNoEmptyFallback (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，移除 main 侧 usage 构建对空 `created_at` 的兼容分支，统一按必填创建时间输出统计。  
+验收标准：
+
+1. `src/main.rs::build_usage_output` 不再把空 `created_at` 视为 `None`。
+2. `started_at/duration_ms` 计算路径统一基于必填 `created_at`。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/main.rs`：
+  - `build_usage_output` 中 `started_at` 由“空值分支”改为直接使用 `Some(record.created_at().to_string())`。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-138 Refactor-TaskData-HardCut-DispatcherResultNamingCleanup (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，清理 dispatcher 结果模型的迁移期命名，移除 `DispatchRunResult` 语义残留。  
+验收标准：
+
+1. `src/runtime/dispatcher.rs` 不再定义 `DispatchRunResult`，统一使用中性结果命名。
+2. `src/mcp/service.rs` 结果类型引用同步到新命名，不保留旧别名。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/runtime/dispatcher.rs`：
+  - `DispatchRunResult` 重命名为 `RunExecutionResult`；
+  - `run/run_with_transition_observer/run_with_observers` 返回类型同步切换。
+- 已更新 `src/mcp/service.rs`：
+  - `RunDispatchData.result` 类型从 `DispatchRunResult` 切到 `RunExecutionResult`；
+  - import 与调用链同步更新。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-139 Refactor-TaskData-HardCut-TypesSerdeDefaultCleanup (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，收紧 `types.rs` 的序列化契约，移除迁移期 `serde(default)` 兜底。  
+验收标准：
+
+1. `src/types.rs` 中 `SelectedFile/TaskSpec/WorkflowHints/MemorySnippet/ResolvedMemory/ContextSourceRef/CompiledContext` 不再使用 `#[serde(default)]` 字段兜底。
+2. 运行链路与测试夹具在严格类型契约下保持通过。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/types.rs`：
+  - 删除上述结构上的 `#[serde(default)]` 标注，收紧为当前 schema 字段约束。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-140 Refactor-TaskData-HardCut-ProbeSerdeDefaultCleanup (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，收紧 provider probe 结果结构，移除 `probe` 层迁移期 `serde(default)` 兜底。  
+验收标准：
+
+1. `src/probe/mod.rs::ProviderProbe` 不再使用 `#[serde(default)]` 字段兜底。
+2. probe 读取与状态链路在严格结构下保持行为不变。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/probe/mod.rs`：
+  - `ProviderProbe.version/validated_flags/notes` 移除 `#[serde(default)]`。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（193 + 64 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-141 Refactor-TaskData-HardCut-MainListRunNoSilentCompatSkip (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，移除 CLI `list` 路径对不兼容 `run.json` 的静默跳过，改为显式失败。  
+验收标准：
+
+1. `src/main.rs::list_run_records` 不再对 `load_run_record` 错误使用 `continue` 静默忽略。
+2. 新增测试覆盖“任一 run.json 不兼容时返回错误”行为。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/main.rs`：
+  - `list_run_records` 读取 run 记录失败时改为返回错误（附带 handle_id），不再吞掉不兼容数据。
+- 已新增测试：
+  - `list_run_records_fails_when_any_run_json_is_invalid`，验证混合 valid/invalid runs 时会失败并报出非法 handle。
+- 已验证：
+  - `cargo test --workspace` 通过（193 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-142 Refactor-TaskData-HardCut-SpecOptionalSerdeDefaultCleanup (Completed 2026-03-26)
+
+任务：继续执行“硬切不兼容”，清理 `spec` 层对 `Option` 字段的冗余 `serde(default)` 兼容标注，移除不必要的迁移期噪音，同时保持真正的业务默认值不变。  
+验收标准：
+
+1. `src/spec/mod.rs`、`src/spec/core.rs`、`src/spec/provider_overrides.rs`、`src/spec/runtime_policy.rs`、`src/spec/workflow.rs` 中所有 `Option<T>` 字段不再显式使用 `#[serde(default)]`。
+2. spec 加载/校验链路在缺失可选字段时仍按 Serde 原生 `Option` 语义工作，必要处补测试锁定行为。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/spec/mod.rs`、`src/spec/core.rs`、`src/spec/provider_overrides.rs`、`src/spec/runtime_policy.rs`、`src/spec/workflow.rs`：
+  - 移除 `workflow/model/plan_section_selector/max_turns` 及各 provider/workflow 子策略中 `Option` 字段上的冗余 `#[serde(default)]`；
+  - 保留 `runtime/workflow` 中承载产品默认语义的非 `Option` 字段默认值，不扩大本轮硬切范围。
+- 已新增/更新测试：
+  - `src/spec/provider_overrides.rs`、`src/spec/runtime_policy.rs`、`src/spec/workflow.rs` 新增反序列化测试，锁定缺失可选字段仍按 `Option::None` 解析；
+  - `src/spec/registry.rs` 的 `loads_agent_specs_and_applies_defaults` 增加 `model/workflow` 缺失字段断言。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（197 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-143 WorkflowSpec-NestedPolicyDefaultAlignment (Completed 2026-03-26)
+
+任务：修正 `workflow` 子策略的默认语义分叉，确保“整个子策略表缺失”和“子策略表存在但只填写部分字段”两种写法得到同一组默认行为。  
+验收标准：
+
+1. `src/spec/workflow.rs::WorkflowGatePolicy` 与 `KnowledgeCapturePolicy` 中应继承业务默认值的缺失字段，在部分反序列化时与各自 `Default` 实现保持一致。
+2. 新增测试覆盖部分 TOML 子表（至少覆盖 `workflow.require_plan_when` 与 `workflow.knowledge_capture`）的默认值继承行为，并覆盖经 spec 加载链路读取的结果。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/spec/workflow.rs`：
+  - 为 `WorkflowGatePolicy.require_plan_if_touched_files_ge/require_plan_if_estimated_runtime_minutes_ge` 与 `KnowledgeCapturePolicy.trigger_if_touched_files_gt` 增加显式业务默认函数；
+  - 为 `require_plan_if_cross_module/parallel_agents/new_interface/migration/human_approval_point` 与 `trigger_if_new_config/behavior_change/non_obvious_bugfix` 改为使用 `default_true()`，让部分子表反序列化与 `Default` 语义一致。
+- 已新增测试：
+  - `src/spec/workflow.rs` 增加部分子表反序列化测试，覆盖 `WorkflowGatePolicy`、`KnowledgeCapturePolicy` 以及完整 `WorkflowSpec` 的嵌套子表继承行为；
+  - `src/spec/registry.rs` 增加 `loads_partial_workflow_subtables_with_consistent_defaults`，锁定经 spec 加载链路读取后的默认值行为。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（199 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-144 RuntimePolicy-NestedPolicyDefaultAlignment (Completed 2026-03-26)
+
+任务：收口 `runtime` 子策略默认入口，确保 `artifact_policy/retry_policy` 在“整段缺失”和“子表部分填写”两种写法下保持同一默认语义，并用加载链路测试锁定。  
+验收标准：
+
+1. `src/spec/runtime_policy.rs` 中 `artifact_policy`、`retry_policy` 的默认来源显式收口，不依赖隐式 `Default` 推断。
+2. 新增测试覆盖 `runtime.artifact_policy`、`runtime.retry_policy` 的部分 TOML 子表默认值继承行为，并覆盖经 spec 加载链路读取后的结果。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/spec/runtime_policy.rs`：
+  - `RuntimePolicy.artifact_policy/retry_policy` 改为使用显式默认函数 `default_artifact_policy/default_retry_policy`；
+  - 保持 `ArtifactPolicy` 与 `RetryPolicy` 的既有业务默认值不变，仅收口默认来源并减少隐式推断。
+- 已新增测试：
+  - `src/spec/runtime_policy.rs` 增加 `artifact_policy`、`retry_policy` 与完整 `RuntimePolicy` 的部分子表默认值继承测试；
+  - `src/spec/registry.rs` 增加 `loads_partial_runtime_subtables_with_consistent_defaults`，锁定经 spec 加载链路读取后的行为。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（203 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-145 ConfigOptionalSerdeDefaultCleanup (Completed 2026-03-26)
+
+任务：继续清理配置读取层的兼容噪音，移除 `config.rs` 中 `Option` 字段上的冗余 `serde(default)`，同时保留 `server/paths` 这种整段默认语义不变。  
+验收标准：
+
+1. `src/config.rs::FileServer` 与 `FilePaths` 中所有 `Option<T>` 字段不再显式使用 `#[serde(default)]`。
+2. 新增测试覆盖 file config 反序列化与 `load_file_config` 路径，验证缺失可选字段仍按 `Option::None` 处理。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/config.rs`：
+  - 移除 `FileServer._transport/log_level` 与 `FilePaths.state_dir` 上冗余的 `#[serde(default)]`；
+  - 保留 `FileConfig.server/paths` 与 `FilePaths.agents_dirs` 的整段/集合默认语义，不扩大到配置层产品默认值本身。
+- 已新增测试：
+  - `file_config_optional_fields_deserialize_without_default_annotations` 直接覆盖 file config 反序列化；
+  - `load_file_config_keeps_missing_optional_fields_as_none` 覆盖 `load_file_config + file_layer_from_cfg` 读取链路。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（205 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-146 AgentSpec-TopLevelDefaultSourceAlignment (Completed 2026-03-26)
+
+任务：把 `AgentSpec` 顶层保留的产品默认值显式函数化，明确 `runtime/provider_overrides` 是有意保留的默认入口，而不是遗留兼容兜底。  
+验收标准：
+
+1. `src/spec/mod.rs::AgentSpec.runtime/provider_overrides` 改为使用显式默认函数，而不是 bare `#[serde(default)]`。
+2. 新增测试覆盖最小 agent spec 的直接反序列化默认值，并补充 registry 加载路径对 `provider_overrides` 默认状态的断言。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/spec/mod.rs`：
+  - `AgentSpec.runtime/provider_overrides` 改为使用 `default_runtime_policy/default_provider_overrides`；
+  - 明确保留顶层默认入口属于当前产品语义，而不是继续依赖 bare `#[serde(default)]` 的隐式来源。
+- 已新增/更新测试：
+  - `src/spec/mod.rs` 增加 `agent_spec_direct_deserialization_preserves_top_level_defaults`；
+  - `src/spec/registry.rs::loads_agent_specs_and_applies_defaults` 补充 `provider_overrides` 默认状态断言。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（206 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-147 AgentSpecCore-CollectionDefaultSourceAlignment (Completed 2026-03-26)
+
+任务：把 `AgentSpecCore` 中保留的集合默认值显式函数化，明确 `allowed_tools/disallowed_tools/skills/tags/metadata` 的空集合属于当前产品语义，而不是 bare `serde(default)` 的隐式行为。  
+验收标准：
+
+1. `src/spec/core.rs::AgentSpecCore` 的集合字段改为使用显式默认函数，而不是 bare `#[serde(default)]`。
+2. 新增测试覆盖最小 core/agent spec 反序列化时这些集合字段的默认值，并补充 registry 加载路径断言。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/spec/core.rs`：
+  - `allowed_tools/disallowed_tools/skills/tags` 改为使用 `default_string_vec()`；
+  - `metadata` 改为使用 `default_metadata()`，显式表达空 map 是有意默认值。
+- 已新增/更新测试：
+  - `src/spec/core.rs` 增加 `agent_spec_core_direct_deserialization_preserves_collection_defaults`；
+  - `src/spec/registry.rs::loads_agent_specs_and_applies_defaults` 补充 core 集合字段默认状态断言。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（207 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-148 WorkflowConfig-RemainingDefaultSourceAlignment (Completed 2026-03-26)
+
+任务：完成 `workflow/config` 层剩余 bare `serde(default)` 的显式默认来源统一，明确这些字段是保留的产品默认，而不是隐式派生行为。  
+验收标准：
+
+1. `src/spec/workflow.rs` 与 `src/config.rs` 中剩余 bare `#[serde(default)]` 改为显式默认函数。
+2. 新增或更新测试，覆盖 `WorkflowSpec` 与 `FileConfig` 在缺省字段下的直接反序列化默认值，并保持加载链路行为稳定。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/spec/workflow.rs`：
+  - `ReviewPolicy.require_style_review` 与 `KnowledgeCapturePolicy.update_project_memory` 改为使用 `default_false()`；
+  - `WorkflowSpec.require_plan_when/active_plan/review_policy/knowledge_capture/archive_policy/allowed_stages` 改为使用显式默认函数，和各自 `Default` 实现来源统一。
+- 已更新 `src/config.rs`：
+  - `FileConfig.server/paths` 改为 `default_file_server/default_file_paths`；
+  - `FilePaths.agents_dirs` 改为 `default_path_vec()`。
+- 已新增测试：
+  - `src/spec/workflow.rs` 增加 `workflow_spec_direct_deserialization_preserves_remaining_defaults`；
+  - `src/config.rs` 增加 `file_config_direct_deserialization_preserves_section_defaults`。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（209 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-149 MainStoredView-DefaultDeriveRemoval (Completed 2026-03-26)
+
+任务：移除 `src/main.rs` 中 CLI 读盘视图模型的 `Default` derive，改为测试侧显式 fixture，避免测试继续依赖半空结构掩盖严格 schema 要求。  
+验收标准：
+
+1. `src/main.rs` 的 `Stored*` 读盘模型不再 derive `Default`。
+2. `src/main.rs` 测试不再使用 `StoredRunRecord::default()` / `StoredRunState::default()` / `StoredOutcomeUsage::default()` 之类的隐式 fixture，而改为显式构造或 helper。
+3. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/main.rs`：
+  - `StoredRunSpecSnapshot/StoredExecutionPolicy/StoredNativeUsage/StoredRetryInfo/StoredOutcomeUsage/StoredSuccessOutcome/StoredFailureOutcome/StoredTaskSpec/StoredRunState/StoredRunRecord` 移除 `Default` derive；
+  - 保持线上读盘反序列化逻辑不变，仅收紧测试构造方式。
+- 已更新测试：
+  - 新增 `sample_outcome_usage()/sample_run_state()/sample_run_record()` fixture helper；
+  - 替换 `StoredRunRecord::default()`、`StoredRunState::default()`、`StoredOutcomeUsage::default()` 的使用点，改为显式最小合法结构。
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（209 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-150 V1.0-PlanTodo-TermAlignment (Completed 2026-03-28)
+
+任务：将下一轮 v1.0 收口文档改写为当前仓库术语版，只保留真实待做的三条小步任务：`summary` parser bridge、bootstrap/preset 漂移治理、CLI stream/status 能力暴露；明确不引入当前仓库中不存在的新状态名、新持久化主文件或新配置术语。  
+验收标准：
+
+1. `PLAN.md` 的 v0.10 当前优先批次改写为现有代码术语，不再出现 `RunStatus`、`meta.json` 主存储、`context_injection_level`、`delegation_profile`、`FailedButNativeAvailable` 等仓库中不存在的命名。
+2. `TODO.md` 新增后续执行任务，顺序固定为 `parser bridge -> bootstrap/preset/context slimming -> CLI stream/status exposure`，并为每条任务补齐验收标准。
+3. 文档明确区分“已落地能力”和“待补齐能力”：`ps` 已输出 `stalled/block_reason`，`watch` 已消费 heartbeat/event cursor，`run/spawn` 仍未显式暴露 `--stream`。
+完成记录：
+
+- 已更新 `PLAN.md`：
+  - 将 `Batch V0.10-P0` 标记为已完成；
+  - 新增 `Batch V0.10-P1 - Parser Bridge + Bootstrap Drift Guard + CLI Exposure`，并使用当前仓库术语描述优先级、回滚策略与风险控制。
+- 已更新 `TODO.md`：
+  - 新增 `T-151/T-152/T-153` 三条后续任务，全部使用现有代码中的真实命名。
+- 已对照当前实现自检：
+  - `src/runtime/summary.rs`
+  - `src/main.rs`
+  - `src/init.rs`
+  - `src/runtime/workspace.rs`
+  - `src/mcp/tools.rs`
+- 未运行 `cargo`；本次仅修改计划/任务文档，无 Rust 代码变更。
+
+## T-151 V0.10-P1-SummaryParserBridgeHardening (Completed 2026-03-28)
+
+任务：强化 `src/runtime/summary.rs` 与 provider runner 桥接，在不破坏 strict 语义的前提下收口裸 `ProviderSummary` JSON、占位 sentinel 污染和纯文本 fallback，让 provider 成功时的 native-first 行为更稳。  
+验收标准：
+
+1. `parse_summary_contract` 在 `best_effort` 主路径下可识别 `stdout` 中未包 sentinel 的合法 `ProviderSummary` JSON，并避免 `stderr` 中 prompt 占位 sentinel（如 `{...valid json...}`）抢占结果。
+2. provider 执行成功但归一化不完整时，run 终态继续保持当前 native-first 语义；`parse_status`、`summary.json/stdout.txt/stderr.txt` 与 `result/show` 输出不回退到旧 hard-fail 行为。
+3. 新增测试覆盖：
+   - 裸 `ProviderSummary` JSON；
+   - placeholder sentinel + 后续真实 JSON；
+   - provider 成功 + 纯文本 fallback；
+   - strict/best_effort 分支差异。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已更新 `src/runtime/summary.rs`：
+  - `parse_summary_contract` 现在会在 sentinel 主路径之后继续尝试提取裸 `ProviderSummary` JSON；
+  - 新增 placeholder sentinel 过滤，`{...valid json...}` 不再作为无效 summary 抢占解析结果；
+  - 新增 JSON object candidate 扫描，用于处理 prompt 回显后追加的真实 JSON、以及 back-to-back JSON 输出。
+- 已保持当前 native-first 语义不变：
+  - 合法裸 `ProviderSummary` JSON 仍记为 `parse_status=Degraded`，不会伪装成 `Validated`；
+  - `best_effort` 下 provider 成功继续走 succeeded + degraded；
+  - `strict` 下同样场景仍保持 failed + retryable 行为。
+- 已新增测试：
+  - `src/runtime/summary.rs`
+    - `parses_late_raw_json_after_placeholder_sentinel`
+    - `ignores_placeholder_sentinel_in_stderr_when_stdout_is_plain_text`
+    - `parses_first_valid_provider_summary_from_back_to_back_json_objects`
+  - `src/runtime/dispatcher.rs`
+    - `dispatch_best_effort_succeeds_when_summary_is_bare_provider_json`
+    - `dispatch_strict_fails_when_summary_is_bare_provider_json`
+- 已验证：
+  - `cargo check` 通过。
+  - `cargo test --workspace` 通过（213 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-152 V0.10-P1-BootstrapPresetDriftAndContextSlimming (Completed 2026-03-28)
+
+任务：治理 bootstrap preset 漂移，并收口 research-only 路径的上下文注入，避免旧生成物或过量 `memory_sources` 再次把 `active_plan` / skills 等噪音注入到简单任务。  
+验收标准：
+
+1. `init` 生成的 preset 模板与 README 示例统一使用当前代码术语：`delegation_context/context_mode/memory_sources/working_dir_policy`；不得引入不存在的新配置名。
+2. research-only + minimal delegation 路径保持当前轻量默认：不默认注入 `active_plan`，Gemini `working_dir_policy=auto` 继续命中 `StableScratch`，且 stable scratch 的 `native_discovery` override 行为保持可见。
+3. 为已存在 workspace 的 bootstrap 漂移补充至少一种可见治理手段：校验、doctor 提示、或明确的再生成说明；不得静默覆盖用户文件。
+4. 新增测试或文档断言，锁定最小 preset 不含 `active_plan`，并覆盖 README/模板示例与当前默认行为一致。
+5. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已在 `src/init.rs` 暴露内建模板索引，供诊断层按当前 catalog 版本比对 bootstrap 生成物；内建 preset 仍统一保持 `memory_sources = ["auto_project_memory"]`，未恢复任何默认 `active_plan` 注入。
+- 已在 `src/doctor.rs` 新增 `bootstrap_catalog` 诊断段，`doctor` 现在会显式报告 `.mcp-subagent/bootstrap/agents` 下与当前内建模板漂移的文件，并标记是否仍带有 legacy `active_plan` 注入；只提示，不静默覆盖。
+- 已更新生成的 `README.mcp-subagent.md` 模板和顶层 `README.md`，明确当前 runtime 术语、轻量默认上下文、Gemini `StableScratch` 行为，以及发现 drift 后应通过有意再生成来同步，而不是自动改写。
+- 已新增测试：
+  - `src/init.rs`
+    - `generated_presets_do_not_default_to_active_plan_memory`
+    - `init_readme_documents_current_runtime_terms_and_drift_guidance`
+  - `src/doctor.rs`
+    - `doctor_reports_bootstrap_template_drift_without_overwriting`
+- 已验证：
+  - `cargo test --workspace` 通过（216 + 65 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-153 V0.10-P1-CLIStreamAndStatusExposure (Completed 2026-03-28)
+
+任务：把已存在的流式输出、heartbeat 和阻塞诊断能力显式暴露到 CLI，补齐 `run/spawn/submit` 的 `--stream` 入口，并让 `status` 面向终端用户输出和 `ps/stats/watch` 保持同级诊断信息。  
+验收标准：
+
+1. `run`、`spawn`、`submit` 支持显式 `--stream` flag；开启后复用现有 stdout/stderr delta 路径，不改变默认非流式行为。
+2. `status` 文本和 JSON 输出补齐当前关键诊断字段，至少包括 `block_reason` 与 `stalled`，并保持与现有 MCP/CLI 字段语义一致。
+3. README 与 CLI 示例更新，明确 `--stream` 用法以及与 `watch/logs/events --follow` 的关系；不得误写为当前仓库中不存在的配置项或状态名。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已在 `src/main.rs` 为 `run`、`spawn`、`submit` 增加显式 `--stream` flag；其中 `run --stream` 复用现有 async spawn + `logs --follow` 路径，把 `provider.stdout.delta` / `provider.stderr.delta` / event / phase progress 直接暴露到终端，不改变默认非流式行为。
+- 已新增 CLI 侧 `RunStatusOutput` 组合视图，`status` 现在会合并 `get_agent_status` 与 `get_agent_stats`，文本和 JSON 都补齐 `status/state/phase/stalled/block_reason/current_wait_reason/wait_reasons/advice`，并保留终态摘要/错误信息。
+- 已更新 `README.md` 示例，补充 `run --stream`、`submit --stream` 用法，并明确它与 `status`、`watch`、`logs/events --follow` 的关系。
+- 已新增测试：
+  - `src/main.rs`
+    - `parses_run_command_with_stream_flag`
+    - `parses_spawn_command_with_stream_flag`
+    - `parses_submit_command_with_stream_flag`
+    - `build_run_status_output_carries_stall_and_block_reason`
+- 已验证：
+  - `cargo test --workspace` 通过（216 + 69 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-154 V1.0-P0-StreamStatusReleaseRegression (Completed 2026-03-28)
+
+任务：为刚完成的 `--stream` 与 `status` 能力补齐发布切口回归，覆盖稳定 JSON contract、真实 smoke 链路，以及 `PLAN.md` 中历史“当前优先”标记的清理。  
+验收标准：
+
+1. `src/main.rs` 新增 `status --json` 稳定字段断言，至少锁定 `status/state/phase/stalled/block_reason/current_wait_reason/wait_reasons/advice`。
+2. `scripts/smoke_v08.sh` 新增至少一条真实 `--stream` 链路断言，并验证 `status --json` 中新增诊断字段存在。
+3. `PLAN.md` 收口为单一真实“当前优先”批次，不再保留历史批次的误导性“当前优先”标记。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+- 已完成：
+  - 在 `src/main.rs` 新增 `status_json_schema_contains_stable_fields`，锁定 `status/state/phase/stalled/block_reason/current_wait_reason/wait_reasons/advice` 以及整条 `status --json` 稳定 contract 的关键字段。
+  - 在 `scripts/smoke_v08.sh` 新增 `status --json` 诊断字段存在性断言，并补上 `run codex_runner --json --stream` 的真实 smoke 链路，覆盖 `accepted/stream/final_status` 三段输出。
+  - `PLAN.md` 已清理历史批次的误导性“当前优先”标记，本批次完成后计划面不再残留伪当前优先状态。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（216 + 70 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-155 V1.0-P1-BootstrapDriftRepairPath (Completed 2026-03-28)
+
+任务：为 bootstrap catalog drift 增加安全修复入口，避免用户为了清掉旧生成物里的 legacy `active_plan` 或其他模板漂移，被迫整套 `init --force` 重建 bootstrap root。  
+验收标准：
+
+1. CLI `init` 新增显式 `--refresh-bootstrap` 路径，只刷新当前 bootstrap root `agents/` 下文件名命中内建 catalog 的模板，不覆盖自定义 agent，也不改变默认 `init` 行为。
+2. `doctor` 的 drift 建议与生成的 bootstrap README 都改为指向新的安全修复路径，而不是笼统要求整套重初始化。
+3. 回归覆盖至少包含：refresh 能覆盖 drifted built-in 模板、保留 custom agent、不存在 built-in 模板时给出明确失败；并补一条 smoke 证明真实 refresh 链路可用。
+4. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+- 已完成：
+  - `init` 新增显式 `--refresh-bootstrap` 入口，落到 `src/init.rs` 的 `refresh_bootstrap_workspace`，只重写当前 bootstrap root `agents/` 下文件名命中内建 catalog 的模板；custom agent 保留，不会静默改写默认 `init` 路径。
+  - `doctor` drift 建议与生成的 bootstrap README 已统一改成新的修复路径，用户不再需要被笼统引导到整套 `--force` 重初始化。
+  - `scripts/smoke_v08.sh` 新增真实 refresh 链路：`init --root-dir <bootstrap-root>` 生成 bootstrap、人工制造 drift、再执行 `init --refresh-bootstrap`，同时断言 legacy `active_plan` 不再残留且 custom agent 未被覆盖。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（218 + 71 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-156 V1.0-P2-GeneratedRootManifestAndExactRepairCommand (Completed 2026-03-28)
+
+任务：为 `init` 生成的 root 增加稳定标识，并让 `doctor` 在检测到 drift 时输出精确 repair command，避免 drift 检测继续硬编码在默认 `.mcp-subagent/bootstrap/agents` 路径上。  
+验收标准：
+
+1. `init` 生成的 root 写入轻量 manifest；`init --refresh-bootstrap` 会保留或补写该标识，使后续诊断可识别非默认 `--root-dir` 场景。
+2. `doctor` 的 bootstrap drift 检测改成“manifest 优先 + 旧默认路径兼容 fallback”，并在 JSON / 文本输出中给出精确 `refresh_command`，使用显式 `--root-dir`。
+3. 回归覆盖至少包含：自定义 `--root-dir` 生成 root 的 drift 能被 `doctor` 识别并给出精确 repair command；旧默认 bootstrap 路径的 drift 检测保持兼容。
+4. `scripts/smoke_v08.sh` 至少补一条 `doctor -> refresh_command -> refresh` 的真实链路断言。
+5. `cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+- 已完成：
+  - `init` 现在会在生成 root 下写入 `.mcp-subagent/generated-root.toml`，`init --refresh-bootstrap` 也会保留或补写该 manifest；旧 root 在 refresh 后会自动补上标识。
+  - `doctor` 的 drift 检测改成“generated-root manifest 优先 + 旧默认 `.mcp-subagent/bootstrap` 路径兼容 fallback”，不再只靠默认目录猜测 generated root。
+  - `doctor --json` / 文本输出现在都会带 `bootstrap_root`、`refresh_command` 和去重后的 `refresh_commands`，repair command 统一显式带 `--root-dir`，方便 Host 或人类直接执行。
+  - `scripts/smoke_v08.sh` 新增 `doctor -> refresh_command -> refresh` 的真实 generated-root 漂移链路，覆盖自定义 root、legacy `active_plan` 漂移、以及 custom agent 保留。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（220 + 71 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-157 V1.0-P3-CustomRootProjectBridgeSync (Completed 2026-03-28)
+
+任务：为 custom bootstrap root 增加显式 project bridge sync 入口，避免 `init --root-dir <custom-root>` 后仍需要每次手写 `--agents-dir/--state-dir`。  
+验收标准：
+
+1. CLI `init` 新增显式 `--sync-project-config`；用于 custom root 时，会把当前项目的 `.mcp-subagent/config.toml` 指向该 root 的 `agents_dir/state_dir`，而不改变默认未显式开启时的行为。
+2. 默认 bootstrap root 的现有自动 bridge config/gitigore 行为保持不变；plain custom-root init 仍不静默改写项目 config。
+3. 若 `--sync-project-config` 指向的 custom root 位于当前项目内，则 `.gitignore` 追加精确 root ignore 规则；若 root 在项目外，则不追加无关 runtime ignore。
+4. 回归覆盖至少包含：custom root sync 生成正确 project config、plain custom-root init 不会写 project config、default bootstrap root 的旧行为保持不变。
+5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - `init` 新增显式 `--sync-project-config`，仅在该 flag 打开时才把项目根 `.mcp-subagent/config.toml` 指向 custom root；默认 bootstrap root 仍保持原有自动 bridge 行为，plain custom-root init 不会静默改写项目 config。
+  - project bridge config 改为直接写入稳定的词法路径，不再对外部 absolute root 做 `canonicalize`，避免同一 custom root 在 config 中混出 `/var/...` 与 `/private/var/...` 两套路径。
+  - 若 custom root 位于项目内，`.gitignore` 只追加精确相对 root 规则；若 root 位于项目外，则不会额外写入项目 `.gitignore`。
+  - `README.md` 与 `scripts/smoke_v08.sh` 已同步补齐 custom root sync 示例和真实链路回归；`src/main.rs` 新增 CLI 解析、bridge config、gitignore 和外部 absolute path 稳定性测试。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（220 + 75 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-158 V1.0-P4-ProjectBridgeDiagnostics (Completed 2026-03-28)
+
+任务：为 `doctor` 增加 project bridge 诊断视图，直接暴露当前项目根 `.mcp-subagent/config.toml` 的存在性、目标路径、与当前 runtime 配置是否一致，以及可执行的 repair command。
+验收标准：
+
+1. `doctor --json` 与文本输出新增 `project_bridge` 段，至少包含 `config_path`、`status`、configured/runtime 路径、可识别 generated root 时的 `root_scope` 与 `repair_command`。
+2. `doctor` 能区分至少三类 project bridge 状态：缺失但当前 runtime 指向 generated root、config 无法解析或缺字段、config 与当前 runtime 已对齐。
+3. 当 `doctor` 能从当前 runtime 识别 generated root 且 project bridge 缺失/失效时，会给出精确 `mcp-subagent init --root-dir <root> --sync-project-config` 修复建议；需要覆盖现有 config 的场景要显式带 `--force`。
+4. 回归至少覆盖：default/internal root synced、external custom root missing bridge、external custom root synced bridge；`scripts/smoke_v08.sh` 需补一条 custom-root `doctor --json` 断言链。
+5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - `doctor` 新增 `project_bridge` 诊断段，文本与 `--json` 都会输出 `config_path`、`status`、configured/runtime 路径、`generated_root`、`root_scope`、`repair_command` 和警告列表。
+  - `project_bridge` 现在能区分至少四类状态：`missing`、`unconfigured`、`invalid`、`synced/drifted`；只有当前 runtime 能识别 generated root 时，才会生成精确 repair command。
+  - repair command 统一走安全的 refresh 路径：`mcp-subagent init --refresh-bootstrap --root-dir <root> --sync-project-config`；需要覆盖现有 project config 的场景会显式追加 `--force`。
+  - `doctor` 的 issue/advice 现在会直接报告 `project_bridge_missing/unconfigured/invalid/drifted`，不再只让用户自己翻 `config.toml`。
+  - 已补单测覆盖 internal synced、external missing、external synced、unconfigured-with-force repair；`scripts/smoke_v08.sh` 也新增了 custom-root missing/synced 的 `doctor --json` 断言。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（224 + 75 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-159 V1.0-P5-ProjectBridgeRepairPath (Completed 2026-03-28)
+
+任务：增加 bridge-only repair 入口，让已有 generated root 的项目桥接可以单独同步，不再借 `--refresh-bootstrap` 顺带修改 bootstrap 模板。
+验收标准：
+
+1. CLI `init` 新增显式 bridge-only repair flag；要求 `--root-dir <generated-root>`，只修项目根 bridge config / gitignore，不重写 root 下的 preset 文件。
+2. bridge-only repair 会校验目标 root 确实是 generated root（manifest 或 legacy bootstrap 形态），并保留已有 `agents/` + spec 加载校验；非法 root 会明确报错。
+3. `doctor.project_bridge.repair_command` 切换到新的 bridge-only repair 命令；缺失 bridge 不带 `--force`，需要覆盖现有 project config 的场景显式带 `--force`。
+4. 回归至少覆盖：bridge-only repair 不修改 drifted builtin agent、reject 非 generated root、doctor repair command 已更新；`scripts/smoke_v08.sh` 需走一条 `doctor missing -> bridge-only repair -> doctor synced` 链路。
+5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - `init` 新增显式 `--sync-project-config-only`，要求配合 `--root-dir <generated-root>` 使用，只修项目根 bridge config / gitignore，不重写 bootstrap 模板。
+  - `sync-project-config-only` 会校验目标 root 确实是 generated root（manifest 或 legacy `.mcp-subagent/bootstrap` 形态），并继续走 `agents/` + spec 加载校验；非法 root 会明确报错。
+  - `doctor.project_bridge.repair_command` 已切到新的 bridge-only repair 命令：缺失 bridge 时不给 `--force`，需要覆盖现有 project config 的场景显式带 `--force`。
+  - `README.md`、`scripts/smoke_v08.sh` 和 CLI 解析/单测已同步更新；smoke 现在真实覆盖 `doctor missing -> sync-project-config-only -> doctor synced` 链路。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（227 + 77 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-160 V1.0-P6-InitReportBridgeFileAccounting (Completed 2026-03-28)
+
+任务：让 `init --json` / `sync-project-config-only --json` 的 `created_files` 与 `overwritten_files` 准确反映项目根 bridge config 与 `.gitignore` 的实际写入结果，而不只通过 notes 表达。
+验收标准：
+
+1. 当 `init` / `--sync-project-config` / `--sync-project-config-only` 实际写入项目根 `.mcp-subagent/config.toml` 时，`InitReport.created_files/overwritten_files` 会按真实写入结果回填该路径。
+2. 当这些路径实际写入项目 `.gitignore` 时，`InitReport.created_files/overwritten_files` 也会按真实写入结果回填；no-op/preserved 场景不误记成 changed。
+3. 现有 generated-root 内部文件统计语义保持不变，notes 继续保留“preserved/no changes”说明。
+4. 回归至少覆盖：default bootstrap 自动 bridge、custom root sync、bridge-only repair 三条 JSON 路径的 file accounting；`scripts/smoke_v08.sh` 至少断言一次 bridge-only repair JSON 包含项目 bridge config。
+5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - `init` 在 project bridge config 与 `.gitignore` 实际写盘时，会按“创建/覆盖”真实语义把项目根路径回填到 `InitReport.created_files` 或 `InitReport.overwritten_files`；preserved/no-op 继续只走 notes，不误记成 changed。
+  - generated root 内已有的 file accounting 语义保持不变，本轮只补 project-root side effects，不改 bridge config / gitignore 的实际写入逻辑。
+  - `src/main.rs` 已补单测覆盖 created、overwritten、preserved/no-op 三类 accounting；`scripts/smoke_v08.sh` 已覆盖 default bootstrap 自动 bridge、custom root `--sync-project-config`、bridge-only repair 三条 JSON 路径，并显式断言 bridge-only repair JSON 含项目 bridge config。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（227 + 80 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-161 V1.0-P7-LexicalCwdPathStability (Completed 2026-03-28)
+
+任务：让 CLI 在 shell 处于 symlink/alias 路径时，优先保留安全的词法 cwd，而不是把用户可见路径无故折成物理 realpath。
+验收标准：
+
+1. 新增统一 cwd helper：仅当 `PWD` 为 absolute 且与 `current_dir()` canonical 后指向同一目录时，CLI 才采用 `PWD` 作为词法 cwd；否则回退 `current_dir()`。
+2. `init --json`、`doctor --json` 与 generated README connect snippets 这类用户可见路径链路改用该 helper，symlink cwd 场景下输出路径保留 shell 词法前缀，不再无故漂移到物理路径。
+3. 现有路径安全语义保持不变：外部 root 仍不做额外 canonicalize，非法/伪造 `PWD` 不会污染结果。
+4. 回归至少覆盖 helper 的 match/mismatch 行为，以及一条 symlink cwd 下的真实 CLI/smoke 路径断言。
+5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - 新增统一 `resolve_cli_cwd()` helper：只有 `PWD` 为 absolute 且 canonical 后与 `current_dir()` 指向同一目录时，才采用 shell 词法路径；其余情况全部回退真实 cwd。
+  - `init --json`、`doctor --json`、generated README connect snippets，以及 runtime config 的 project-config 发现路径，已统一接入该 helper；symlink cwd 场景下，用户可见路径不再无故漂移到物理 realpath。
+  - 现有路径安全语义保持不变：外部 root 仍不做额外 canonicalize，relative/伪造 `PWD` 不会污染输出。
+  - 已补 helper 单测覆盖 missing/relative、mismatch、symlink-match 三类行为；`scripts/smoke_v08.sh` 新增 symlink cwd 真实链路，断言 `init --json`、`doctor --json` 和 generated README 都保留词法路径。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（230 + 80 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-162 V1.0-P8-BridgeContractFreeze (Completed 2026-03-28)
+
+任务：冻结 `generated root / project bridge / bridge-only repair` 这条外部契约，统一 README、generated README、`doctor` advice/issue 文案、`init` notes/error wording，并补一条端到端发布故事回归。
+验收标准：
+
+1. README、generated README、`doctor` issue/advice、`init` notes/error message 在这条链路上统一使用 `generated root`、`project bridge config`、`bridge-only repair` 这组术语，不再混入模糊 `project config` 或旧 `<bootstrap-root>` 提示。
+2. README 明确区分两条修复路径：template drift 走 `refresh-bootstrap`，project bridge 问题走 `sync-project-config-only`；且同时说明“在项目根可直接跑 / 在其他目录传 `--root-dir <generated-root>`”的语义。
+3. 回归至少覆盖一条完整故事：drifted generated root 被 `doctor` 同时报出 refresh 与 bridge repair 路径，执行 `refresh-bootstrap` 后 drift 消失，再执行 `sync-project-config-only` 后 project bridge synced，且 symlink cwd 下输出仍保留 lexical path。
+4. 现有 bridge/runtime 行为不变，本轮只收口文案、建议与回归，不新增配置项或主逻辑分支。
+5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - README、generated README、`doctor` issue 文案、`init` notes/error wording 已统一收口到 `generated root`、`project bridge config`、`bridge-only repair` 这组固定术语，不再混用模糊 `project config` 或旧 `<bootstrap-root>` 提示。
+  - README 现在明确区分两条修复路径：generated-root template drift 走 `refresh-bootstrap`，project bridge drift/missing 走 `sync-project-config-only`，并写清了“项目根可直接跑 / 其他 cwd 传 `--root-dir <generated-root>`”的使用语义。
+  - `src/doctor.rs` 已补更严格的文案断言，`src/init.rs` 的 generated README 回归也同步锁住新说法；`src/main.rs` 的 preserved note 已统一成 `project bridge config`。
+  - `scripts/smoke_v08.sh` 新增完整发布故事回归：`drift -> refresh-bootstrap -> sync-project-config-only -> lexical cwd`，同时断言 refresh command、bridge-only repair command、synced bridge 和 lexical cwd 保持一致。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（230 + 80 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-163 V1.0-P9-ReleasePrep (Completed 2026-03-28)
+
+任务：把当前已完成的 v0.10 runtime/bridge/CLI 收口打成明确的 `v0.10.0` 发布切点，同步版本位点、changelog、release 文档与测试断言。
+验收标准：
+
+1. `Cargo.toml` 版本更新为 `0.10.0`，`src/init.rs` 的 `PRESET_CATALOG_VERSION` 同步为 `v0.10.0`，相关测试断言全部更新。
+2. `CHANGELOG.md` 新增 `0.10.0 - 2026-03-28` 顶部章节，准确概括本轮 runtime transparency、parser bridge、bootstrap drift repair、project bridge repair、lexical cwd 和 contract freeze 收口。
+3. 新增 `docs/release_v0.10.0.md`，包含 scope、cut checklist、版本同步位点、验证命令与 tag/push 指引。
+4. 本轮不改 runtime 行为；只允许 release surfaces、版本常量和对应测试/文档更新。
+5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - 版本位点已同步到 `v0.10.0`：`Cargo.toml`、`Cargo.lock` 根包版本、`src/init.rs` 的 `PRESET_CATALOG_VERSION`，以及相关测试断言都已更新。
+  - `CHANGELOG.md` 已新增 `0.10.0 - 2026-03-28` 顶部章节，收口 runtime transparency、parser bridge、generated-root/project-bridge 修复链路、lexical cwd 与 contract freeze。
+  - 已新增 [docs/release_v0.10.0.md](docs/release_v0.10.0.md)，包含 scope、cut checklist、验证命令、版本同步位点与 tag/push 指引。
+  - 本轮未改 runtime 行为，只更新 release surfaces、版本常量和对应断言。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（230 + 80 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-164 V1.0-P10-ReleaseCutAutomation (Completed 2026-03-28)
+
+任务：把当前 `v0.10.0` 的切版检查收成一条可重复执行的脚本，统一验证版本位点、release 文档存在性和既有 release checklist 命令，避免继续依赖手工核对。
+验收标准：
+
+1. 新增 `scripts/release_check.sh`，接受目标版本参数（本轮至少覆盖 `0.10.0`），并校验 `Cargo.toml`、`Cargo.lock` 根包版本、`src/init.rs` 的 `PRESET_CATALOG_VERSION`、`CHANGELOG.md` 顶部章节和对应 `docs/release_v<version>.md` 的存在。
+2. 脚本会顺序执行现有 release checklist：`cargo fmt --all`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`bash scripts/smoke_v08.sh`；任一步失败时整体失败。
+3. `docs/release_v0.10.0.md` 改为明确引用该脚本，避免文档和实际切版流程再次漂移。
+4. 本轮不改 runtime 行为，只允许新增 release automation 脚本与相应文档/计划回填。
+5. `bash scripts/release_check.sh 0.10.0` 通过，并将完成记录回填到 `PLAN.md` / `TODO.md`。
+完成记录：
+
+- 已完成：
+  - 新增 `scripts/release_check.sh`，接受目标版本参数并统一校验 `Cargo.toml`、`Cargo.lock` 根包版本、`src/init.rs` 中的 `PRESET_CATALOG_VERSION`、`CHANGELOG.md` 顶部 release heading，以及对应 `docs/release_v<version>.md` 的存在。
+  - 脚本已顺序封装既有 release checklist：`cargo fmt --all`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`bash scripts/smoke_v08.sh`；任一步失败会整体失败。
+  - `docs/release_v0.10.0.md` 已改为优先引用 `bash scripts/release_check.sh 0.10.0`，手动命令保留为 fallback，不再让 release 文档与实际切版流程分叉。
+- 已验证：
+  - `bash scripts/release_check.sh 0.10.0` 通过（内部已串行跑通 `cargo fmt --all`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`bash scripts/smoke_v08.sh`）。
+
+## T-165 V1.0-P11-ReleaseBranchCut (Completed 2026-03-28)
+
+任务：在 `v0.10.0` cut point 已提交且工作树干净的前提下，用 `git flow release start 0.10.0` 正式切出 release 分支。
+验收标准：
+
+1. `T-164` 对应变更已先提交到 `develop`，`git status --short` 为空，不带未提交改动进入 release cut。
+2. `git flow release start 0.10.0` 成功，当前分支切到 `release/0.10.0`。
+3. 本轮不改 runtime 行为，不新增 release 内容；只允许 branch cut 本身与 `PLAN.md` / `TODO.md` 记录更新。
+完成记录：
+
+- 已完成：
+  - 已先在 `develop` 上提交 `T-164` 收口，提交点为 `c27d162 chore: automate release cut checks`，随后确认工作树为空。
+  - `git flow release start 0.10.0` 已成功执行，当前分支已切到 `release/0.10.0`，release cut 起点明确固定在 `develop@c27d162`。
+  - 本轮未引入新的 runtime/CLI 行为变更，只补 release branch cut 的计划与任务记录。

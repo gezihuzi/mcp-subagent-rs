@@ -2,6 +2,7 @@ pub mod cleanup;
 pub mod context;
 pub mod dispatcher;
 pub mod memory;
+pub mod outcome;
 pub mod runners;
 pub mod summary;
 pub mod usage;
