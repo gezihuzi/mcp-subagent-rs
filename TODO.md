@@ -4035,7 +4035,7 @@
   - `cargo test --workspace` 通过（227 + 77 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
 
-## T-160 V1.0-P6-InitReportBridgeFileAccounting
+## T-160 V1.0-P6-InitReportBridgeFileAccounting (Completed 2026-03-28)
 
 任务：让 `init --json` / `sync-project-config-only --json` 的 `created_files` 与 `overwritten_files` 准确反映项目根 bridge config 与 `.gitignore` 的实际写入结果，而不只通过 notes 表达。
 验收标准：
@@ -4045,3 +4045,13 @@
 3. 现有 generated-root 内部文件统计语义保持不变，notes 继续保留“preserved/no changes”说明。
 4. 回归至少覆盖：default bootstrap 自动 bridge、custom root sync、bridge-only repair 三条 JSON 路径的 file accounting；`scripts/smoke_v08.sh` 至少断言一次 bridge-only repair JSON 包含项目 bridge config。
 5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - `init` 在 project bridge config 与 `.gitignore` 实际写盘时，会按“创建/覆盖”真实语义把项目根路径回填到 `InitReport.created_files` 或 `InitReport.overwritten_files`；preserved/no-op 继续只走 notes，不误记成 changed。
+  - generated root 内已有的 file accounting 语义保持不变，本轮只补 project-root side effects，不改 bridge config / gitignore 的实际写入逻辑。
+  - `src/main.rs` 已补单测覆盖 created、overwritten、preserved/no-op 三类 accounting；`scripts/smoke_v08.sh` 已覆盖 default bootstrap 自动 bridge、custom root `--sync-project-config`、bridge-only repair 三条 JSON 路径，并显式断言 bridge-only repair JSON 含项目 bridge config。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（227 + 80 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
