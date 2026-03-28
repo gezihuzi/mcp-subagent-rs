@@ -566,6 +566,8 @@ If `doctor` reports bootstrap template drift, review those local edits first; if
 accidental, run the exact `refresh_command` emitted by `doctor` (or use
 `mcp-subagent init --refresh-bootstrap --root-dir <generated-root>`) to resync built-in
 templates while preserving custom agents. Default `init` still will not overwrite files silently.
+If you only need to repair the project bridge for an existing generated root, use
+`mcp-subagent init --root-dir <generated-root> --sync-project-config-only`.
 
 ## MCP Integration (stdio)
 
@@ -1051,6 +1053,9 @@ mod tests {
         assert!(
             readme.contains("`mcp-subagent init --refresh-bootstrap --root-dir <generated-root>`")
         );
+        assert!(readme.contains(
+            "`mcp-subagent init --root-dir <generated-root> --sync-project-config-only`"
+        ));
         assert!(readme.contains("preserving custom agents"));
         assert!(readme.contains("Default `init` still will not overwrite files silently"));
     }
