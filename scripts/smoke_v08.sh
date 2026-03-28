@@ -148,9 +148,12 @@ export MCP_SUBAGENT_GEMINI_BIN="$FAKE_GEMINI_BIN"
 BOOTSTRAP_ROOT="$TMP_DIR/bootstrap"
 BOOTSTRAP_BACKEND="$BOOTSTRAP_ROOT/agents/backend-coder.agent.toml"
 BOOTSTRAP_CUSTOM="$BOOTSTRAP_ROOT/agents/custom.agent.toml"
+BOOTSTRAP_PROJECT="$TMP_DIR/project-bootstrap-default"
 SYNC_PROJECT="$TMP_DIR/project-sync"
 SYNC_ROOT="$TMP_DIR/custom-root-sync"
-mkdir -p "$SYNC_PROJECT"
+SYNC_PROJECT_INIT="$TMP_DIR/project-sync-during-init"
+SYNC_INIT_ROOT="$TMP_DIR/custom-root-sync-during-init"
+mkdir -p "$BOOTSTRAP_PROJECT" "$SYNC_PROJECT" "$SYNC_PROJECT_INIT"
 
 run_cmd() {
   cargo run --quiet -- \
@@ -173,6 +176,14 @@ description = "custom agent preserved during refresh"
 provider = "mock"
 instructions = "custom"
 TOML
+
+echo "[smoke-v08] default bootstrap init reports bridge config and gitignore"
+(
+  cd "$BOOTSTRAP_PROJECT"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- init --json >"$TMP_DIR/init_default_bootstrap.json"
+)
+grep -Eq '"[^"]*/project-bootstrap-default/\.mcp-subagent/config\.toml"' "$TMP_DIR/init_default_bootstrap.json"
+grep -Eq '"[^"]*/project-bootstrap-default/\.gitignore"' "$TMP_DIR/init_default_bootstrap.json"
 
 echo "[smoke-v08] doctor detects generated-root drift"
 cargo run --quiet -- \
@@ -212,6 +223,14 @@ grep -Eq '"project_bridge"[[:space:]]*:' "$TMP_DIR/custom_root_doctor_missing.js
 grep -Eq '"status"[[:space:]]*:[[:space:]]*"missing"' "$TMP_DIR/custom_root_doctor_missing.json"
 grep -Eq '"repair_command"[[:space:]]*:[[:space:]]*"mcp-subagent init --root-dir .* --sync-project-config-only"' "$TMP_DIR/custom_root_doctor_missing.json"
 
+echo "[smoke-v08] custom root init with --sync-project-config reports bridge config"
+(
+  cd "$SYNC_PROJECT_INIT"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- \
+    init --preset codex-primary-builder --root-dir "$SYNC_INIT_ROOT" --sync-project-config --json >"$TMP_DIR/init_custom_root_sync_during_init.json"
+)
+grep -Eq '"[^"]*/project-sync-during-init/\.mcp-subagent/config\.toml"' "$TMP_DIR/init_custom_root_sync_during_init.json"
+
 echo "[smoke-v08] custom root bridge-only repair writes project config"
 (
   cd "$SYNC_PROJECT"
@@ -222,6 +241,7 @@ echo "[smoke-v08] custom root bridge-only repair writes project config"
 )
 grep -Fq 'agents_dirs = ["'"$SYNC_ROOT"'/agents"]' "$SYNC_PROJECT/.mcp-subagent/config.toml"
 grep -Fq 'state_dir = "'"$SYNC_ROOT"'/.mcp-subagent/state"' "$SYNC_PROJECT/.mcp-subagent/config.toml"
+grep -Eq '"[^"]*/project-sync/\.mcp-subagent/config\.toml"' "$TMP_DIR/init_custom_root_sync.json"
 grep -Eq '"agents_loaded"[[:space:]]*:[[:space:]]*3' "$TMP_DIR/sync_project_doctor.json"
 grep -Eq '"project_bridge"[[:space:]]*:' "$TMP_DIR/sync_project_doctor.json"
 grep -Eq '"status"[[:space:]]*:[[:space:]]*"synced"' "$TMP_DIR/sync_project_doctor.json"

@@ -3808,6 +3808,8 @@ fn init_command(options: InitCommandOptions) -> ExitCode {
     match result {
         Ok(mut report) => {
             if sync_project_bridge {
+                let bridge_config_path = cwd.join(PROJECT_BRIDGE_CONFIG_RELATIVE);
+                let bridge_config_existed_before = bridge_config_path.exists();
                 let bridge_result = if use_default_bootstrap_root {
                     ensure_bootstrap_bridge_config(&cwd, force)
                 } else {
@@ -3819,10 +3821,17 @@ fn init_command(options: InitCommandOptions) -> ExitCode {
                     )
                 };
                 match bridge_result {
-                    Ok((path, true)) => report.notes.push(format!(
-                        "Generated project bridge config at `{}`; you can run mcp-subagent commands from project root without extra --agents-dir/--state-dir flags.",
-                        path.display()
-                    )),
+                    Ok((path, true)) => {
+                        record_init_report_file_write(
+                            &mut report,
+                            path.clone(),
+                            bridge_config_existed_before,
+                        );
+                        report.notes.push(format!(
+                            "Generated project bridge config at `{}`; you can run mcp-subagent commands from project root without extra --agents-dir/--state-dir flags.",
+                            path.display()
+                        ));
+                    }
                     Ok((path, false)) => report.notes.push(format!(
                         "Using existing project config `{}` (preserved).",
                         path.display()
@@ -3838,16 +3847,25 @@ fn init_command(options: InitCommandOptions) -> ExitCode {
                     project_root_gitignore_rules(&cwd, &root)
                 };
                 if use_default_bootstrap_root || !extra_gitignore_rules.is_empty() {
+                    let gitignore_path = cwd.join(PROJECT_GITIGNORE_RELATIVE);
+                    let gitignore_existed_before = gitignore_path.exists();
                     let gitignore_result = if use_default_bootstrap_root {
                         ensure_project_gitignore(&cwd)
                     } else {
                         ensure_project_gitignore_with_rules(&cwd, &extra_gitignore_rules)
                     };
                     match gitignore_result {
-                        Ok((path, true)) => report.notes.push(format!(
-                            "Updated `{}` with mcp-subagent runtime ignore rules.",
-                            path.display()
-                        )),
+                        Ok((path, true)) => {
+                            record_init_report_file_write(
+                                &mut report,
+                                path.clone(),
+                                gitignore_existed_before,
+                            );
+                            report.notes.push(format!(
+                                "Updated `{}` with mcp-subagent runtime ignore rules.",
+                                path.display()
+                            ));
+                        }
                         Ok((path, false)) => report.notes.push(format!(
                             "Using existing `.gitignore` rules in `{}` (no changes).",
                             path.display()
@@ -3871,6 +3889,19 @@ fn init_command(options: InitCommandOptions) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn record_init_report_file_write(report: &mut InitReport, path: PathBuf, existed_before: bool) {
+    report.created_files.retain(|existing| existing != &path);
+    report
+        .overwritten_files
+        .retain(|existing| existing != &path);
+    let target = if existed_before {
+        &mut report.overwritten_files
+    } else {
+        &mut report.created_files
+    };
+    target.push(path);
 }
 
 struct InitCommandOptions {
@@ -4792,11 +4823,12 @@ mod tests {
     use crate::{
         build_selected_file_inputs, clean_state_dir, ensure_bootstrap_bridge_config,
         ensure_project_bridge_config, ensure_project_gitignore, project_bridge_config_template,
-        project_root_gitignore_rules, resolve_init_root, ArtifactKindArg, Cli, Commands,
-        ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput, RunResultOutput, RunShowOutput,
-        StoredNativeUsage, StoredRunRecord, StoredRunSpecSnapshot, UsageStatsOutput,
-        BRIDGE_AGENTS_DIR_RELATIVE, BRIDGE_STATE_DIR_RELATIVE, DEFAULT_BOOTSTRAP_ROOT_RELATIVE,
-        RESULT_CONTRACT_VERSION,
+        project_root_gitignore_rules, record_init_report_file_write, resolve_init_root,
+        ArtifactKindArg, Cli, Commands, ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput,
+        RunResultOutput, RunShowOutput, StoredNativeUsage, StoredRunRecord, StoredRunSpecSnapshot,
+        UsageStatsOutput, BRIDGE_AGENTS_DIR_RELATIVE, BRIDGE_STATE_DIR_RELATIVE,
+        DEFAULT_BOOTSTRAP_ROOT_RELATIVE, PROJECT_BRIDGE_CONFIG_RELATIVE,
+        PROJECT_GITIGNORE_RELATIVE, RESULT_CONTRACT_VERSION,
     };
 
     fn sample_outcome_usage() -> super::StoredOutcomeUsage {
@@ -5237,6 +5269,83 @@ target/
         assert!(!updated);
         let content = fs::read_to_string(resolved).expect("read");
         assert_eq!(content, ".mcp-subagent/\n");
+    }
+
+    #[test]
+    fn init_report_records_created_bridge_and_gitignore_files() {
+        let project_root = PathBuf::from("/tmp/project");
+        let mut report = mcp_subagent::init::InitReport {
+            preset: "test".to_string(),
+            preset_catalog_version: "v0.9.0".to_string(),
+            root: project_root.join(".mcp-subagent/bootstrap"),
+            agents_dir: project_root.join(".mcp-subagent/bootstrap/agents"),
+            created_files: Vec::new(),
+            overwritten_files: Vec::new(),
+            generated_agent_count: 0,
+            notes: Vec::new(),
+        };
+
+        record_init_report_file_write(
+            &mut report,
+            project_root.join(PROJECT_BRIDGE_CONFIG_RELATIVE),
+            false,
+        );
+        record_init_report_file_write(
+            &mut report,
+            project_root.join(PROJECT_GITIGNORE_RELATIVE),
+            false,
+        );
+
+        assert_eq!(
+            report.created_files,
+            vec![
+                project_root.join(PROJECT_BRIDGE_CONFIG_RELATIVE),
+                project_root.join(PROJECT_GITIGNORE_RELATIVE)
+            ]
+        );
+        assert!(report.overwritten_files.is_empty());
+    }
+
+    #[test]
+    fn init_report_records_overwritten_bridge_config_for_synced_custom_root() {
+        let project_root = PathBuf::from("/tmp/project");
+        let bridge_path = project_root.join(PROJECT_BRIDGE_CONFIG_RELATIVE);
+        let mut report = mcp_subagent::init::InitReport {
+            preset: "test".to_string(),
+            preset_catalog_version: "v0.9.0".to_string(),
+            root: PathBuf::from("/tmp/custom-root"),
+            agents_dir: PathBuf::from("/tmp/custom-root/agents"),
+            created_files: vec![bridge_path.clone()],
+            overwritten_files: Vec::new(),
+            generated_agent_count: 0,
+            notes: Vec::new(),
+        };
+
+        record_init_report_file_write(&mut report, bridge_path.clone(), true);
+
+        assert!(report.created_files.is_empty());
+        assert_eq!(report.overwritten_files, vec![bridge_path]);
+    }
+
+    #[test]
+    fn init_report_does_not_record_preserved_paths_without_writes() {
+        let project_root = PathBuf::from("/tmp/project");
+        let report = mcp_subagent::init::InitReport {
+            preset: "test".to_string(),
+            preset_catalog_version: "v0.9.0".to_string(),
+            root: project_root.join(".mcp-subagent/bootstrap"),
+            agents_dir: project_root.join(".mcp-subagent/bootstrap/agents"),
+            created_files: Vec::new(),
+            overwritten_files: Vec::new(),
+            generated_agent_count: 0,
+            notes: vec![format!(
+                "Using existing project config `{}` (preserved).",
+                project_root.join(PROJECT_BRIDGE_CONFIG_RELATIVE).display()
+            )],
+        };
+
+        assert!(report.created_files.is_empty());
+        assert!(report.overwritten_files.is_empty());
     }
 
     #[test]

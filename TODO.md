@@ -4034,3 +4034,14 @@
   - `bash scripts/smoke_v08.sh` 通过。
   - `cargo test --workspace` 通过（227 + 77 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-160 V1.0-P6-InitReportBridgeFileAccounting
+
+任务：让 `init --json` / `sync-project-config-only --json` 的 `created_files` 与 `overwritten_files` 准确反映项目根 bridge config 与 `.gitignore` 的实际写入结果，而不只通过 notes 表达。
+验收标准：
+
+1. 当 `init` / `--sync-project-config` / `--sync-project-config-only` 实际写入项目根 `.mcp-subagent/config.toml` 时，`InitReport.created_files/overwritten_files` 会按真实写入结果回填该路径。
+2. 当这些路径实际写入项目 `.gitignore` 时，`InitReport.created_files/overwritten_files` 也会按真实写入结果回填；no-op/preserved 场景不误记成 changed。
+3. 现有 generated-root 内部文件统计语义保持不变，notes 继续保留“preserved/no changes”说明。
+4. 回归至少覆盖：default bootstrap 自动 bridge、custom root sync、bridge-only repair 三条 JSON 路径的 file accounting；`scripts/smoke_v08.sh` 至少断言一次 bridge-only repair JSON 包含项目 bridge config。
+5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。

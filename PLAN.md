@@ -6,6 +6,13 @@
 
 ## Execution Strategy (v0.10 Current)
 
+### Batch V1.0-P6 - Init Report Bridge File Accounting（当前优先）
+
+目标：补齐 `init --json` 在 project bridge 路径上的文件变更可见性，让 `created_files/overwritten_files` 不再只覆盖 generated root 内文件，而是能稳定反映项目根 bridge config 与 `.gitignore` 的实际写入结果，方便自动化与 host 侧消费。
+依赖顺序：`T-160`。
+回滚策略：仅扩展 `InitReport` 的文件清单填充逻辑，不改变 bridge config/gitignore 的实际写入语义；必要时可回退 report accounting，而不影响 `init` / `sync-project-config-only` 主链。
+风险与控制：若把“preserved 现有文件”也误记成 overwritten，会误导自动化；通过只在实际写入发生时追加到 `created_files/overwritten_files`，保留 notes 继续表达 preserved/no-op，降低语义污染。
+
 ### Batch V1.0-P5 - Project Bridge Repair Path（已完成）
 
 目标：把 `doctor.project_bridge.repair_command` 从“借 `--refresh-bootstrap` 顺带修”收口成真正的 bridge-only 修复路径，让已有 generated root 的项目桥接可以独立补齐或覆盖，而不去触碰 bootstrap 模板内容。
