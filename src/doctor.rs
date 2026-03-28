@@ -1979,7 +1979,7 @@ max_runtime_depth = 1
             &FakeProber::default(),
         );
 
-        assert_eq!(report.bootstrap_catalog.catalog_version, "v0.9.0");
+        assert_eq!(report.bootstrap_catalog.catalog_version, "v0.10.0");
         assert_eq!(report.bootstrap_catalog.drifted_templates.len(), 1);
         assert_eq!(report.bootstrap_catalog.refresh_commands.len(), 1);
         let drift = &report.bootstrap_catalog.drifted_templates[0];

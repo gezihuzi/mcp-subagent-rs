@@ -6,6 +6,13 @@
 
 ## Execution Strategy (v0.10 Current)
 
+### Batch V1.0-P9 - Release Prep（已完成）
+
+目标：把当前已完成的 v0.10 runtime/bridge/CLI 收口正式打成可发布版本，统一 `Cargo.toml`、preset catalog version、`CHANGELOG.md`、release checklist 文档与测试断言，形成明确的 `v0.10.0` cut point。
+依赖顺序：`T-163(Completed)`。
+回滚策略：仅修改版本位点、release 文档、changelog 与相关断言，不改 runtime 行为；若发现版本命名需要调整，可单独回退 release surfaces，而不影响当前功能闭环。
+风险与控制：版本位点若不同步，会导致 generated-root manifest、doctor drift 诊断与 release 文档各自报不同版本；通过一次性同步 `Cargo.toml`、`PRESET_CATALOG_VERSION`、CHANGELOG、release doc 和测试断言，避免发布后再补丁修文档。
+
 ### Batch V1.0-P8 - Bridge Contract Freeze（已完成）
 
 目标：冻结 `generated root / project bridge / bridge-only repair` 这条外部契约，统一 README、generated README、`doctor` advice/issue 文案、`init` notes/error wording，并补一条面向发布的端到端回归，把 `drift -> refresh-bootstrap -> sync-project-config-only -> lexical cwd` 串成单条可复验故事。

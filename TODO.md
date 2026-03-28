@@ -4099,3 +4099,25 @@
   - `bash scripts/smoke_v08.sh` 通过。
   - `cargo test --workspace` 通过（230 + 80 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-163 V1.0-P9-ReleasePrep (Completed 2026-03-28)
+
+任务：把当前已完成的 v0.10 runtime/bridge/CLI 收口打成明确的 `v0.10.0` 发布切点，同步版本位点、changelog、release 文档与测试断言。
+验收标准：
+
+1. `Cargo.toml` 版本更新为 `0.10.0`，`src/init.rs` 的 `PRESET_CATALOG_VERSION` 同步为 `v0.10.0`，相关测试断言全部更新。
+2. `CHANGELOG.md` 新增 `0.10.0 - 2026-03-28` 顶部章节，准确概括本轮 runtime transparency、parser bridge、bootstrap drift repair、project bridge repair、lexical cwd 和 contract freeze 收口。
+3. 新增 `docs/release_v0.10.0.md`，包含 scope、cut checklist、版本同步位点、验证命令与 tag/push 指引。
+4. 本轮不改 runtime 行为；只允许 release surfaces、版本常量和对应测试/文档更新。
+5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - 版本位点已同步到 `v0.10.0`：`Cargo.toml`、`Cargo.lock` 根包版本、`src/init.rs` 的 `PRESET_CATALOG_VERSION`，以及相关测试断言都已更新。
+  - `CHANGELOG.md` 已新增 `0.10.0 - 2026-03-28` 顶部章节，收口 runtime transparency、parser bridge、generated-root/project-bridge 修复链路、lexical cwd 与 contract freeze。
+  - 已新增 [docs/release_v0.10.0.md](docs/release_v0.10.0.md)，包含 scope、cut checklist、验证命令、版本同步位点与 tag/push 指引。
+  - 本轮未改 runtime 行为，只更新 release surfaces、版本常量和对应断言。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（230 + 80 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

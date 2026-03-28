@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.10.0 - 2026-03-28
+
+### Highlights
+
+- Completed the v0.10 runtime transparency closure: accepted-only async spawn semantics, direct `run/spawn/submit --stream`, richer `status` diagnostics, and stable `status/result` JSON contracts.
+- Hardened summary normalization with bare-JSON parser bridge fallback while preserving strict-vs-best-effort behavior and native-first degraded success paths.
+- Added generated-root drift repair, exact project-bridge diagnostics, bridge-only repair, project bridge file accounting, and lexical cwd path stability across `init/doctor/generated README`.
+- Froze the external bridge contract around `generated root`, `project bridge config`, and `bridge-only repair`, with end-to-end smoke coverage for drift -> refresh -> bridge repair under lexical cwd.
+
+### Provider Status (Current Build)
+
+- `Codex`: Primary
+- `Claude`: Beta
+- `Gemini`: Experimental
+- `Mock`: Stable local debug
+- `Ollama`: Local
+
 ## 0.9.0 - 2026-03-25
 
 ### Highlights

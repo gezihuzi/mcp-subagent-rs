@@ -15,7 +15,7 @@ use crate::{
     spec::registry::load_agent_specs_from_dirs,
 };
 
-const PRESET_CATALOG_VERSION: &str = "v0.9.0";
+const PRESET_CATALOG_VERSION: &str = "v0.10.0";
 const GENERATED_ROOT_MANIFEST_RELATIVE: &str = ".mcp-subagent/generated-root.toml";
 const GENERATED_ROOT_MANIFEST_KIND: &str = "mcp-subagent-generated-root";
 
@@ -902,7 +902,7 @@ mod tests {
             .expect("init succeeds");
 
         assert_eq!(report.generated_agent_count, 6);
-        assert_eq!(report.preset_catalog_version, "v0.9.0");
+        assert_eq!(report.preset_catalog_version, "v0.10.0");
         assert!(dir.path().join("agents").exists());
         assert!(dir.path().join("PLAN.md").exists());
         assert!(dir.path().join(".mcp-subagent/config.toml").exists());
@@ -933,7 +933,7 @@ mod tests {
                 "preset {} should generate at least one agent",
                 preset.as_str()
             );
-            assert_eq!(report.preset_catalog_version, "v0.9.0");
+            assert_eq!(report.preset_catalog_version, "v0.10.0");
             assert!(dir.path().join("README.mcp-subagent.md").exists());
         }
     }

@@ -5277,7 +5277,7 @@ target/
         let project_root = PathBuf::from("/tmp/project");
         let mut report = mcp_subagent::init::InitReport {
             preset: "test".to_string(),
-            preset_catalog_version: "v0.9.0".to_string(),
+            preset_catalog_version: "v0.10.0".to_string(),
             root: project_root.join(".mcp-subagent/bootstrap"),
             agents_dir: project_root.join(".mcp-subagent/bootstrap/agents"),
             created_files: Vec::new(),
@@ -5313,7 +5313,7 @@ target/
         let bridge_path = project_root.join(PROJECT_BRIDGE_CONFIG_RELATIVE);
         let mut report = mcp_subagent::init::InitReport {
             preset: "test".to_string(),
-            preset_catalog_version: "v0.9.0".to_string(),
+            preset_catalog_version: "v0.10.0".to_string(),
             root: PathBuf::from("/tmp/custom-root"),
             agents_dir: PathBuf::from("/tmp/custom-root/agents"),
             created_files: vec![bridge_path.clone()],
@@ -5333,7 +5333,7 @@ target/
         let project_root = PathBuf::from("/tmp/project");
         let report = mcp_subagent::init::InitReport {
             preset: "test".to_string(),
-            preset_catalog_version: "v0.9.0".to_string(),
+            preset_catalog_version: "v0.10.0".to_string(),
             root: project_root.join(".mcp-subagent/bootstrap"),
             agents_dir: project_root.join(".mcp-subagent/bootstrap/agents"),
             created_files: Vec::new(),
