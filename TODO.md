@@ -4121,3 +4121,22 @@
   - `bash scripts/smoke_v08.sh` 通过。
   - `cargo test --workspace` 通过（230 + 80 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-164 V1.0-P10-ReleaseCutAutomation (Completed 2026-03-28)
+
+任务：把当前 `v0.10.0` 的切版检查收成一条可重复执行的脚本，统一验证版本位点、release 文档存在性和既有 release checklist 命令，避免继续依赖手工核对。
+验收标准：
+
+1. 新增 `scripts/release_check.sh`，接受目标版本参数（本轮至少覆盖 `0.10.0`），并校验 `Cargo.toml`、`Cargo.lock` 根包版本、`src/init.rs` 的 `PRESET_CATALOG_VERSION`、`CHANGELOG.md` 顶部章节和对应 `docs/release_v<version>.md` 的存在。
+2. 脚本会顺序执行现有 release checklist：`cargo fmt --all`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`bash scripts/smoke_v08.sh`；任一步失败时整体失败。
+3. `docs/release_v0.10.0.md` 改为明确引用该脚本，避免文档和实际切版流程再次漂移。
+4. 本轮不改 runtime 行为，只允许新增 release automation 脚本与相应文档/计划回填。
+5. `bash scripts/release_check.sh 0.10.0` 通过，并将完成记录回填到 `PLAN.md` / `TODO.md`。
+完成记录：
+
+- 已完成：
+  - 新增 `scripts/release_check.sh`，接受目标版本参数并统一校验 `Cargo.toml`、`Cargo.lock` 根包版本、`src/init.rs` 中的 `PRESET_CATALOG_VERSION`、`CHANGELOG.md` 顶部 release heading，以及对应 `docs/release_v<version>.md` 的存在。
+  - 脚本已顺序封装既有 release checklist：`cargo fmt --all`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`bash scripts/smoke_v08.sh`；任一步失败会整体失败。
+  - `docs/release_v0.10.0.md` 已改为优先引用 `bash scripts/release_check.sh 0.10.0`，手动命令保留为 fallback，不再让 release 文档与实际切版流程分叉。
+- 已验证：
+  - `bash scripts/release_check.sh 0.10.0` 通过（内部已串行跑通 `cargo fmt --all`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`bash scripts/smoke_v08.sh`）。

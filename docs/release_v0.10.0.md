@@ -14,10 +14,12 @@ This release packages the v0.10 runtime transparency and bridge-management closu
 ## Cut Checklist
 
 1. Confirm local verification:
-   - `cargo fmt --all`
-   - `cargo test --workspace`
-   - `cargo clippy --workspace --all-targets -- -D warnings`
-   - `bash scripts/smoke_v08.sh`
+   - `bash scripts/release_check.sh 0.10.0`
+   - Or run the underlying checks manually:
+     - `cargo fmt --all`
+     - `cargo test --workspace`
+     - `cargo clippy --workspace --all-targets -- -D warnings`
+     - `bash scripts/smoke_v08.sh`
 2. Ensure docs are current:
    - `README.md`
    - `CHANGELOG.md`

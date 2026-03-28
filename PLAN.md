@@ -6,6 +6,13 @@
 
 ## Execution Strategy (v0.10 Current)
 
+### Batch V1.0-P10 - Release Cut Automation（已完成）
+
+目标：把 `v0.10.0` 现有的 release checklist 收成一条可重复执行的自动化命令，避免后续切版继续依赖人肉逐项核对 `Cargo.toml`、`Cargo.lock`、`PRESET_CATALOG_VERSION`、`CHANGELOG.md`、release doc 和验证命令。
+依赖顺序：`T-164(Completed)`。
+回滚策略：仅新增 release check 脚本并更新 release 文档引用，不改 runtime、CLI 或 state layout；若脚本策略过严，可单独回退脚本与文档而不影响已完成的 v0.10 功能闭环。
+风险与控制：shell 校验若写死过多路径或格式，后续小版本 cut 可能频繁误报；通过把版本号做成显式参数，并只校验当前 release contract 必需位点与既有验证命令，控制维护成本。
+
 ### Batch V1.0-P9 - Release Prep（已完成）
 
 目标：把当前已完成的 v0.10 runtime/bridge/CLI 收口正式打成可发布版本，统一 `Cargo.toml`、preset catalog version、`CHANGELOG.md`、release checklist 文档与测试断言，形成明确的 `v0.10.0` cut point。
