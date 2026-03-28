@@ -3967,3 +3967,25 @@
   - `bash scripts/smoke_v08.sh` 通过。
   - `cargo test --workspace` 通过（220 + 71 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-157 V1.0-P3-CustomRootProjectBridgeSync (Completed 2026-03-28)
+
+任务：为 custom bootstrap root 增加显式 project bridge sync 入口，避免 `init --root-dir <custom-root>` 后仍需要每次手写 `--agents-dir/--state-dir`。  
+验收标准：
+
+1. CLI `init` 新增显式 `--sync-project-config`；用于 custom root 时，会把当前项目的 `.mcp-subagent/config.toml` 指向该 root 的 `agents_dir/state_dir`，而不改变默认未显式开启时的行为。
+2. 默认 bootstrap root 的现有自动 bridge config/gitigore 行为保持不变；plain custom-root init 仍不静默改写项目 config。
+3. 若 `--sync-project-config` 指向的 custom root 位于当前项目内，则 `.gitignore` 追加精确 root ignore 规则；若 root 在项目外，则不追加无关 runtime ignore。
+4. 回归覆盖至少包含：custom root sync 生成正确 project config、plain custom-root init 不会写 project config、default bootstrap root 的旧行为保持不变。
+5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - `init` 新增显式 `--sync-project-config`，仅在该 flag 打开时才把项目根 `.mcp-subagent/config.toml` 指向 custom root；默认 bootstrap root 仍保持原有自动 bridge 行为，plain custom-root init 不会静默改写项目 config。
+  - project bridge config 改为直接写入稳定的词法路径，不再对外部 absolute root 做 `canonicalize`，避免同一 custom root 在 config 中混出 `/var/...` 与 `/private/var/...` 两套路径。
+  - 若 custom root 位于项目内，`.gitignore` 只追加精确相对 root 规则；若 root 位于项目外，则不会额外写入项目 `.gitignore`。
+  - `README.md` 与 `scripts/smoke_v08.sh` 已同步补齐 custom root sync 示例和真实链路回归；`src/main.rs` 新增 CLI 解析、bridge config、gitignore 和外部 absolute path 稳定性测试。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（220 + 75 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

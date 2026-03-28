@@ -91,6 +91,8 @@ enum Commands {
         #[arg(long)]
         refresh_bootstrap: bool,
         #[arg(long)]
+        sync_project_config: bool,
+        #[arg(long)]
         json: bool,
     },
     ConnectSnippet {
@@ -424,10 +426,19 @@ async fn main() -> ExitCode {
             in_place,
             force,
             refresh_bootstrap,
+            sync_project_config,
             json,
         } => {
             info!("starting command: init");
-            init_command(preset, root_dir, in_place, force, refresh_bootstrap, json)
+            init_command(
+                preset,
+                root_dir,
+                in_place,
+                force,
+                refresh_bootstrap,
+                sync_project_config,
+                json,
+            )
         }
         Commands::ConnectSnippet { host } => {
             let (cfg, _guard) = match resolve_cli_config_with_logging(
@@ -3740,6 +3751,7 @@ fn init_command(
     in_place: bool,
     force: bool,
     refresh_bootstrap: bool,
+    sync_project_config: bool,
     json: bool,
 ) -> ExitCode {
     if refresh_bootstrap && in_place {
@@ -3749,6 +3761,7 @@ fn init_command(
         return ExitCode::from(1);
     }
     let use_default_bootstrap_root = root_dir.is_none() && !in_place;
+    let sync_project_bridge = use_default_bootstrap_root || sync_project_config;
     let cwd = match std::env::current_dir() {
         Ok(path) => path,
         Err(err) => {
@@ -3770,8 +3783,18 @@ fn init_command(
     };
     match result {
         Ok(mut report) => {
-            if use_default_bootstrap_root && !refresh_bootstrap {
-                match ensure_bootstrap_bridge_config(&cwd, force) {
+            if sync_project_bridge {
+                let bridge_result = if use_default_bootstrap_root {
+                    ensure_bootstrap_bridge_config(&cwd, force)
+                } else {
+                    ensure_project_bridge_config(
+                        &cwd,
+                        &root.join("agents"),
+                        &root.join(".mcp-subagent/state"),
+                        force,
+                    )
+                };
+                match bridge_result {
                     Ok((path, true)) => report.notes.push(format!(
                         "Generated project bridge config at `{}`; you can run mcp-subagent commands from project root without extra --agents-dir/--state-dir flags.",
                         path.display()
@@ -3785,18 +3808,30 @@ fn init_command(
                         return ExitCode::from(1);
                     }
                 }
-                match ensure_project_gitignore(&cwd) {
-                    Ok((path, true)) => report.notes.push(format!(
-                        "Updated `{}` with mcp-subagent runtime ignore rules.",
-                        path.display()
-                    )),
-                    Ok((path, false)) => report.notes.push(format!(
-                        "Using existing `.gitignore` rules in `{}` (no changes).",
-                        path.display()
-                    )),
-                    Err(err) => {
-                        eprintln!("init failed: {err}");
-                        return ExitCode::from(1);
+                let extra_gitignore_rules = if use_default_bootstrap_root {
+                    Vec::new()
+                } else {
+                    project_root_gitignore_rules(&cwd, &root)
+                };
+                if use_default_bootstrap_root || !extra_gitignore_rules.is_empty() {
+                    let gitignore_result = if use_default_bootstrap_root {
+                        ensure_project_gitignore(&cwd)
+                    } else {
+                        ensure_project_gitignore_with_rules(&cwd, &extra_gitignore_rules)
+                    };
+                    match gitignore_result {
+                        Ok((path, true)) => report.notes.push(format!(
+                            "Updated `{}` with mcp-subagent runtime ignore rules.",
+                            path.display()
+                        )),
+                        Ok((path, false)) => report.notes.push(format!(
+                            "Using existing `.gitignore` rules in `{}` (no changes).",
+                            path.display()
+                        )),
+                        Err(err) => {
+                            eprintln!("init failed: {err}");
+                            return ExitCode::from(1);
+                        }
                     }
                 }
             }
@@ -3828,8 +3863,10 @@ fn resolve_init_root(
     Ok(cwd.join(DEFAULT_BOOTSTRAP_ROOT_RELATIVE))
 }
 
-fn ensure_bootstrap_bridge_config(
+fn ensure_project_bridge_config(
     cwd: &Path,
+    agents_dir: &Path,
+    state_dir: &Path,
     force: bool,
 ) -> std::result::Result<(PathBuf, bool), String> {
     let config_path = cwd.join(PROJECT_BRIDGE_CONFIG_RELATIVE);
@@ -3852,12 +3889,29 @@ fn ensure_bootstrap_bridge_config(
         fs::create_dir_all(parent)
             .map_err(|err| format!("failed to create project config directory: {err}"))?;
     }
-    fs::write(&config_path, bootstrap_bridge_config_template())
-        .map_err(|err| format!("failed to write project bridge config: {err}"))?;
+    fs::write(
+        &config_path,
+        project_bridge_config_template(cwd, agents_dir, state_dir),
+    )
+    .map_err(|err| format!("failed to write project bridge config: {err}"))?;
     Ok((config_path, true))
 }
 
-fn bootstrap_bridge_config_template() -> String {
+fn ensure_bootstrap_bridge_config(
+    cwd: &Path,
+    force: bool,
+) -> std::result::Result<(PathBuf, bool), String> {
+    ensure_project_bridge_config(
+        cwd,
+        &cwd.join(BRIDGE_AGENTS_DIR_RELATIVE),
+        &cwd.join(BRIDGE_STATE_DIR_RELATIVE),
+        force,
+    )
+}
+
+fn project_bridge_config_template(cwd: &Path, agents_dir: &Path, state_dir: &Path) -> String {
+    let agents_dir = render_bridge_path_for_config(cwd, agents_dir);
+    let state_dir = render_bridge_path_for_config(cwd, state_dir);
     format!(
         r#"[server]
 transport = "stdio"
@@ -3867,12 +3921,35 @@ log_level = "info"
 agents_dirs = ["{agents_dir}"]
 state_dir = "{state_dir}"
 "#,
-        agents_dir = BRIDGE_AGENTS_DIR_RELATIVE,
-        state_dir = BRIDGE_STATE_DIR_RELATIVE
+        agents_dir = toml_escape_string(&agents_dir),
+        state_dir = toml_escape_string(&state_dir)
     )
 }
 
+fn render_bridge_path_for_config(cwd: &Path, target: &Path) -> String {
+    let resolved = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        cwd.join(target)
+    };
+    if let Ok(relative) = resolved.strip_prefix(cwd) {
+        return format!("./{}", relative.display());
+    }
+    resolved.display().to_string()
+}
+
+fn toml_escape_string(raw: &str) -> String {
+    raw.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn ensure_project_gitignore(cwd: &Path) -> std::result::Result<(PathBuf, bool), String> {
+    ensure_project_gitignore_with_rules(cwd, &[])
+}
+
+fn ensure_project_gitignore_with_rules(
+    cwd: &Path,
+    extra_rules: &[String],
+) -> std::result::Result<(PathBuf, bool), String> {
     let gitignore_path = cwd.join(PROJECT_GITIGNORE_RELATIVE);
     if gitignore_path.is_dir() {
         return Err(format!(
@@ -3901,12 +3978,13 @@ fn ensure_project_gitignore(cwd: &Path) -> std::result::Result<(PathBuf, bool), 
 
     let missing_rules = GITIGNORE_RUNTIME_RULES
         .iter()
+        .map(|rule| (*rule).to_string())
+        .chain(extra_rules.iter().cloned())
         .filter(|target| {
             !existing_rules
                 .iter()
                 .any(|rule| gitignore_rule_matches_target(rule, target))
         })
-        .copied()
         .collect::<Vec<_>>();
 
     if missing_rules.is_empty() {
@@ -3922,13 +4000,30 @@ fn ensure_project_gitignore(cwd: &Path) -> std::result::Result<(PathBuf, bool), 
     content.push_str(GITIGNORE_RUNTIME_HEADER);
     content.push('\n');
     for rule in missing_rules {
-        content.push_str(rule);
+        content.push_str(&rule);
         content.push('\n');
     }
 
     fs::write(&gitignore_path, content)
         .map_err(|err| format!("failed to write .gitignore: {err}"))?;
     Ok((gitignore_path, true))
+}
+
+fn project_root_gitignore_rules(cwd: &Path, root: &Path) -> Vec<String> {
+    let resolved = fs::canonicalize(root).unwrap_or_else(|_| {
+        if root.is_absolute() {
+            root.to_path_buf()
+        } else {
+            cwd.join(root)
+        }
+    });
+    let Ok(relative) = resolved.strip_prefix(cwd) else {
+        return Vec::new();
+    };
+    if relative.as_os_str().is_empty() {
+        return Vec::new();
+    }
+    vec![format!("{}/", relative.display())]
 }
 
 fn normalize_gitignore_rule(raw: &str) -> Option<String> {
@@ -4660,11 +4755,13 @@ mod tests {
     use mcp_subagent::config::RuntimeConfig;
 
     use crate::{
-        bootstrap_bridge_config_template, build_selected_file_inputs, clean_state_dir,
-        ensure_bootstrap_bridge_config, ensure_project_gitignore, resolve_init_root,
-        ArtifactKindArg, Cli, Commands, ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput,
-        RunResultOutput, RunShowOutput, StoredNativeUsage, StoredRunRecord, StoredRunSpecSnapshot,
-        UsageStatsOutput, DEFAULT_BOOTSTRAP_ROOT_RELATIVE, RESULT_CONTRACT_VERSION,
+        build_selected_file_inputs, clean_state_dir, ensure_bootstrap_bridge_config,
+        ensure_project_bridge_config, ensure_project_gitignore, project_bridge_config_template,
+        project_root_gitignore_rules, resolve_init_root, ArtifactKindArg, Cli, Commands,
+        ConnectHostArg, InitPresetArg, RunAgentSelectedFileInput, RunResultOutput, RunShowOutput,
+        StoredNativeUsage, StoredRunRecord, StoredRunSpecSnapshot, UsageStatsOutput,
+        BRIDGE_AGENTS_DIR_RELATIVE, BRIDGE_STATE_DIR_RELATIVE, DEFAULT_BOOTSTRAP_ROOT_RELATIVE,
+        RESULT_CONTRACT_VERSION,
     };
 
     fn sample_outcome_usage() -> super::StoredOutcomeUsage {
@@ -4803,6 +4900,7 @@ mod tests {
                 in_place,
                 force,
                 refresh_bootstrap,
+                sync_project_config,
                 json,
                 ..
             } => {
@@ -4810,6 +4908,7 @@ mod tests {
                 assert!(in_place);
                 assert!(force);
                 assert!(!refresh_bootstrap);
+                assert!(!sync_project_config);
                 assert!(json);
             }
             other => panic!("unexpected command: {other:?}"),
@@ -4823,10 +4922,12 @@ mod tests {
             Commands::Init {
                 preset,
                 refresh_bootstrap,
+                sync_project_config,
                 ..
             } => {
                 assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisorMinimal));
                 assert!(!refresh_bootstrap);
+                assert!(!sync_project_config);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -4845,11 +4946,13 @@ mod tests {
                 preset,
                 in_place,
                 refresh_bootstrap,
+                sync_project_config,
                 ..
             } => {
                 assert!(matches!(preset, InitPresetArg::MinimalSingleProvider));
                 assert!(!in_place);
                 assert!(!refresh_bootstrap);
+                assert!(!sync_project_config);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -4862,10 +4965,28 @@ mod tests {
             Commands::Init {
                 preset,
                 refresh_bootstrap,
+                sync_project_config,
                 ..
             } => {
                 assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisorMinimal));
                 assert!(refresh_bootstrap);
+                assert!(!sync_project_config);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_init_sync_project_config_flag() {
+        let cli = Cli::parse_from(["mcp-subagent", "init", "--sync-project-config"]);
+        match cli.command {
+            Commands::Init {
+                preset,
+                sync_project_config,
+                ..
+            } => {
+                assert!(matches!(preset, InitPresetArg::ClaudeOpusSupervisorMinimal));
+                assert!(sync_project_config);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -4904,7 +5025,14 @@ mod tests {
         let (path, written) = ensure_bootstrap_bridge_config(dir.path(), false).expect("write");
         assert!(written);
         let content = fs::read_to_string(path).expect("read");
-        assert_eq!(content, bootstrap_bridge_config_template());
+        assert_eq!(
+            content,
+            project_bridge_config_template(
+                dir.path(),
+                &dir.path().join(BRIDGE_AGENTS_DIR_RELATIVE),
+                &dir.path().join(BRIDGE_STATE_DIR_RELATIVE),
+            )
+        );
     }
 
     #[test]
@@ -4934,7 +5062,54 @@ mod tests {
         assert_eq!(resolved, path);
         assert!(written);
         let content = fs::read_to_string(&resolved).expect("read");
-        assert_eq!(content, bootstrap_bridge_config_template());
+        assert_eq!(
+            content,
+            project_bridge_config_template(
+                dir.path(),
+                &dir.path().join(BRIDGE_AGENTS_DIR_RELATIVE),
+                &dir.path().join(BRIDGE_STATE_DIR_RELATIVE),
+            )
+        );
+    }
+
+    #[test]
+    fn writes_custom_root_bridge_config_when_requested() {
+        let dir = tempdir().expect("tempdir");
+        let custom_root = dir.path().join("custom-root");
+        let agents_dir = custom_root.join("agents");
+        let state_dir = custom_root.join(".mcp-subagent/state");
+
+        let (path, written) =
+            ensure_project_bridge_config(dir.path(), &agents_dir, &state_dir, false)
+                .expect("write custom bridge");
+        assert!(written);
+        assert_eq!(path, dir.path().join(".mcp-subagent/config.toml"));
+        let content = fs::read_to_string(path).expect("read");
+        assert!(content.contains("agents_dirs = [\"./custom-root/agents\"]"));
+        assert!(content.contains("state_dir = \"./custom-root/.mcp-subagent/state\""));
+    }
+
+    #[test]
+    fn bridge_config_preserves_external_absolute_paths_without_canonicalizing() {
+        let cwd = Path::new("/tmp/workspace");
+        let agents_dir = Path::new("/var/folders/example/custom-root/agents");
+        let state_dir = Path::new("/var/folders/example/custom-root/.mcp-subagent/state");
+
+        let content = project_bridge_config_template(cwd, agents_dir, state_dir);
+
+        assert!(content.contains("agents_dirs = [\"/var/folders/example/custom-root/agents\"]"));
+        assert!(content
+            .contains("state_dir = \"/var/folders/example/custom-root/.mcp-subagent/state\""));
+    }
+
+    #[test]
+    fn custom_root_gitignore_rules_only_cover_project_local_roots() {
+        let dir = tempdir().expect("tempdir");
+        let inside = project_root_gitignore_rules(dir.path(), &dir.path().join("custom-root"));
+        let outside = project_root_gitignore_rules(dir.path(), Path::new("/tmp/external-root"));
+
+        assert_eq!(inside, vec!["custom-root/".to_string()]);
+        assert!(outside.is_empty());
     }
 
     #[test]

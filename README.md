@@ -19,7 +19,7 @@ Rust implementation of an MCP subagent runtime aligned to the technical design b
 mcp-subagent mcp [AGENTS_DIR]
 mcp-subagent doctor [AGENTS_DIR] [--json]
 mcp-subagent validate [AGENTS_DIR]
-mcp-subagent init [--preset claude-opus-supervisor-minimal|claude-opus-supervisor|codex-primary-builder|gemini-frontend-team|local-ollama-fallback|minimal-single-provider] [--root-dir ... | --in-place] [--force] [--json]
+mcp-subagent init [--preset claude-opus-supervisor-minimal|claude-opus-supervisor|codex-primary-builder|gemini-frontend-team|local-ollama-fallback|minimal-single-provider] [--root-dir ... | --in-place] [--force] [--refresh-bootstrap] [--sync-project-config] [--json]
 mcp-subagent connect --host claude|codex|gemini [--run-host]
 mcp-subagent connect-snippet --host claude|codex|gemini
 mcp-subagent clean [--all] [--dry-run] [--json]
@@ -133,6 +133,7 @@ mcp-subagent connect --host claude
 ```
 
 If you explicitly want old in-place behavior, run `init --in-place`.
+If you intentionally place bootstrap files somewhere else, add `--sync-project-config` once so the current project root points at that custom root without repeating `--agents-dir/--state-dir`.
 
 If you only want to print and inspect the host command without executing it, use:
 
@@ -150,6 +151,14 @@ mcp-subagent validate
 mcp-subagent doctor --json
 mcp-subagent connect --host claude
 mcp-subagent list-agents
+```
+
+Custom bootstrap root with project bridge sync:
+
+```bash
+mcp-subagent init --root-dir ../shared/mcp-subagent-bootstrap --sync-project-config
+mcp-subagent validate
+mcp-subagent doctor --json
 ```
 
 If you only want to repair drifted built-in bootstrap templates without clobbering custom agents, run:

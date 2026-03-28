@@ -148,6 +148,9 @@ export MCP_SUBAGENT_GEMINI_BIN="$FAKE_GEMINI_BIN"
 BOOTSTRAP_ROOT="$TMP_DIR/bootstrap"
 BOOTSTRAP_BACKEND="$BOOTSTRAP_ROOT/agents/backend-coder.agent.toml"
 BOOTSTRAP_CUSTOM="$BOOTSTRAP_ROOT/agents/custom.agent.toml"
+SYNC_PROJECT="$TMP_DIR/project-sync"
+SYNC_ROOT="$TMP_DIR/custom-root-sync"
+mkdir -p "$SYNC_PROJECT"
 
 run_cmd() {
   cargo run --quiet -- \
@@ -190,6 +193,33 @@ if grep -Fq 'active_plan' "$BOOTSTRAP_BACKEND"; then
   exit 1
 fi
 grep -Fq 'name = "custom-agent"' "$BOOTSTRAP_CUSTOM"
+
+echo "[smoke-v08] custom root without sync keeps project config untouched"
+(
+  cd "$SYNC_PROJECT"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- \
+    init --preset codex-primary-builder --root-dir "$SYNC_ROOT" --json >"$TMP_DIR/init_custom_root_no_sync.json"
+)
+if [[ -e "$SYNC_PROJECT/.mcp-subagent/config.toml" ]]; then
+  echo "[smoke-v08] custom-root init wrote project config without --sync-project-config"
+  exit 1
+fi
+
+echo "[smoke-v08] custom root with sync writes project config"
+(
+  cd "$SYNC_PROJECT"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- \
+    init --preset codex-primary-builder --root-dir "$SYNC_ROOT" --sync-project-config --force --json >"$TMP_DIR/init_custom_root_sync.json"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- validate >"$TMP_DIR/sync_project_validate.txt"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- doctor --json >"$TMP_DIR/sync_project_doctor.json"
+)
+grep -Fq 'agents_dirs = ["'"$SYNC_ROOT"'/agents"]' "$SYNC_PROJECT/.mcp-subagent/config.toml"
+grep -Fq 'state_dir = "'"$SYNC_ROOT"'/.mcp-subagent/state"' "$SYNC_PROJECT/.mcp-subagent/config.toml"
+grep -Eq '"agents_loaded"[[:space:]]*:[[:space:]]*3' "$TMP_DIR/sync_project_doctor.json"
+if [[ -e "$SYNC_PROJECT/.gitignore" ]]; then
+  echo "[smoke-v08] external custom-root sync should not write project .gitignore"
+  exit 1
+fi
 
 echo "[smoke-v08] validate"
 run_cmd validate >"$TMP_DIR/validate.txt"

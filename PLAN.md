@@ -6,6 +6,13 @@
 
 ## Execution Strategy (v0.10 Current)
 
+### Batch V1.0-P3 - Custom Root Project Bridge Sync（已完成）
+
+目标：解决 `init --root-dir <custom-root>` 后项目根命令面仍然不知道这个 root 的问题，补一个显式的 project bridge sync 入口，让 `validate/doctor/list-agents` 等命令能无额外 flags 指向 custom root，同时保持当前默认行为不变。
+依赖顺序：`T-157(Completed)`。
+回滚策略：仅新增显式 `init --sync-project-config` 路径，不改变默认 bootstrap init / refresh 的现有行为；必要时可回退该 flag 与对应 bridge-config 写入逻辑，不影响 runtime 主链。
+风险与控制：自动改写项目 config 可能造成意外指向外部 root；通过只在显式 `--sync-project-config` 时启用、并在 notes 中写明 agents/state 指向，降低惊讶面。若 custom root 在项目内，gitignore 规则需避免过宽匹配；通过仅追加精确相对路径规则控制影响范围。
+
 ### Batch V1.0-P2 - Generated Root Manifest + Exact Repair Command（已完成）
 
 目标：把 bootstrap drift 的识别与修复从“默认 `.mcp-subagent/bootstrap` 路径可用”推广到任意 `init` 生成的 root，并让 `doctor` 输出精确可执行的 repair command，而不是只给泛泛建议。这样 `init --root-dir <custom-root>` 场景下的 drift 也能被稳定识别、稳定修复。
