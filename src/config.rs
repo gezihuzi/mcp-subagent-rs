@@ -5,7 +5,10 @@ use std::{
 
 use serde::Deserialize;
 
-use crate::error::{McpSubagentError, Result};
+use crate::{
+    cwd::resolve_cli_cwd,
+    error::{McpSubagentError, Result},
+};
 
 const DEFAULT_AGENTS_DIR: &str = "./agents";
 const DEFAULT_STATE_DIR: &str = ".mcp-subagent/state";
@@ -99,7 +102,7 @@ fn default_path_vec() -> Vec<PathBuf> {
 
 fn resolve_config_path(cli_path: Option<&PathBuf>) -> PathBuf {
     let env_config = env::var(ENV_CONFIG_PATH).ok();
-    let cwd = env::current_dir().ok();
+    let cwd = resolve_cli_cwd().ok();
     let home = env::var("HOME").ok().map(PathBuf::from);
     resolve_config_path_with(
         cli_path,

@@ -149,11 +149,14 @@ BOOTSTRAP_ROOT="$TMP_DIR/bootstrap"
 BOOTSTRAP_BACKEND="$BOOTSTRAP_ROOT/agents/backend-coder.agent.toml"
 BOOTSTRAP_CUSTOM="$BOOTSTRAP_ROOT/agents/custom.agent.toml"
 BOOTSTRAP_PROJECT="$TMP_DIR/project-bootstrap-default"
+LEXICAL_PROJECT_TARGET="$TMP_DIR/project-lexical-target"
+LEXICAL_PROJECT_LINK="$TMP_DIR/project-lexical-link"
 SYNC_PROJECT="$TMP_DIR/project-sync"
 SYNC_ROOT="$TMP_DIR/custom-root-sync"
 SYNC_PROJECT_INIT="$TMP_DIR/project-sync-during-init"
 SYNC_INIT_ROOT="$TMP_DIR/custom-root-sync-during-init"
-mkdir -p "$BOOTSTRAP_PROJECT" "$SYNC_PROJECT" "$SYNC_PROJECT_INIT"
+mkdir -p "$BOOTSTRAP_PROJECT" "$LEXICAL_PROJECT_TARGET" "$SYNC_PROJECT" "$SYNC_PROJECT_INIT"
+ln -s "$LEXICAL_PROJECT_TARGET" "$LEXICAL_PROJECT_LINK"
 
 run_cmd() {
   cargo run --quiet -- \
@@ -184,6 +187,18 @@ echo "[smoke-v08] default bootstrap init reports bridge config and gitignore"
 )
 grep -Eq '"[^"]*/project-bootstrap-default/\.mcp-subagent/config\.toml"' "$TMP_DIR/init_default_bootstrap.json"
 grep -Eq '"[^"]*/project-bootstrap-default/\.gitignore"' "$TMP_DIR/init_default_bootstrap.json"
+
+echo "[smoke-v08] symlink cwd preserves lexical paths in init, doctor, and README"
+(
+  cd "$LEXICAL_PROJECT_LINK"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- init --json >"$TMP_DIR/init_lexical_cwd.json"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -- doctor --json >"$TMP_DIR/doctor_lexical_cwd.json"
+)
+grep -Fq "\"root\": \"$LEXICAL_PROJECT_LINK/.mcp-subagent/bootstrap\"" "$TMP_DIR/init_lexical_cwd.json"
+grep -Fq "\"$LEXICAL_PROJECT_LINK/.mcp-subagent/config.toml\"" "$TMP_DIR/init_lexical_cwd.json"
+grep -Fq "\"cwd\": \"$LEXICAL_PROJECT_LINK\"" "$TMP_DIR/doctor_lexical_cwd.json"
+grep -Fq "\"config_path\": \"$LEXICAL_PROJECT_LINK/.mcp-subagent/config.toml\"" "$TMP_DIR/doctor_lexical_cwd.json"
+grep -Fq "$LEXICAL_PROJECT_LINK/.mcp-subagent/bootstrap/agents" "$LEXICAL_PROJECT_LINK/.mcp-subagent/bootstrap/README.mcp-subagent.md"
 
 echo "[smoke-v08] doctor detects generated-root drift"
 cargo run --quiet -- \

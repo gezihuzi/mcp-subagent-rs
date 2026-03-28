@@ -4055,3 +4055,25 @@
   - `bash scripts/smoke_v08.sh` 通过。
   - `cargo test --workspace` 通过（227 + 80 + 3 全通过）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-161 V1.0-P7-LexicalCwdPathStability (Completed 2026-03-28)
+
+任务：让 CLI 在 shell 处于 symlink/alias 路径时，优先保留安全的词法 cwd，而不是把用户可见路径无故折成物理 realpath。
+验收标准：
+
+1. 新增统一 cwd helper：仅当 `PWD` 为 absolute 且与 `current_dir()` canonical 后指向同一目录时，CLI 才采用 `PWD` 作为词法 cwd；否则回退 `current_dir()`。
+2. `init --json`、`doctor --json` 与 generated README connect snippets 这类用户可见路径链路改用该 helper，symlink cwd 场景下输出路径保留 shell 词法前缀，不再无故漂移到物理路径。
+3. 现有路径安全语义保持不变：外部 root 仍不做额外 canonicalize，非法/伪造 `PWD` 不会污染结果。
+4. 回归至少覆盖 helper 的 match/mismatch 行为，以及一条 symlink cwd 下的真实 CLI/smoke 路径断言。
+5. `bash scripts/smoke_v08.sh`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - 新增统一 `resolve_cli_cwd()` helper：只有 `PWD` 为 absolute 且 canonical 后与 `current_dir()` 指向同一目录时，才采用 shell 词法路径；其余情况全部回退真实 cwd。
+  - `init --json`、`doctor --json`、generated README connect snippets，以及 runtime config 的 project-config 发现路径，已统一接入该 helper；symlink cwd 场景下，用户可见路径不再无故漂移到物理 realpath。
+  - 现有路径安全语义保持不变：外部 root 仍不做额外 canonicalize，relative/伪造 `PWD` 不会污染输出。
+  - 已补 helper 单测覆盖 missing/relative、mismatch、symlink-match 三类行为；`scripts/smoke_v08.sh` 新增 symlink cwd 真实链路，断言 `init --json`、`doctor --json` 和 generated README 都保留词法路径。
+- 已验证：
+  - `bash scripts/smoke_v08.sh` 通过。
+  - `cargo test --workspace` 通过（230 + 80 + 3 全通过）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

@@ -6,6 +6,13 @@
 
 ## Execution Strategy (v0.10 Current)
 
+### Batch V1.0-P7 - Lexical Cwd Path Stability（已完成）
+
+目标：消除 CLI 在 symlink/project alias 场景下把 shell 里的词法路径无故折成物理路径的输出漂移，让 `init --json`、`doctor --json`、generated README connect snippets 等面向用户或 host 的路径，优先保留当前 shell 的 `PWD` 词法形式，而不是回退成 `/private/...` 这类底层真实路径。
+依赖顺序：`T-161(Completed)`。
+回滚策略：只新增“优先采用安全 `PWD`”的 cwd 解析 helper，并替换少数用户可见输出链路的 cwd 来源；若发现兼容性问题，可单独回退 helper 接入点，不影响 runtime 主执行链。
+风险与控制：直接信任 `PWD` 会有伪造风险；通过仅在 `PWD` 为 absolute 且 `canonicalize(PWD) == canonicalize(current_dir)` 时才采用词法路径，其他情况一律回退 `current_dir()`，控制语义偏移。
+
 ### Batch V1.0-P6 - Init Report Bridge File Accounting（已完成）
 
 目标：补齐 `init --json` 在 project bridge 路径上的文件变更可见性，让 `created_files/overwritten_files` 不再只覆盖 generated root 内文件，而是能稳定反映项目根 bridge config 与 `.gitignore` 的实际写入结果，方便自动化与 host 侧消费。

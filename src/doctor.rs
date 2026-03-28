@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::{
     connect::shell_escape_path,
+    cwd::resolve_cli_cwd,
     init::{builtin_agent_template, is_generated_root, preset_catalog_version},
     probe::{ProviderProbe, ProviderProber},
     spec::{
@@ -155,7 +156,7 @@ pub fn build_doctor_report(
     state_dir: PathBuf,
     prober: &dyn ProviderProber,
 ) -> DoctorReport {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = resolve_cli_cwd().unwrap_or_else(|_| PathBuf::from("."));
     build_doctor_report_for_cwd_with_home(cwd, agents_dirs, state_dir, prober, home_dir())
 }
 

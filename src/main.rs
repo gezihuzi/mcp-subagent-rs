@@ -14,6 +14,7 @@ use mcp_subagent::{
         build_connect_invocation, build_connect_snippet, build_host_launch_invocation,
         resolve_connect_snippet_paths, ConnectHost, ConnectInvocation,
     },
+    cwd::resolve_cli_cwd,
     doctor::{build_doctor_report, render_doctor_report},
     init::{
         init_workspace, refresh_bootstrap_workspace, sync_project_bridge_workspace, InitPreset,
@@ -3784,7 +3785,7 @@ fn init_command(options: InitCommandOptions) -> ExitCode {
     let use_default_bootstrap_root = root_dir.is_none() && !in_place;
     let sync_project_bridge =
         use_default_bootstrap_root || sync_project_config || sync_project_config_only;
-    let cwd = match std::env::current_dir() {
+    let cwd = match resolve_cli_cwd() {
         Ok(path) => path,
         Err(err) => {
             eprintln!("init failed: unable to resolve current directory: {err}");
@@ -4174,7 +4175,7 @@ fn resolve_connect_paths(
         ));
     };
 
-    let cwd = match std::env::current_dir() {
+    let cwd = match resolve_cli_cwd() {
         Ok(path) => path,
         Err(err) => {
             return Err(format!(

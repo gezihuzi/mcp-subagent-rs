@@ -1,5 +1,6 @@
 pub mod config;
 pub mod connect;
+pub mod cwd;
 pub mod doctor;
 pub mod error;
 pub mod init;

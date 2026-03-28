@@ -10,6 +10,7 @@ use crate::{
     connect::{
         build_connect_snippet, resolve_connect_snippet_paths, ConnectHost, ConnectSnippetPaths,
     },
+    cwd::resolve_cli_cwd,
     error::Result,
     spec::registry::load_agent_specs_from_dirs,
 };
@@ -311,7 +312,7 @@ fn init_with_preset(root: &Path, preset: InitPreset, force: bool) -> Result<Init
     write(&plan_path, &plan_template())?;
     write(&config_path, &config_template())?;
     sync_generated_root_manifest(&root, Some(preset.as_str()))?;
-    let cwd = std::env::current_dir()?;
+    let cwd = resolve_cli_cwd()?;
     let binary = std::env::current_exe()?;
     let connect_paths = resolve_connect_snippet_paths(
         &cwd,
@@ -885,6 +886,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::connect::{build_connect_snippet, resolve_connect_snippet_paths, ConnectHost};
+    use crate::cwd::resolve_cli_cwd;
 
     use super::{
         generated_root_manifest_path, init_workspace, is_generated_root,
@@ -985,7 +987,7 @@ mod tests {
         assert!(readme.contains("codex mcp add mcp-subagent --"));
         assert!(readme.contains("gemini mcp add mcp-subagent"));
 
-        let cwd = std::env::current_dir().expect("cwd");
+        let cwd = resolve_cli_cwd().expect("cwd");
         let binary = std::env::current_exe().expect("current exe");
         let paths = resolve_connect_snippet_paths(
             &cwd,
