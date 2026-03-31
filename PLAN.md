@@ -27,6 +27,13 @@
 回滚策略：仅新增 adapter/render 与 alias，不修改 `mcp-subagent.result.v1` 主契约；若渲染效果不稳定，可关闭 profile 级渲染开关回退到默认 summary。
 风险与控制：若把渲染逻辑侵入 summary contract 会污染通用 runtime；通过严格分层在 adapter 层完成格式化，确保多 provider 兼容性。
 
+### Batch V1.2-P0 - Permission Decision + Resume（已完成）
+
+目标：把 `permission.requested` 从“直接失败”收口为“等待用户决策后可继续”的闭环语义，补齐 `approve/deny` 工具与同 handle 续跑能力，解决 direct workspace 权限阻塞下的无感续跑体验。
+依赖顺序：`T-169 -> T-170`。
+回滚策略：保持既有 run artifact/result 契约不变，仅扩展 runtime state（pending permission context）与 MCP tool 面；若续跑语义不稳定，可回退 `approve/deny` 工具并恢复旧失败路径。
+风险与控制：权限等待状态若不清理会造成伪阻塞；通过 `pending_permission_runs` 生命周期管理、`permission.approved/permission.denied` 事件、以及 cancel/terminal 分支统一清理避免悬挂状态。
+
 ## Execution Strategy (v0.10 Current)
 
 ### Batch V1.0-P11 - Release Branch Cut（已完成）

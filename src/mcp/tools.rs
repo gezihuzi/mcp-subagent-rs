@@ -972,9 +972,11 @@ async fn execute_pending_permission_run(
                 memory_resolution,
                 _workspace_cleanup: workspace_cleanup,
             } = dispatch;
-            if !(dispatch_result.stdout.trim().is_empty() && dispatch_result.stderr.trim().is_empty())
+            if !(dispatch_result.stdout.trim().is_empty()
+                && dispatch_result.stderr.trim().is_empty())
             {
-                let existing_events = load_run_events(&state_dir, &task_handle_id).unwrap_or_default();
+                let existing_events =
+                    load_run_events(&state_dir, &task_handle_id).unwrap_or_default();
                 let has_first_output = has_event_named(&existing_events, "provider.first_output");
                 let has_stdout_delta = has_event_named(&existing_events, "provider.stdout.delta");
                 let has_stderr_delta = has_event_named(&existing_events, "provider.stderr.delta");
@@ -1153,7 +1155,8 @@ async fn execute_pending_permission_run(
                 partial_summary: Some(err.message.clone().into_owned()),
                 usage: UsageStats::ZERO,
             });
-            let (artifact_index, artifacts) = build_runtime_artifacts(&failure_outcome, "", "", None);
+            let (artifact_index, artifacts) =
+                build_runtime_artifacts(&failure_outcome, "", "", None);
             record.status = RunPhase::Failed;
             record.updated_at = OffsetDateTime::now_utc();
             append_status_if_terminal(&mut record.status_history, RunPhase::Failed);
@@ -2048,12 +2051,26 @@ impl McpSubagentServer {
 
                 let mut guard = state.lock().await;
                 guard.tasks.remove(&task_handle_id);
+                let is_cancelled = guard
+                    .runs
+                    .get(&task_handle_id)
+                    .is_some_and(|record| matches!(record.status, RunPhase::Cancelled));
+                if is_cancelled {
+                    return;
+                }
+                guard.pending_permission_runs.insert(
+                    task_handle_id.clone(),
+                    PendingPermissionRun {
+                        spec: loaded.spec.clone(),
+                        task_spec: task_spec.clone(),
+                        hints: hints.clone(),
+                        lock_keys: lock_keys.clone(),
+                        probe_result: probe_snapshot.clone(),
+                    },
+                );
                 let Some(record) = guard.runs.get_mut(&task_handle_id) else {
                     return;
                 };
-                if matches!(record.status, RunPhase::Cancelled) {
-                    return;
-                }
                 record.status = RunPhase::Running;
                 record.updated_at = OffsetDateTime::now_utc();
                 record.error_message = None;
@@ -2067,16 +2084,6 @@ impl McpSubagentServer {
                 record.usage = None;
                 record.permission_request =
                     Some(PermissionRequestRecord::from_denied(&permission_denied));
-                guard.pending_permission_runs.insert(
-                    task_handle_id.clone(),
-                    PendingPermissionRun {
-                        spec: loaded.spec.clone(),
-                        task_spec: task_spec.clone(),
-                        hints: hints.clone(),
-                        lock_keys: lock_keys.clone(),
-                        probe_result: probe_snapshot.clone(),
-                    },
-                );
                 let _ = append_run_event(
                     &state_dir,
                     &task_handle_id,
@@ -2893,6 +2900,63 @@ mod tests {
             ]
         );
         assert_eq!(current.as_deref(), Some("permission_required"));
+    }
+
+    #[test]
+    fn collect_wait_reasons_clears_permission_after_approval() {
+        let events = vec![
+            RunEventOutput {
+                seq: Some(1),
+                event: "permission.requested".to_string(),
+                timestamp: "2026-03-25T00:00:00Z".to_string(),
+                state: None,
+                phase: None,
+                source: None,
+                message: None,
+                detail: serde_json::json!({}),
+            },
+            RunEventOutput {
+                seq: Some(2),
+                event: "permission.approved".to_string(),
+                timestamp: "2026-03-25T00:00:01Z".to_string(),
+                state: None,
+                phase: None,
+                source: None,
+                message: None,
+                detail: serde_json::json!({}),
+            },
+        ];
+        let (reasons, current) = collect_wait_reasons(&events);
+        assert!(reasons.is_empty(), "{reasons:?}");
+        assert!(current.is_none());
+    }
+
+    #[test]
+    fn classify_block_reason_from_events_stops_after_permission_approved() {
+        let events = vec![
+            RunEventOutput {
+                seq: Some(1),
+                event: "permission.requested".to_string(),
+                timestamp: "2026-03-25T00:00:00Z".to_string(),
+                state: None,
+                phase: None,
+                source: None,
+                message: None,
+                detail: serde_json::json!({}),
+            },
+            RunEventOutput {
+                seq: Some(2),
+                event: "permission.approved".to_string(),
+                timestamp: "2026-03-25T00:00:01Z".to_string(),
+                state: None,
+                phase: None,
+                source: None,
+                message: None,
+                detail: serde_json::json!({}),
+            },
+        ];
+        let reason = classify_block_reason_from_events(&events, true);
+        assert_eq!(reason, None);
     }
 
     #[test]

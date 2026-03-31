@@ -4240,3 +4240,32 @@
 - 已验证：
   - `cargo test --workspace` 通过（lib 249 + bin 85 + e2e 3）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-170 V1.2-P0-PermissionDecisionAndResume (Completed 2026-03-31)
+
+任务：把 direct workspace 权限阻塞路径从“立即失败”升级为“等待批准/拒绝后可恢复”，补齐 MCP `approve/deny` 决策工具与同 handle 续跑语义。
+验收标准：
+
+1. `permission.requested` 触发时，run 不再直接标记 `failed`，而是进入可观测的阻塞态并保留待续跑上下文。
+2. MCP 新增 `approve_permission` 与 `deny_permission` 工具：
+   - `approve_permission`：恢复同一个 handle 的异步执行链；
+   - `deny_permission`：将 run 标记 `failed`，并留下明确拒绝原因。
+3. `watch/status/stats` 阻塞诊断在批准后不会持续误报 `permission_required`；建议文案包含 approve/deny 路径。
+4. 不修改 `mcp-subagent.result.v1` 契约，仅扩展 runtime state 与 MCP tool 面。
+5. 新增回归测试覆盖 approve 恢复、deny 失败与事件序列，`cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - runtime state 已新增 `pending_permission_runs` 与 `permission_request` 记录，权限阻塞时保留续跑上下文而非立即失败。
+  - 异步执行路径中 `permission.requested` 现改为 `run.blocked`，并写入待批准上下文；`cancel/terminal` 分支统一清理 pending 状态，避免悬挂。
+  - MCP 新增 `approve_permission` / `deny_permission` 两个工具：
+    - approve 会写入 `permission.approved` 事件并恢复原 handle 执行；
+    - deny 会写入 `permission.denied` 与 `run.failed` 事件并结束 run。
+  - 阻塞分类与等待原因收敛：收到 `permission.approved/denied` 后不再继续回报历史 `permission_required`；建议文案加入 approve/deny 引导。
+  - 已新增回归测试：
+    - `approve_permission_resumes_pending_direct_workspace_run`
+    - `deny_permission_marks_pending_run_failed`
+    - 事件分类/等待原因清理单测（approved 后清除 permission wait）。
+- 已验证：
+  - `cargo test --workspace` 通过（lib 253 + bin 85 + e2e 3）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
