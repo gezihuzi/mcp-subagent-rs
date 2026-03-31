@@ -993,53 +993,53 @@ async fn execute_pending_permission_run(
     ));
     let dispatch = loop {
         tokio::select! {
-            output = &mut dispatch_future => break output,
-            _ = tokio::time::sleep(Duration::from_secs(2)) => {
-                let elapsed_ms = dispatch_started_at.elapsed().as_millis() as u64;
-                if !first_output_seen {
-                    if let Ok(events) = load_run_events(&state_dir, &task_handle_id) {
-                        first_output_seen = has_event_named(&events, "provider.first_output");
-                    }
-                }
-                let heartbeat_phase = if first_output_seen {
-                    "running"
-                } else {
-                    "provider_boot"
-                };
-                let _ = append_run_event(
-                    &state_dir,
-                    &task_handle_id,
-                    RuntimeEventInput {
-                        event: "provider.heartbeat",
-                        state: "running",
-                        phase: heartbeat_phase,
-                        source: "runtime",
-                        message: "still alive",
-                        detail: json!({
-                            "elapsed_ms": elapsed_ms,
-                        }),
-                    },
-                );
-                if !first_output_warned
-                    && !first_output_seen
-                    && elapsed_ms >= FIRST_OUTPUT_WARN_AFTER_SECS.saturating_mul(1000)
-                {
-                    first_output_warned = true;
-                    let _ = append_run_event(
-                        &state_dir,
-                        &task_handle_id,
-                        RuntimeEventInput {
-                            event: "provider.first_output.warning",
-                            state: "running",
-                            phase: "provider_boot",
-                            source: "runtime",
-                            message: "provider has not produced output yet",
-                            detail: json!({
-                                "elapsed_ms": elapsed_ms,
-                                "warn_after_secs": FIRST_OUTPUT_WARN_AFTER_SECS,
-                            }),
-                        },
-                    );
+                    output = &mut dispatch_future => break output,
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                        let elapsed_ms = dispatch_started_at.elapsed().as_millis() as u64;
+                        if !first_output_seen {
+                            if let Ok(events) = load_run_events(&state_dir, &task_handle_id) {
+                                first_output_seen = has_event_named(&events, "provider.first_output");
+                            }
+                        }
+                        let heartbeat_phase = if first_output_seen {
+                            "running"
+                        } else {
+                            "provider_boot"
+                        };
+                        let _ = append_run_event(
+                            &state_dir,
+                            &task_handle_id,
+                            RuntimeEventInput {
+                                event: "provider.heartbeat",
+                                state: "running",
+                                phase: heartbeat_phase,
+                                source: "runtime",
+                                message: "still alive",
+                                detail: json!({
+                                    "elapsed_ms": elapsed_ms,
+                                }),
+                            },
+                        );
+                        if !first_output_warned
+                            && !first_output_seen
+                            && elapsed_ms >= FIRST_OUTPUT_WARN_AFTER_SECS.saturating_mul(1000)
+                        {
+                            first_output_warned = true;
+                            let _ = append_run_event(
+                                &state_dir,
+                                &task_handle_id,
+                                RuntimeEventInput {
+                                    event: "provider.first_output.warning",
+                                    state: "running",
+                                    phase: "provider_boot",
+                                    source: "runtime",
+                                    message: "provider has not produced output yet",
+                                    detail: json!({
+                                        "elapsed_ms": elapsed_ms,
+                                        "warn_after_secs": FIRST_OUTPUT_WARN_AFTER_SECS,
+                                    }),
+                                },
+                            );
                 }
             }
         }
@@ -1282,6 +1282,62 @@ async fn execute_pending_permission_run(
     if let Err(err) = persist_run_record(&state_dir, &task_handle_id, record) {
         record.error_message = Some(format!("failed to persist run state: {err}"));
     }
+}
+
+fn rebuild_pending_permission_run(
+    server: &McpSubagentServer,
+    handle_id: &str,
+    record: &RunRecord,
+) -> std::result::Result<PendingPermissionRun, ErrorData> {
+    let spec_name = record
+        .spec_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.name.clone())
+        .ok_or_else(|| {
+            ErrorData::invalid_params(
+                format!("run `{handle_id}` is missing spec snapshot; cannot resume"),
+                None,
+            )
+        })?;
+    let mut loaded = server
+        .load_specs()?
+        .into_iter()
+        .find(|item| item.spec.core.name == spec_name)
+        .ok_or_else(|| {
+            ErrorData::resource_not_found(
+                format!(
+                    "agent spec `{spec_name}` required by run `{handle_id}` is no longer available"
+                ),
+                None,
+            )
+        })?;
+    loaded.spec.runtime.working_dir_policy = WorkingDirPolicy::Direct;
+    let lock_keys = server.conflict_lock_keys(&loaded.spec, &record.task_spec)?;
+    let probe_result = if let Some(snapshot) = record.probe_result.clone() {
+        snapshot
+    } else {
+        let probe = server.probe_provider(&loaded.spec.core.provider);
+        if !probe.is_available() {
+            let mut details = vec![format!("status={}", probe.status)];
+            if let Some(version) = &probe.version {
+                details.push(format!("version={version}"));
+            }
+            details.extend(probe.notes.clone());
+            return Err(ErrorData::invalid_params(
+                provider_unavailable_message(&loaded.spec.core.provider, &details),
+                None,
+            ));
+        }
+        build_probe_result_snapshot(&probe)
+    };
+
+    Ok(PendingPermissionRun {
+        spec: loaded.spec,
+        task_spec: record.task_spec.clone(),
+        hints: record.hints.clone(),
+        lock_keys,
+        probe_result,
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2557,6 +2613,7 @@ impl McpSubagentServer {
         let runtime_state = self.runtime_state();
         let state_dir = self.state_dir().to_path_buf();
         let handle_id = input.handle_id;
+        let _ = self.get_or_load_run_record(&handle_id).await?;
 
         let pending = {
             let mut state = runtime_state.lock().await;
@@ -2577,21 +2634,18 @@ impl McpSubagentServer {
             if let Some(task) = state.tasks.remove(&handle_id) {
                 task.abort();
             }
-            let pending = state.pending_permission_runs.remove(&handle_id).ok_or_else(|| {
-                ErrorData::invalid_params(
-                    format!(
-                        "run `{handle_id}` is not waiting for permission decision or context expired"
-                    ),
-                    None,
-                )
-            })?;
-            let record = state.runs.get_mut(&handle_id).expect("run must exist");
-            if record.permission_request.is_none() {
+            let record_snapshot = state.runs.get(&handle_id).cloned().expect("run must exist");
+            if record_snapshot.permission_request.is_none() {
                 return Err(ErrorData::invalid_params(
                     format!("run `{handle_id}` has no pending permission request"),
                     None,
                 ));
             }
+            let pending = match state.pending_permission_runs.remove(&handle_id) {
+                Some(pending) => pending,
+                None => rebuild_pending_permission_run(self, &handle_id, &record_snapshot)?,
+            };
+            let record = state.runs.get_mut(&handle_id).expect("run must exist");
             record.updated_at = OffsetDateTime::now_utc();
             record.error_message = None;
             record.permission_request = None;
@@ -2635,6 +2689,7 @@ impl McpSubagentServer {
         Parameters(input): Parameters<DenyPermissionInput>,
     ) -> std::result::Result<Json<PermissionDecisionOutput>, ErrorData> {
         let runtime_state = self.runtime_state();
+        let _ = self.get_or_load_run_record(&input.handle_id).await?;
         let mut state = runtime_state.lock().await;
         let handle_id = input.handle_id;
         let deny_reason = input
@@ -2845,11 +2900,15 @@ impl McpSubagentServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_watch_advice, classify_block_reason, classify_block_reason_from_events,
-        classify_block_reason_from_text, collect_wait_reasons, current_phase_age_ms,
-        detect_provider_wait_signal, parse_rfc3339, RunEventOutput,
+        build_permission_requested_detail, build_watch_advice, classify_block_reason,
+        classify_block_reason_from_events, classify_block_reason_from_text, collect_wait_reasons,
+        current_phase_age_ms, detect_provider_wait_signal, parse_rfc3339, RunEventOutput,
     };
-    use crate::runtime::dispatcher::RunPhase;
+    use crate::runtime::{
+        dispatcher::RunPhase,
+        permission::{PermissionDenied, PermissionOperation},
+    };
+    use std::path::PathBuf;
 
     #[test]
     fn detect_provider_wait_signal_matches_trust_prompt() {
@@ -3115,5 +3174,30 @@ mod tests {
                 .any(|item| item.contains("MCP_SUBAGENT_ALLOWED_PATHS")),
             "{advice:?}"
         );
+    }
+
+    #[test]
+    fn permission_requested_detail_uses_stable_structured_schema() {
+        let detail = build_permission_requested_detail(&PermissionDenied {
+            operation: PermissionOperation::Write,
+            requested_path: PathBuf::from("/tmp/requested"),
+            allowed_paths: vec![
+                PathBuf::from("/tmp/allowed-a"),
+                PathBuf::from("/tmp/allowed-b"),
+            ],
+            reason: "outside allowlist".to_string(),
+        });
+        assert_eq!(detail["kind"], "direct_workspace");
+        assert_eq!(detail["status"], "requested");
+        assert_eq!(detail["request"]["operation"], "write");
+        assert_eq!(detail["request"]["working_dir_policy"], "direct");
+        assert_eq!(
+            detail["decision"]["tools"],
+            serde_json::json!(["approve_permission", "deny_permission"])
+        );
+        assert_eq!(detail["decision"]["on_approve_status"], "running");
+        assert_eq!(detail["decision"]["on_deny_status"], "failed");
+        assert_eq!(detail["hints"]["env_var"], "MCP_SUBAGENT_ALLOWED_PATHS");
+        assert_eq!(detail["hints"]["resume_mode"], "same_handle");
     }
 }

@@ -4809,11 +4809,18 @@ async fn approve_permission(cfg: RuntimeConfig, handle_id: String, json: bool) -
         .await
     {
         Ok(result) => {
+            let output = result.0;
             if json {
-                print_json(&result.0);
+                print_json(&output);
             } else {
-                println!("handle_id: {}", result.0.handle_id);
-                println!("status: {}", result.0.status);
+                println!("handle_id: {}", output.handle_id);
+                println!("status: {}", output.status);
+            }
+            if cli_spawn_waits_for_completion() {
+                eprintln!(
+                    "approve accepted; keeping CLI process alive until resumed run settles (set MCP_SUBAGENT_CLI_SPAWN_ACCEPT_ONLY=1 for immediate return)"
+                );
+                server.wait_for_run(&output.handle_id).await;
             }
             ExitCode::SUCCESS
         }

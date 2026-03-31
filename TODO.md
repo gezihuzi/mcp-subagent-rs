@@ -4269,3 +4269,27 @@
 - 已验证：
   - `cargo test --workspace` 通过（lib 253 + bin 85 + e2e 3）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-171 V1.2-P1-ApproveDenyCliAndPermissionSchemaSmoke (Completed 2026-03-31)
+
+任务：按“1/2/3”顺序完成权限体验闭环：新增 CLI `approve/deny` 命令、统一 `permission.requested` 事件 detail 结构（关键字段枚举化）、补一条 codex direct workspace approve 端到端 smoke。  
+验收标准：
+
+1. CLI 新增 `approve <handle_id>` 与 `deny <handle_id> [--reason]` 命令，支持 `--json` 输出，并复用现有 MCP `approve_permission/deny_permission` 工具链。
+2. `permission.requested` detail 收口为稳定结构：`kind/status/request/decision/hints`，其中关键决策字段通过枚举序列化，不再散落自由字符串。
+3. `approve/deny` 在新进程中也可对已持久化 run 生效（不依赖同进程内存态），`approve` 后同 handle 可继续执行并落盘终态。
+4. 新增端到端脚本 `scripts/smoke_v12_permission.sh`，覆盖 `spawn -> permission_required -> approve -> wait succeeded`，并断言修改直接落在目标工作目录与权限事件链。
+5. 新增/更新回归测试覆盖 CLI 解析、permission detail schema、跨 server 重启后的 approve 恢复路径；`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`bash scripts/smoke_v12_permission.sh` 全通过。
+完成记录：
+
+- 已完成：
+  - `src/main.rs` 新增 `Commands::Approve/Commands::Deny`，补齐 CLI 分发与 `approve_permission/deny_permission` 执行函数；新增解析测试 `parses_approve_command_flags`、`parses_deny_command_flags`。
+  - `approve` CLI 默认增加 keepalive 语义（可通过 `MCP_SUBAGENT_CLI_SPAWN_ACCEPT_ONLY=1` 关闭），确保续跑任务在 CLI 退出前完成落盘，避免“批准后无进度”。
+  - `src/mcp/tools.rs` 新增 `build_permission_requested_detail` 与结构化 detail 类型，`permission.requested` 改为统一 schema（`kind/status/request/decision/hints`），并用枚举表达 `decision.tools`、`resume_mode`、`request.operation`、`working_dir_policy`、`on_approve_status/on_deny_status` 等关键字段。
+  - `approve_permission`/`deny_permission` 新增持久化 run 预加载；当 pending context 丢失时，`approve_permission` 可基于 run snapshot 重建 `PendingPermissionRun`（含 spec、lock keys、probe snapshot）并继续执行。
+  - 新增 `scripts/smoke_v12_permission.sh`：使用 fake codex runner 验证 direct workspace 权限申请、批准续跑、结果成功、文件直接写回目标目录、以及 `permission.requested + permission.approved` 事件与新 detail schema。
+  - `src/mcp/server.rs` 增补 `approve_permission_can_resume_after_server_restart`，覆盖跨 server 实例重启后的批准续跑行为；并在既有 approve 测试中断言新 permission detail schema 字段。
+- 已验证：
+  - `cargo test --workspace` 通过（lib 255 + bin 87 + e2e 3）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+  - `bash scripts/smoke_v12_permission.sh` 通过。

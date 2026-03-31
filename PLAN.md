@@ -34,6 +34,13 @@
 回滚策略：保持既有 run artifact/result 契约不变，仅扩展 runtime state（pending permission context）与 MCP tool 面；若续跑语义不稳定，可回退 `approve/deny` 工具并恢复旧失败路径。
 风险与控制：权限等待状态若不清理会造成伪阻塞；通过 `pending_permission_runs` 生命周期管理、`permission.approved/permission.denied` 事件、以及 cancel/terminal 分支统一清理避免悬挂状态。
 
+### Batch V1.2-P1 - CLI Permission Controls + Event Schema + Smoke（已完成）
+
+目标：把权限决策闭环从 MCP 内部能力扩展到 CLI 体验层，新增 `approve/deny` 入口，统一 `permission.requested` 事件 detail 结构（枚举化关键字段），并补齐 direct workspace approve 流程端到端 smoke。
+依赖顺序：`T-170 -> T-171`。
+回滚策略：仅扩展 CLI 子命令、权限事件 detail 构造与增量 smoke，不修改 `mcp-subagent.result.v1` 契约；若 CLI 决策入口体验不达预期，可单独回退 `approve/deny` 命令与 smoke 脚本，不影响既有 MCP 工具链。
+风险与控制：CLI 进程边界可能导致 pending context 丢失和续跑中断；通过 `approve/deny` 先加载持久化 run、缺失 pending 时按 run snapshot 重建上下文、以及 CLI 默认 keepalive 到任务落盘，确保跨进程也能稳定续跑。
+
 ## Execution Strategy (v0.10 Current)
 
 ### Batch V1.0-P11 - Release Branch Cut（已完成）

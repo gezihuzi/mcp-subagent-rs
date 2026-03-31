@@ -854,6 +854,109 @@ sandbox = "workspace_write"
             .collect::<Vec<_>>();
         assert!(names.contains(&"permission.requested"));
         assert!(names.contains(&"permission.approved"));
+        let requested = events
+            .events
+            .iter()
+            .find(|event| event.event == "permission.requested")
+            .expect("permission.requested event");
+        assert_eq!(requested.detail["kind"], "direct_workspace");
+        assert_eq!(requested.detail["status"], "requested");
+        assert_eq!(requested.detail["request"]["working_dir_policy"], "direct");
+        assert_eq!(requested.detail["request"]["operation"], "write");
+        assert_eq!(
+            requested.detail["decision"]["tools"],
+            json!(["approve_permission", "deny_permission"])
+        );
+        assert_eq!(requested.detail["hints"]["resume_mode"], "same_handle");
+    }
+
+    #[tokio::test]
+    async fn approve_permission_can_resume_after_server_restart() {
+        let temp = tempdir().expect("temp");
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        fs::write(
+            agents_dir.join("reviewer.agent.toml"),
+            r#"
+[core]
+name = "reviewer"
+description = "review code"
+provider = "mock"
+instructions = "review"
+
+[runtime]
+working_dir_policy = "direct"
+sandbox = "workspace_write"
+"#,
+        )
+        .expect("write agent");
+
+        let blocked_root = temp.path().join("blocked");
+        fs::create_dir_all(&blocked_root).expect("create blocked");
+
+        let server = make_server(agents_dir.clone(), state_dir.clone());
+        let out = server
+            .spawn_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
+                agent_name: "reviewer".to_string(),
+                task: "needs permission".to_string(),
+                task_brief: None,
+                parent_summary: None,
+                selected_files: Vec::new(),
+                stage: None,
+                plan_ref: None,
+                working_dir: Some(blocked_root.display().to_string()),
+                working_dir_policy_override: None,
+            }))
+            .await
+            .expect("spawn")
+            .0;
+
+        let mut blocked = false;
+        for _ in 0..30 {
+            let stats = server
+                .get_agent_stats(rmcp::handler::server::wrapper::Parameters(
+                    super::GetAgentStatsInput {
+                        handle_id: out.handle_id.clone(),
+                    },
+                ))
+                .await
+                .expect("stats")
+                .0;
+            if stats.block_reason.as_deref() == Some("permission_required") {
+                blocked = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        assert!(blocked, "run should enter permission_required block state");
+
+        let resumed_server = make_server(agents_dir, state_dir);
+        let approve = resumed_server
+            .approve_permission(rmcp::handler::server::wrapper::Parameters(HandleInput {
+                handle_id: out.handle_id.clone(),
+            }))
+            .await
+            .expect("approve after restart")
+            .0;
+        assert_eq!(approve.status, "running");
+
+        let watched = resumed_server
+            .watch_run(rmcp::handler::server::wrapper::Parameters(WatchRunInput {
+                handle_id: out.handle_id,
+                interval_ms: Some(50),
+                timeout_secs: Some(10),
+                phase: None,
+                phase_timeout_secs: None,
+            }))
+            .await
+            .expect("watch run")
+            .0;
+        assert!(watched.run.terminal);
+        assert!(matches!(
+            watched.run.outcome,
+            Some(super::OutcomeView::Succeeded { .. })
+        ));
     }
 
     #[tokio::test]
