@@ -72,6 +72,18 @@ pub struct HandleInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct DenyPermissionInput {
+    pub handle_id: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct PermissionDecisionOutput {
+    pub handle_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ReadAgentArtifactInput {
     pub handle_id: String,
     pub path: String,

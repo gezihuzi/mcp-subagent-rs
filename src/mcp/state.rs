@@ -9,6 +9,7 @@ use crate::{
     probe::ProviderProbe,
     runtime::dispatcher::RunPhase,
     runtime::outcome::RunOutcome,
+    runtime::permission::{PermissionDenied, PermissionOperation},
     runtime::usage::NativeUsage,
     spec::{
         runtime_policy::{
@@ -24,6 +25,7 @@ use crate::{
 pub(crate) struct RuntimeState {
     pub(crate) runs: HashMap<String, RunRecord>,
     pub(crate) tasks: HashMap<String, JoinHandle<()>>,
+    pub(crate) pending_permission_runs: HashMap<String, PendingPermissionRun>,
     pub(crate) serialize_locks: HashMap<String, Arc<Mutex<()>>>,
 }
 
@@ -46,6 +48,7 @@ pub(crate) struct RunRecord {
     pub(crate) compiled_context_markdown: Option<String>,
     pub(crate) usage: Option<NativeUsage>,
     pub(crate) policy: Option<PolicySnapshot>,
+    pub(crate) permission_request: Option<PermissionRequestRecord>,
 }
 
 impl RunRecord {
@@ -80,6 +83,36 @@ impl RunRecord {
             compiled_context_markdown: None,
             usage: None,
             policy,
+            permission_request: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingPermissionRun {
+    pub(crate) spec: AgentSpec,
+    pub(crate) task_spec: TaskSpec,
+    pub(crate) hints: WorkflowHints,
+    pub(crate) lock_keys: Vec<String>,
+    pub(crate) probe_result: ProbeResultRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PermissionRequestRecord {
+    pub(crate) operation: PermissionOperation,
+    pub(crate) requested_path: PathBuf,
+    pub(crate) allowed_paths: Vec<PathBuf>,
+    pub(crate) reason: String,
+}
+
+impl PermissionRequestRecord {
+    pub(crate) fn from_denied(denied: &PermissionDenied) -> Self {
+        Self {
+            operation: denied.operation.clone(),
+            requested_path: denied.requested_path.clone(),
+            allowed_paths: denied.allowed_paths.clone(),
+            reason: denied.reason.clone(),
         }
     }
 }
@@ -176,6 +209,7 @@ pub(crate) struct PersistedRunState {
     pub(crate) compiled_context_markdown: Option<String>,
     pub(crate) usage: Option<NativeUsage>,
     pub(crate) policy: Option<PolicySnapshot>,
+    pub(crate) permission_request: Option<PermissionRequestRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,6 +240,7 @@ impl From<&RunRecord> for PersistedRun {
                 compiled_context_markdown: value.compiled_context_markdown.clone(),
                 usage: value.usage.clone(),
                 policy: value.policy.clone(),
+                permission_request: value.permission_request.clone(),
             },
             outcome: value.outcome.clone(),
             artifact_index: value.artifact_index.clone(),

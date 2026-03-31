@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -22,12 +23,12 @@ use crate::{
             sanitize_relative_artifact_path,
         },
         dto::{
-            AgentListing, CancelAgentOutput, CodexInput, CodexOutput, GetAgentStatsInput,
-            GetAgentStatsOutput, GetRunResultInput, HandleInput, ListAgentsOutput, ListRunsInput,
-            ListRunsOutput, OutcomeView, ReadAgentArtifactInput, ReadAgentArtifactOutput,
-            ReadRunLogsInput, ReadRunLogsOutput, RunAgentInput, RunEventOutput, RunUsageOutput,
-            RunView, RuntimePolicySummary, WatchAgentEventsInput, WatchAgentEventsOutput,
-            WatchRunInput, WatchRunOutput,
+            AgentListing, CancelAgentOutput, CodexInput, CodexOutput, DenyPermissionInput,
+            GetAgentStatsInput, GetAgentStatsOutput, GetRunResultInput, HandleInput,
+            ListAgentsOutput, ListRunsInput, ListRunsOutput, OutcomeView, PermissionDecisionOutput,
+            ReadAgentArtifactInput, ReadAgentArtifactOutput, ReadRunLogsInput, ReadRunLogsOutput,
+            RunAgentInput, RunEventOutput, RunUsageOutput, RunView, RuntimePolicySummary,
+            WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput, WatchRunOutput,
         },
         helpers::{build_capability_notes, format_time},
         persistence::{
@@ -40,7 +41,8 @@ use crate::{
         service::run_dispatch,
         state::{
             append_status_if_terminal, apply_execution_policy_outcome, build_probe_result_snapshot,
-            build_run_spec_snapshot, RunRecord,
+            build_run_spec_snapshot, PendingPermissionRun, PermissionRequestRecord, RunRecord,
+            RuntimeState,
         },
     },
     render::{codex::render_codex_outcome, RenderStyle},
@@ -669,6 +671,7 @@ fn classify_block_reason_from_events(
 ) -> Option<&'static str> {
     for event in events.iter().rev() {
         match event.event.as_str() {
+            "permission.approved" | "permission.denied" => return None,
             "permission.requested" => return Some("permission_required"),
             "provider.waiting_for_trust" => return Some("trust_required"),
             "provider.waiting_for_auth" => return Some("auth_required"),
@@ -769,7 +772,7 @@ fn build_watch_advice(
             ),
             "permission_required" => push_advice(
                 &mut advice,
-                "direct workspace permission is required; include target directory in MCP_SUBAGENT_ALLOWED_PATHS or switch working_dir_policy",
+                "direct workspace permission is required; call approve_permission to continue, deny_permission to fail, or include target directory in MCP_SUBAGENT_ALLOWED_PATHS",
             ),
             "skill_discovery" => push_advice(
                 &mut advice,
@@ -837,13 +840,20 @@ fn wait_reason_from_event_name(name: &str) -> Option<&'static str> {
 fn collect_wait_reasons(events: &[RunEventOutput]) -> (Vec<String>, Option<String>) {
     let mut reasons = Vec::new();
     for event in events {
-        let Some(reason) = wait_reason_from_event_name(&event.event) else {
-            continue;
-        };
-        if reasons.iter().any(|existing| existing == reason) {
-            continue;
+        match event.event.as_str() {
+            "permission.approved" | "permission.denied" => {
+                reasons.retain(|existing| existing != "permission_required");
+            }
+            _ => {
+                let Some(reason) = wait_reason_from_event_name(&event.event) else {
+                    continue;
+                };
+                if reasons.iter().any(|existing| existing == reason) {
+                    continue;
+                }
+                reasons.push(reason.to_string());
+            }
         }
-        reasons.push(reason.to_string());
     }
     let current = reasons.last().cloned();
     (reasons, current)
@@ -851,6 +861,332 @@ fn collect_wait_reasons(events: &[RunEventOutput]) -> (Vec<String>, Option<Strin
 
 fn has_event_named(events: &[RunEventOutput], name: &str) -> bool {
     events.iter().any(|event| event.event == name)
+}
+
+async fn execute_pending_permission_run(
+    state: Arc<tokio::sync::Mutex<RuntimeState>>,
+    state_dir: PathBuf,
+    task_handle_id: String,
+    pending: PendingPermissionRun,
+) {
+    let spec = pending.spec;
+    let task_spec = pending.task_spec;
+    let hints = pending.hints;
+    let lock_keys = pending.lock_keys;
+    let probe_snapshot = pending.probe_result;
+
+    let _ = append_run_event(
+        &state_dir,
+        &task_handle_id,
+        RuntimeEventInput {
+            event: "workspace.prepare.started",
+            state: "preparing",
+            phase: "workspace_prepare",
+            source: "workspace",
+            message: "workspace/context preparation started",
+            detail: json!({}),
+        },
+    );
+    let _serialize_guards = acquire_serialize_locks_from_state(&state, lock_keys.clone()).await;
+    let dispatch_started_at = Instant::now();
+    let mut first_output_warned = false;
+    let mut first_output_seen = false;
+    let mut dispatch_future = Box::pin(run_dispatch(
+        &spec,
+        &task_spec,
+        &hints,
+        &task_handle_id,
+        &state_dir,
+        lock_keys.clone(),
+    ));
+    let dispatch = loop {
+        tokio::select! {
+            output = &mut dispatch_future => break output,
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                let elapsed_ms = dispatch_started_at.elapsed().as_millis() as u64;
+                if !first_output_seen {
+                    if let Ok(events) = load_run_events(&state_dir, &task_handle_id) {
+                        first_output_seen = has_event_named(&events, "provider.first_output");
+                    }
+                }
+                let heartbeat_phase = if first_output_seen {
+                    "running"
+                } else {
+                    "provider_boot"
+                };
+                let _ = append_run_event(
+                    &state_dir,
+                    &task_handle_id,
+                    RuntimeEventInput {
+                        event: "provider.heartbeat",
+                        state: "running",
+                        phase: heartbeat_phase,
+                        source: "runtime",
+                        message: "still alive",
+                        detail: json!({
+                            "elapsed_ms": elapsed_ms,
+                        }),
+                    },
+                );
+                if !first_output_warned
+                    && !first_output_seen
+                    && elapsed_ms >= FIRST_OUTPUT_WARN_AFTER_SECS.saturating_mul(1000)
+                {
+                    first_output_warned = true;
+                    let _ = append_run_event(
+                        &state_dir,
+                        &task_handle_id,
+                        RuntimeEventInput {
+                            event: "provider.first_output.warning",
+                            state: "running",
+                            phase: "provider_boot",
+                            source: "runtime",
+                            message: "provider has not produced output yet",
+                            detail: json!({
+                                "elapsed_ms": elapsed_ms,
+                                "warn_after_secs": FIRST_OUTPUT_WARN_AFTER_SECS,
+                            }),
+                        },
+                    );
+                }
+            }
+        }
+    };
+
+    let mut guard = state.lock().await;
+    guard.tasks.remove(&task_handle_id);
+    guard.pending_permission_runs.remove(&task_handle_id);
+    let Some(record) = guard.runs.get_mut(&task_handle_id) else {
+        return;
+    };
+
+    if matches!(record.status, RunPhase::Cancelled) {
+        return;
+    }
+
+    match dispatch {
+        Ok(dispatch) => {
+            let crate::mcp::service::RunDispatchData {
+                result: dispatch_result,
+                workspace,
+                memory_resolution,
+                _workspace_cleanup: workspace_cleanup,
+            } = dispatch;
+            if !(dispatch_result.stdout.trim().is_empty() && dispatch_result.stderr.trim().is_empty())
+            {
+                let existing_events = load_run_events(&state_dir, &task_handle_id).unwrap_or_default();
+                let has_first_output = has_event_named(&existing_events, "provider.first_output");
+                let has_stdout_delta = has_event_named(&existing_events, "provider.stdout.delta");
+                let has_stderr_delta = has_event_named(&existing_events, "provider.stderr.delta");
+
+                if !dispatch_result.stdout.trim().is_empty() && !has_stdout_delta {
+                    let _ = append_run_event(
+                        &state_dir,
+                        &task_handle_id,
+                        RuntimeEventInput {
+                            event: "provider.stdout.delta",
+                            state: "running",
+                            phase: "running",
+                            source: "provider",
+                            message: "provider stdout received",
+                            detail: json!({
+                                "bytes": dispatch_result.stdout.len(),
+                                "lines": dispatch_result.stdout.lines().count(),
+                            }),
+                        },
+                    );
+                }
+                if !dispatch_result.stderr.trim().is_empty() && !has_stderr_delta {
+                    let _ = append_run_event(
+                        &state_dir,
+                        &task_handle_id,
+                        RuntimeEventInput {
+                            event: "provider.stderr.delta",
+                            state: "running",
+                            phase: "running",
+                            source: "provider",
+                            message: "provider stderr received",
+                            detail: json!({
+                                "bytes": dispatch_result.stderr.len(),
+                                "lines": dispatch_result.stderr.lines().count(),
+                            }),
+                        },
+                    );
+                }
+                if !has_first_output {
+                    let _ = append_run_event(
+                        &state_dir,
+                        &task_handle_id,
+                        RuntimeEventInput {
+                            event: "provider.first_output",
+                            state: "running",
+                            phase: "running",
+                            source: "provider",
+                            message: "provider produced output",
+                            detail: json!({
+                                "stdout_bytes": dispatch_result.stdout.len(),
+                                "stderr_bytes": dispatch_result.stderr.len(),
+                            }),
+                        },
+                    );
+                }
+            }
+            let wait_text = format!("{}\n{}", dispatch_result.stdout, dispatch_result.stderr);
+            if let Some(signal) = detect_provider_wait_signal(&wait_text) {
+                let _ = append_run_event(
+                    &state_dir,
+                    &task_handle_id,
+                    RuntimeEventInput {
+                        event: signal.event,
+                        state: "running",
+                        phase: signal.phase,
+                        source: "provider",
+                        message: signal.message,
+                        detail: json!({
+                            "reason": signal.reason,
+                        }),
+                    },
+                );
+            }
+            let (artifact_index, artifacts) = build_runtime_artifacts(
+                &dispatch_result.outcome,
+                &dispatch_result.stdout,
+                &dispatch_result.stderr,
+                Some(&workspace.workspace_path),
+            );
+            let mut artifact_index = artifact_index;
+            let mut artifacts = artifacts;
+            apply_execution_policy_outcome(
+                &mut record.policy,
+                dispatch_result.attempts_used,
+                dispatch_result.retry_attempts,
+            );
+            apply_review_evidence_hook(
+                &spec,
+                &task_spec,
+                &hints,
+                &dispatch_result.outcome,
+                &mut artifact_index,
+                &mut artifacts,
+            );
+            apply_archive_hook(
+                crate::mcp::archive::ArchiveHookInput {
+                    spec: &spec,
+                    task_spec: &task_spec,
+                    hints: &hints,
+                    run_status: &dispatch_result.status,
+                    handle_id: &task_handle_id,
+                    workspace: &workspace,
+                    outcome: &dispatch_result.outcome,
+                },
+                &mut crate::mcp::archive::ArtifactCollector {
+                    index: &mut artifact_index,
+                    data: &mut artifacts,
+                },
+            );
+            record.status = dispatch_result.status;
+            record.updated_at = OffsetDateTime::now_utc();
+            record.status_history = dispatch_result.status_history;
+            record.error_message = dispatch_result.error_message;
+            record.outcome = Some(dispatch_result.outcome);
+            record.artifact_index = artifact_index;
+            record.artifacts = artifacts;
+            record.probe_result = Some(probe_snapshot.clone());
+            record.memory_resolution = Some(memory_resolution);
+            record.workspace = Some(workspace);
+            record.compiled_context_markdown = Some(dispatch_result.compiled_context_markdown);
+            record.usage = dispatch_result.native_usage;
+            record.permission_request = None;
+            let final_status = format!("{}", record.status);
+            let final_event = match record.status {
+                RunPhase::Succeeded => "run.completed",
+                RunPhase::Failed => "run.failed",
+                RunPhase::TimedOut => "run.timed_out",
+                RunPhase::Cancelled => "run.cancelled",
+                _ => "run.updated",
+            };
+            let _ = append_run_event(
+                &state_dir,
+                &task_handle_id,
+                RuntimeEventInput {
+                    event: final_event,
+                    state: final_status.as_str(),
+                    phase: "completed",
+                    source: "runtime",
+                    message: "run finished",
+                    detail: json!({
+                        "status": final_status.clone(),
+                        "verification_status": match &record.outcome {
+                            Some(RunOutcome::Succeeded(success)) => format!("{}", success.verification),
+                            _ => format!("{}", crate::runtime::summary::VerificationStatus::NotRun),
+                        },
+                    }),
+                },
+            );
+            drop(workspace_cleanup);
+        }
+        Err(err) => {
+            let err_text = err.to_string();
+            if let Some(signal) = detect_provider_wait_signal(&err_text) {
+                let _ = append_run_event(
+                    &state_dir,
+                    &task_handle_id,
+                    RuntimeEventInput {
+                        event: signal.event,
+                        state: "running",
+                        phase: signal.phase,
+                        source: "provider",
+                        message: signal.message,
+                        detail: json!({
+                            "reason": signal.reason,
+                        }),
+                    },
+                );
+            }
+            let failure_outcome = RunOutcome::Failed(FailureOutcome {
+                error: err_text.clone(),
+                retry: RetryInfo {
+                    classification: RetryClassification::Unknown,
+                    reason: Some("dispatch execution failed".to_string()),
+                    attempts_used: 0,
+                },
+                partial_summary: Some(err.message.clone().into_owned()),
+                usage: UsageStats::ZERO,
+            });
+            let (artifact_index, artifacts) = build_runtime_artifacts(&failure_outcome, "", "", None);
+            record.status = RunPhase::Failed;
+            record.updated_at = OffsetDateTime::now_utc();
+            append_status_if_terminal(&mut record.status_history, RunPhase::Failed);
+            record.error_message = Some(err_text);
+            record.outcome = Some(failure_outcome);
+            record.artifact_index = artifact_index;
+            record.artifacts = artifacts;
+            record.probe_result = Some(probe_snapshot);
+            record.memory_resolution = None;
+            record.workspace = None;
+            record.compiled_context_markdown = None;
+            record.usage = None;
+            record.permission_request = None;
+            let _ = append_run_event(
+                &state_dir,
+                &task_handle_id,
+                RuntimeEventInput {
+                    event: "run.failed",
+                    state: "failed",
+                    phase: "execution",
+                    source: "runtime",
+                    message: "run failed",
+                    detail: json!({
+                        "error": record.error_message.clone(),
+                    }),
+                },
+            );
+        }
+    }
+
+    if let Err(err) = persist_run_record(&state_dir, &task_handle_id, record) {
+        record.error_message = Some(format!("failed to persist run state: {err}"));
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1466,6 +1802,7 @@ impl McpSubagentServer {
             compiled_context_markdown: Some(result.compiled_context_markdown),
             usage: native_usage,
             policy,
+            permission_request: None,
         };
         let output = build_run_view(handle_id.clone(), &record, None);
         drop(workspace_cleanup);
@@ -1605,6 +1942,7 @@ impl McpSubagentServer {
                 record.workspace = None;
                 record.compiled_context_markdown = None;
                 record.usage = None;
+                record.permission_request = None;
                 let _ = append_run_event(
                     &state_dir,
                     &task_handle_id,
@@ -1662,6 +2000,7 @@ impl McpSubagentServer {
                     record.workspace = None;
                     record.compiled_context_markdown = None;
                     record.usage = None;
+                    record.permission_request = None;
                     let _ = append_run_event(
                         &state_dir,
                         &task_handle_id,
@@ -1685,20 +2024,6 @@ impl McpSubagentServer {
             if let Some(permission_denied) =
                 check_direct_workspace_permission(&loaded.spec, &source_path)
             {
-                let error_message = permission_denied.to_error_message();
-                let failure_outcome = RunOutcome::Failed(FailureOutcome {
-                    error: error_message.clone(),
-                    retry: RetryInfo {
-                        classification: RetryClassification::Unknown,
-                        reason: Some("permission required for direct workspace".to_string()),
-                        attempts_used: 0,
-                    },
-                    partial_summary: Some(error_message.clone()),
-                    usage: UsageStats::ZERO,
-                });
-                let (artifact_index, artifacts) =
-                    build_runtime_artifacts(&failure_outcome, "", "", None);
-
                 let _ = append_run_event(
                     &state_dir,
                     &task_handle_id,
@@ -1729,29 +2054,40 @@ impl McpSubagentServer {
                 if matches!(record.status, RunPhase::Cancelled) {
                     return;
                 }
-                record.status = RunPhase::Failed;
+                record.status = RunPhase::Running;
                 record.updated_at = OffsetDateTime::now_utc();
-                append_status_if_terminal(&mut record.status_history, RunPhase::Failed);
-                record.error_message = Some(error_message);
-                record.outcome = Some(failure_outcome);
-                record.artifact_index = artifact_index;
-                record.artifacts = artifacts;
+                record.error_message = None;
+                record.outcome = None;
+                record.artifact_index.clear();
+                record.artifacts.clear();
                 record.probe_result = Some(probe_snapshot.clone());
                 record.memory_resolution = None;
                 record.workspace = None;
                 record.compiled_context_markdown = None;
                 record.usage = None;
+                record.permission_request =
+                    Some(PermissionRequestRecord::from_denied(&permission_denied));
+                guard.pending_permission_runs.insert(
+                    task_handle_id.clone(),
+                    PendingPermissionRun {
+                        spec: loaded.spec.clone(),
+                        task_spec: task_spec.clone(),
+                        hints: hints.clone(),
+                        lock_keys: lock_keys.clone(),
+                        probe_result: probe_snapshot.clone(),
+                    },
+                );
                 let _ = append_run_event(
                     &state_dir,
                     &task_handle_id,
                     RuntimeEventInput {
-                        event: "run.failed",
-                        state: "failed",
+                        event: "run.blocked",
+                        state: "blocked",
                         phase: "waiting_for_permission",
                         source: "runtime",
-                        message: "permission denied",
+                        message: "run is waiting for permission decision",
                         detail: json!({
-                            "error": record.error_message.clone(),
+                            "reason": "permission_required",
                         }),
                     },
                 );
@@ -1842,6 +2178,7 @@ impl McpSubagentServer {
 
             let mut guard = state.lock().await;
             guard.tasks.remove(&task_handle_id);
+            guard.pending_permission_runs.remove(&task_handle_id);
             let Some(record) = guard.runs.get_mut(&task_handle_id) else {
                 return;
             };
@@ -1989,6 +2326,7 @@ impl McpSubagentServer {
                     record.compiled_context_markdown =
                         Some(dispatch_result.compiled_context_markdown);
                     record.usage = dispatch_result.native_usage;
+                    record.permission_request = None;
                     let final_status = format!("{}", record.status);
                     let final_event = match record.status {
                         RunPhase::Succeeded => "run.completed",
@@ -2059,6 +2397,7 @@ impl McpSubagentServer {
                     record.workspace = None;
                     record.compiled_context_markdown = None;
                     record.usage = None;
+                    record.permission_request = None;
                     let _ = append_run_event(
                         &state_dir,
                         &task_handle_id,
@@ -2120,6 +2459,184 @@ impl McpSubagentServer {
         )))
     }
 
+    #[tool(description = "Approve pending permission request and resume async run.")]
+    pub async fn approve_permission(
+        &self,
+        Parameters(input): Parameters<HandleInput>,
+    ) -> std::result::Result<Json<PermissionDecisionOutput>, ErrorData> {
+        let runtime_state = self.runtime_state();
+        let state_dir = self.state_dir().to_path_buf();
+        let handle_id = input.handle_id;
+
+        let pending = {
+            let mut state = runtime_state.lock().await;
+            let status = state
+                .runs
+                .get(&handle_id)
+                .map(|run| run.status.clone())
+                .ok_or_else(|| {
+                    ErrorData::resource_not_found(format!("handle not found: {handle_id}"), None)
+                })?;
+            if is_terminal_status(&status) {
+                return Ok(Json(PermissionDecisionOutput {
+                    handle_id,
+                    status: format!("{status}"),
+                }));
+            }
+
+            if let Some(task) = state.tasks.remove(&handle_id) {
+                task.abort();
+            }
+            let pending = state.pending_permission_runs.remove(&handle_id).ok_or_else(|| {
+                ErrorData::invalid_params(
+                    format!(
+                        "run `{handle_id}` is not waiting for permission decision or context expired"
+                    ),
+                    None,
+                )
+            })?;
+            let record = state.runs.get_mut(&handle_id).expect("run must exist");
+            if record.permission_request.is_none() {
+                return Err(ErrorData::invalid_params(
+                    format!("run `{handle_id}` has no pending permission request"),
+                    None,
+                ));
+            }
+            record.updated_at = OffsetDateTime::now_utc();
+            record.error_message = None;
+            record.permission_request = None;
+            append_run_event(
+                &state_dir,
+                &handle_id,
+                RuntimeEventInput {
+                    event: "permission.approved",
+                    state: "running",
+                    phase: "waiting_for_permission",
+                    source: "permission",
+                    message: "permission approved; resuming run",
+                    detail: json!({}),
+                },
+            )?;
+            persist_run_record(&state_dir, &handle_id, record)?;
+            pending
+        };
+
+        let resume_handle_id = handle_id.clone();
+        let task = tokio::spawn(execute_pending_permission_run(
+            runtime_state.clone(),
+            state_dir,
+            resume_handle_id.clone(),
+            pending,
+        ));
+        {
+            let mut state = runtime_state.lock().await;
+            state.tasks.insert(resume_handle_id.clone(), task);
+        }
+
+        Ok(Json(PermissionDecisionOutput {
+            handle_id: resume_handle_id,
+            status: format!("{}", RunPhase::Running),
+        }))
+    }
+
+    #[tool(description = "Deny pending permission request and mark async run as failed.")]
+    pub async fn deny_permission(
+        &self,
+        Parameters(input): Parameters<DenyPermissionInput>,
+    ) -> std::result::Result<Json<PermissionDecisionOutput>, ErrorData> {
+        let runtime_state = self.runtime_state();
+        let mut state = runtime_state.lock().await;
+        let handle_id = input.handle_id;
+        let deny_reason = input
+            .reason
+            .unwrap_or_else(|| "permission denied by user decision".to_string());
+        let status = state
+            .runs
+            .get(&handle_id)
+            .map(|run| run.status.clone())
+            .ok_or_else(|| {
+                ErrorData::resource_not_found(format!("handle not found: {handle_id}"), None)
+            })?;
+
+        if is_terminal_status(&status) {
+            return Ok(Json(PermissionDecisionOutput {
+                handle_id,
+                status: format!("{status}"),
+            }));
+        }
+
+        if let Some(task) = state.tasks.remove(&handle_id) {
+            task.abort();
+        }
+        state.pending_permission_runs.remove(&handle_id);
+        let record = state.runs.get_mut(&handle_id).expect("run must exist");
+        if record.permission_request.is_none() {
+            return Err(ErrorData::invalid_params(
+                format!("run `{handle_id}` has no pending permission request"),
+                None,
+            ));
+        }
+
+        let failure_text = format!("permission denied: {deny_reason}");
+        let failure_outcome = RunOutcome::Failed(FailureOutcome {
+            error: failure_text.clone(),
+            retry: RetryInfo {
+                classification: RetryClassification::Unknown,
+                reason: Some("permission request denied".to_string()),
+                attempts_used: 0,
+            },
+            partial_summary: Some(failure_text.clone()),
+            usage: UsageStats::ZERO,
+        });
+        let (artifact_index, artifacts) = build_runtime_artifacts(&failure_outcome, "", "", None);
+        record.status = RunPhase::Failed;
+        record.updated_at = OffsetDateTime::now_utc();
+        append_status_if_terminal(&mut record.status_history, RunPhase::Failed);
+        record.error_message = Some(failure_text.clone());
+        record.outcome = Some(failure_outcome);
+        record.artifact_index = artifact_index;
+        record.artifacts = artifacts;
+        record.memory_resolution = None;
+        record.workspace = None;
+        record.compiled_context_markdown = None;
+        record.usage = None;
+        record.permission_request = None;
+        append_run_event(
+            self.state_dir(),
+            &handle_id,
+            RuntimeEventInput {
+                event: "permission.denied",
+                state: "failed",
+                phase: "waiting_for_permission",
+                source: "permission",
+                message: "permission denied",
+                detail: json!({
+                    "reason": deny_reason,
+                }),
+            },
+        )?;
+        append_run_event(
+            self.state_dir(),
+            &handle_id,
+            RuntimeEventInput {
+                event: "run.failed",
+                state: "failed",
+                phase: "waiting_for_permission",
+                source: "runtime",
+                message: "run failed after permission denial",
+                detail: json!({
+                    "error": failure_text,
+                }),
+            },
+        )?;
+        persist_run_record(self.state_dir(), &handle_id, record)?;
+
+        Ok(Json(PermissionDecisionOutput {
+            handle_id,
+            status: format!("{}", RunPhase::Failed),
+        }))
+    }
+
     #[tool(description = "Cancel an async agent run if still in progress.")]
     pub async fn cancel_agent(
         &self,
@@ -2152,6 +2669,7 @@ impl McpSubagentServer {
         if let Some(task) = state.tasks.remove(&input.handle_id) {
             task.abort();
         }
+        state.pending_permission_runs.remove(&input.handle_id);
 
         if let Some(record) = state.runs.get_mut(&input.handle_id) {
             record.status = RunPhase::Cancelled;
@@ -2167,6 +2685,7 @@ impl McpSubagentServer {
                 record.artifact_index = artifact_index;
                 record.artifacts = artifacts;
             }
+            record.permission_request = None;
             append_run_event(
                 self.state_dir(),
                 &input.handle_id,

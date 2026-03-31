@@ -208,6 +208,7 @@ pub(crate) fn load_run_record_from_disk(
         compiled_context_markdown: persisted.state.compiled_context_markdown,
         usage: persisted.state.usage,
         policy: persisted.state.policy,
+        permission_request: persisted.state.permission_request,
     }))
 }
 

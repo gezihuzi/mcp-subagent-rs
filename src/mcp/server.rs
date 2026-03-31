@@ -27,12 +27,12 @@ use crate::{
 };
 
 pub use crate::mcp::dto::{
-    AgentListing, ArtifactOutput, CancelAgentOutput, CodexInput, CodexOutput, GetAgentStatsInput,
-    GetAgentStatsOutput, GetRunResultInput, HandleInput, ListAgentsOutput, ListRunsInput,
-    ListRunsOutput, OutcomeView, ReadAgentArtifactInput, ReadAgentArtifactOutput, ReadRunLogsInput,
-    ReadRunLogsOutput, RunAgentInput, RunAgentSelectedFileInput, RunEventOutput, RunUsageOutput,
-    RunView, RuntimePolicySummary, WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput,
-    WatchRunOutput,
+    AgentListing, ArtifactOutput, CancelAgentOutput, CodexInput, CodexOutput, DenyPermissionInput,
+    GetAgentStatsInput, GetAgentStatsOutput, GetRunResultInput, HandleInput, ListAgentsOutput,
+    ListRunsInput, ListRunsOutput, OutcomeView, PermissionDecisionOutput, ReadAgentArtifactInput,
+    ReadAgentArtifactOutput, ReadRunLogsInput, ReadRunLogsOutput, RunAgentInput,
+    RunAgentSelectedFileInput, RunEventOutput, RunUsageOutput, RunView, RuntimePolicySummary,
+    WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput, WatchRunOutput,
 };
 
 #[tool_handler(router = self.tool_router)]
@@ -384,8 +384,8 @@ mod tests {
     };
 
     use super::{
-        acquire_serialize_locks_from_state, HandleInput, McpSubagentServer, ReadAgentArtifactInput,
-        RunAgentInput, RunAgentSelectedFileInput,
+        acquire_serialize_locks_from_state, DenyPermissionInput, HandleInput, McpSubagentServer,
+        ReadAgentArtifactInput, RunAgentInput, RunAgentSelectedFileInput, WatchRunInput,
     };
     use crate::{mcp::artifacts::build_runtime_artifacts, mcp::state::RuntimeState};
 
@@ -1279,6 +1279,8 @@ exit 0
             "get_run_result",
             "get_agent_stats",
             "watch_agent_events",
+            "approve_permission",
+            "deny_permission",
             "cancel_agent",
             "read_agent_artifact",
             "read_run_logs",
