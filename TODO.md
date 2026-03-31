@@ -4293,3 +4293,32 @@
   - `cargo test --workspace` 通过（lib 255 + bin 87 + e2e 3）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
   - `bash scripts/smoke_v12_permission.sh` 通过。
+
+## T-172 V1.2-P2-PermissionUxPolishAndGateIntegration (Completed 2026-03-31)
+
+任务：按顺序完成权限体验收口：把 `smoke_v12_permission` 纳入 release/CI 门槛；在 `status/watch/events` 输出里直接给 `approve/deny` 可执行命令模板；为 `sub codex` 增加同命令内权限决策交互，减少切换成本。  
+验收标准：
+
+1. `scripts/release_check.sh` 新增 `smoke_v12_permission` 检查，确保发布链路默认覆盖 direct workspace 权限闭环。
+2. CI 默认流程新增 `scripts/smoke_v12_permission.sh` 步骤，与既有 `smoke_v08` 并行保留。
+3. `status` 文本输出在 `permission_required` 时直接展示可执行命令模板：`mcp-subagent approve <handle>` / `mcp-subagent deny <handle> --reason ...`。
+4. `watch` 与 `events` 跟随模式在检测到 `permission_required` 时给出同样命令模板，避免用户再手动查询命令。
+5. `sub codex` 在流式运行遇到 `permission_required` 时，支持同命令内交互式 `approve/deny/skip`；批准后继续同 handle 续跑并最终落盘，不需要手工切命令。
+6. 回归通过：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`bash scripts/smoke_v12_permission.sh`、`bash scripts/smoke_v08.sh`。
+完成记录：
+
+- 已完成：
+  - `scripts/release_check.sh` 已加入 `bash scripts/smoke_v12_permission.sh`，发布收口默认覆盖权限闭环。
+  - `.github/workflows/ci.yml` 已新增 `v1.2 Permission Smoke` 步骤，执行 `./scripts/smoke_v12_permission.sh`。
+  - `src/main.rs` 已在 `render_status_output_text` 中对 `permission_required` 注入命令模板，并在 `watch/events` 流式路径检测阻塞后输出同样提示。
+  - `collect_wait_reasons` 已收敛 `permission.approved/permission.denied` 清理逻辑，避免历史 `permission_required` 残留误导。
+  - `sub codex` 已新增一体化权限交互：流式运行中检测到 `permission_required` 时直接提示 `approve/deny/skip`；选择 approve 后继续同 handle 续跑，deny 会立即失败并输出终态，skip 会给出可执行命令并退出。
+  - 为避免参数膨胀，`spawn_and_optionally_stream` 已收口为 `SpawnAndStreamOptions` 结构体，保持 clippy 零告警。
+  - 已补单测：
+    - `render_status_output_includes_permission_commands_when_blocked`
+    - `collect_wait_reasons_clears_permission_after_decision_event`
+- 已验证：
+  - `cargo test --workspace` 通过（lib 255 + bin 89 + e2e 3）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+  - `bash scripts/smoke_v12_permission.sh` 通过。
+  - `bash scripts/smoke_v08.sh` 通过。
