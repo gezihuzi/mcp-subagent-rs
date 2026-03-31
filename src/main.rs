@@ -9,7 +9,7 @@ use std::{
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mcp_subagent::{
-    config::{resolve_runtime_config, ConfigOverrides, RuntimeConfig},
+    config::{resolve_runtime_config, ConfigOverrides, ProfileConfig, RuntimeConfig},
     connect::{
         build_connect_invocation, build_connect_snippet, build_host_launch_invocation,
         resolve_connect_snippet_paths, ConnectHost, ConnectInvocation,
@@ -215,6 +215,18 @@ enum Commands {
     },
     Stats {
         handle_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Sub {
+        profile: String,
+        task: String,
+        #[arg(long, conflicts_with = "no_stream")]
+        stream: bool,
+        #[arg(long = "no-stream", conflicts_with = "stream")]
+        no_stream: bool,
+        #[arg(long)]
+        working_dir: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -747,6 +759,30 @@ async fn main() -> ExitCode {
             };
             info!("starting command: stats");
             read_stats(cfg, handle_id, json)
+        }
+        Commands::Sub {
+            profile,
+            task,
+            stream,
+            no_stream,
+            working_dir,
+            json,
+        } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: sub");
+            run_profile_sub_command(cfg, profile, task, stream, no_stream, working_dir, json).await
         }
         Commands::Run {
             agent,
@@ -4276,6 +4312,75 @@ struct AgentRunCommand {
     json: bool,
 }
 
+async fn run_profile_sub_command(
+    cfg: RuntimeConfig,
+    profile_name: String,
+    task: String,
+    stream: bool,
+    no_stream: bool,
+    working_dir: Option<PathBuf>,
+    json: bool,
+) -> ExitCode {
+    let profile = match cfg.profiles.get(&profile_name) {
+        Some(profile) => profile.clone(),
+        None => {
+            if cfg.profiles.is_empty() {
+                eprintln!(
+                    "sub failed: profile `{profile_name}` not found (no [profiles.<name>] configured)"
+                );
+            } else {
+                let mut names = cfg.profiles.keys().cloned().collect::<Vec<_>>();
+                names.sort();
+                eprintln!(
+                    "sub failed: profile `{profile_name}` not found (available: {})",
+                    names.join(", ")
+                );
+            }
+            return ExitCode::from(1);
+        }
+    };
+
+    let stream = resolve_sub_stream_enabled(&profile, stream, no_stream, json);
+    run_agent(
+        cfg,
+        AgentRunCommand {
+            agent: profile.agent,
+            task,
+            task_brief: None,
+            parent_summary: None,
+            stage: None,
+            plan_ref: None,
+            selected_files: Vec::new(),
+            selected_files_inline: Vec::new(),
+            working_dir,
+            stream,
+            json,
+        },
+    )
+    .await
+}
+
+fn resolve_sub_stream_enabled(
+    profile: &ProfileConfig,
+    stream: bool,
+    no_stream: bool,
+    json: bool,
+) -> bool {
+    if stream {
+        return true;
+    }
+    if no_stream {
+        return false;
+    }
+    if json {
+        return false;
+    }
+    if !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal() {
+        return false;
+    }
+    profile.stream.unwrap_or(true)
+}
+
 async fn run_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
     let AgentRunCommand {
         agent,
@@ -4812,6 +4917,7 @@ fn print_clean_report(report: &CleanReport) {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         fs,
         path::{Path, PathBuf},
     };
@@ -4819,7 +4925,7 @@ mod tests {
     use clap::Parser;
     use tempfile::tempdir;
 
-    use mcp_subagent::config::RuntimeConfig;
+    use mcp_subagent::config::{ProfileConfig, RuntimeConfig};
 
     use crate::{
         build_selected_file_inputs, clean_state_dir, ensure_bootstrap_bridge_config,
@@ -4938,6 +5044,100 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_sub_command_with_required_positionals() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "sub",
+            "codex-rescue",
+            "optimize website copy",
+        ]);
+        match cli.command {
+            Commands::Sub {
+                profile,
+                task,
+                stream,
+                no_stream,
+                ..
+            } => {
+                assert_eq!(profile, "codex-rescue");
+                assert_eq!(task, "optimize website copy");
+                assert!(!stream);
+                assert!(!no_stream);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_sub_command_with_stream_and_working_dir_flags() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "sub",
+            "codex",
+            "run analysis",
+            "--stream",
+            "--working-dir",
+            "./docs",
+        ]);
+        match cli.command {
+            Commands::Sub {
+                profile,
+                task,
+                stream,
+                no_stream,
+                working_dir,
+                ..
+            } => {
+                assert_eq!(profile, "codex");
+                assert_eq!(task, "run analysis");
+                assert!(stream);
+                assert!(!no_stream);
+                assert_eq!(working_dir, Some(PathBuf::from("./docs")));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_sub_command_with_no_stream_flag() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "sub",
+            "codex",
+            "run analysis",
+            "--no-stream",
+        ]);
+        match cli.command {
+            Commands::Sub {
+                stream, no_stream, ..
+            } => {
+                assert!(!stream);
+                assert!(no_stream);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_sub_stream_enabled_respects_explicit_flags() {
+        let profile = ProfileConfig {
+            agent: "backend-coder".to_string(),
+            provider: Some("codex".to_string()),
+            model: Some("gpt-5.3-codex".to_string()),
+            stream: Some(false),
+        };
+        assert!(super::resolve_sub_stream_enabled(
+            &profile, true, false, false
+        ));
+        assert!(!super::resolve_sub_stream_enabled(
+            &profile, false, true, false
+        ));
+        assert!(!super::resolve_sub_stream_enabled(
+            &profile, false, false, true
+        ));
     }
 
     #[test]
@@ -6176,6 +6376,7 @@ target/
             agents_dirs: vec![PathBuf::from("./agents")],
             state_dir: dir.path().to_path_buf(),
             log_level: "info".to_string(),
+            profiles: HashMap::new(),
         };
 
         let code =

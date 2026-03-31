@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env, fs,
     path::{Path, PathBuf},
 };
@@ -24,6 +25,16 @@ pub struct RuntimeConfig {
     pub agents_dirs: Vec<PathBuf>,
     pub state_dir: PathBuf,
     pub log_level: String,
+    pub profiles: HashMap<String, ProfileConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileConfig {
+    pub agent: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub stream: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -36,6 +47,10 @@ pub struct ConfigOverrides {
 
 pub fn resolve_runtime_config(overrides: ConfigOverrides) -> Result<RuntimeConfig> {
     let file_cfg = load_file_config(resolve_config_path(overrides.config_path.as_ref()))?;
+    let profiles = file_cfg
+        .as_ref()
+        .map(|cfg| cfg.profiles.clone())
+        .unwrap_or_default();
     let env_layer = env_layer();
 
     let defaults = ConfigLayer {
@@ -53,7 +68,9 @@ pub fn resolve_runtime_config(overrides: ConfigOverrides) -> Result<RuntimeConfi
         log_level: non_empty_string(overrides.log_level),
     };
 
-    Ok(merge_layers(defaults, file_layer, env_layer, cli_layer))
+    let mut merged = merge_layers(defaults, file_layer, env_layer, cli_layer);
+    merged.profiles = profiles;
+    Ok(merged)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -70,6 +87,8 @@ struct FileConfig {
     server: FileServer,
     #[serde(default = "default_file_paths")]
     paths: FilePaths,
+    #[serde(default = "default_profiles")]
+    profiles: HashMap<String, ProfileConfig>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -98,6 +117,10 @@ fn default_file_paths() -> FilePaths {
 
 fn default_path_vec() -> Vec<PathBuf> {
     Vec::new()
+}
+
+fn default_profiles() -> HashMap<String, ProfileConfig> {
+    HashMap::new()
 }
 
 fn resolve_config_path(cli_path: Option<&PathBuf>) -> PathBuf {
@@ -270,6 +293,7 @@ fn merge_layers(
         agents_dirs,
         state_dir,
         log_level,
+        profiles: HashMap::new(),
     }
 }
 
@@ -404,6 +428,7 @@ mod tests {
         assert!(cfg.server.log_level.is_none());
         assert!(cfg.paths.agents_dirs.is_empty());
         assert!(cfg.paths.state_dir.is_none());
+        assert!(cfg.profiles.is_empty());
     }
 
     #[test]
@@ -422,6 +447,62 @@ agents_dirs = ["agents"]
         assert!(cfg.server.log_level.is_none());
         assert_eq!(cfg.paths.agents_dirs, vec![PathBuf::from("agents")]);
         assert!(cfg.paths.state_dir.is_none());
+        assert!(cfg.profiles.is_empty());
+    }
+
+    #[test]
+    fn file_config_profiles_deserialize_without_extra_sections() {
+        let cfg: FileConfig = toml::from_str(
+            r#"
+[profiles.codex-rescue]
+agent = "backend-coder"
+provider = "codex"
+model = "gpt-5.3-codex"
+stream = true
+"#,
+        )
+        .expect("file config should parse profiles");
+
+        assert_eq!(cfg.profiles.len(), 1);
+        let profile = cfg
+            .profiles
+            .get("codex-rescue")
+            .expect("profile should exist");
+        assert_eq!(profile.agent, "backend-coder");
+        assert_eq!(profile.provider.as_deref(), Some("codex"));
+        assert_eq!(profile.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(profile.stream, Some(true));
+    }
+
+    #[test]
+    fn resolve_runtime_config_includes_profiles_from_file() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            r#"
+[paths]
+agents_dirs = ["agents"]
+state_dir = ".mcp-subagent/state"
+
+[profiles.codex]
+agent = "backend-coder"
+provider = "codex"
+stream = true
+"#,
+        )
+        .expect("write config");
+
+        let cfg = super::resolve_runtime_config(super::ConfigOverrides {
+            config_path: Some(config_path),
+            ..super::ConfigOverrides::default()
+        })
+        .expect("resolve config");
+
+        let profile = cfg.profiles.get("codex").expect("profile should exist");
+        assert_eq!(profile.agent, "backend-coder");
+        assert_eq!(profile.provider.as_deref(), Some("codex"));
+        assert_eq!(profile.stream, Some(true));
     }
 
     #[test]

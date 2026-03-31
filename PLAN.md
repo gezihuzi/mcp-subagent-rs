@@ -4,6 +4,29 @@
 
 按 `docs/mcp-subagent_tech_design_v0.10.md` 推进“可观察、可解释、可中断”的本地多 LLM 子代理 runtime：`spawn` 先接受、执行后置，任务阶段与阻塞原因可见，结果 native-first、统计可追踪。
 
+## Execution Strategy (v1.1 Experience Shell Current)
+
+### Batch V1.1-P0 - Sub Entry + Profile Dispatch（已完成）
+
+目标：先把“无切换入口”做出来，新增极简 `sub <profile> <task>` 入口与 profile 映射，默认以交互态流式输出运行，保留现有 `mcp-subagent` 全量命令面不变。
+依赖顺序：`T-166(Completed) -> T-167`。
+回滚策略：仅新增体验层入口与配置读取，不改动现有 `run/spawn/submit/watch` 主路径；若入口设计不达预期，可单独回退 `sub` 与 profile 映射，不影响 runtime 核心能力。
+风险与控制：若引入第二套配置会导致配置分裂；通过扩展现有 `config.toml` 的 `[profiles.*]` 命名空间收口，避免新增平行配置文件。
+
+### Batch V1.1-P1 - Unified Permission Broker + Direct Workspace（待开始）
+
+目标：补齐统一权限模型，让跨目录读写行为具备“可申请、可批准、可恢复”的一致语义，同时新增 `working_dir_policy=direct` 以支持实时写回源目录。
+依赖顺序：`T-167 -> T-168`。
+回滚策略：`direct` 作为显式 opt-in 策略，不改变现有 `auto/git_worktree/temp_copy` 默认行为；权限 broker 先以事件和状态扩展接入，不改现有成功路径。
+风险与控制：直接写源目录会提高误改风险；通过 profile 显式启用、保留 `serialize` 冲突策略、并在 `permission.requested` 阶段强制用户确认控制风险。
+
+### Batch V1.1-P2 - Rescue Render Adapter + MCP Alias（待开始）
+
+目标：将 Codex-rescue 风格输出（P1/P2、`Update(path)`、apply 提示）放到独立 render adapter，并补 `codex-rescue` MCP alias，做到“体验接近官方、契约保持稳定”。
+依赖顺序：`T-168 -> T-169`。
+回滚策略：仅新增 adapter/render 与 alias，不修改 `mcp-subagent.result.v1` 主契约；若渲染效果不稳定，可关闭 profile 级渲染开关回退到默认 summary。
+风险与控制：若把渲染逻辑侵入 summary contract 会污染通用 runtime；通过严格分层在 adapter 层完成格式化，确保多 provider 兼容性。
+
 ## Execution Strategy (v0.10 Current)
 
 ### Batch V1.0-P11 - Release Branch Cut（已完成）

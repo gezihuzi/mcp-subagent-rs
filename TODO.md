@@ -4155,3 +4155,42 @@
   - 已先在 `develop` 上提交 `T-164` 收口，提交点为 `c27d162 chore: automate release cut checks`，随后确认工作树为空。
   - `git flow release start 0.10.0` 已成功执行，当前分支已切到 `release/0.10.0`，release cut 起点明确固定在 `develop@c27d162`。
   - 本轮未引入新的 runtime/CLI 行为变更，只补 release branch cut 的计划与任务记录。
+
+## T-166 V1.1-P0-ExperienceShellPlanningKickoff (Completed 2026-03-31)
+
+任务：收口 v1.1“无切换体验”实施准备，先冻结批次边界与首个可执行 P0 任务，避免后续实现阶段并行发散。  
+验收标准：
+
+1. `PLAN.md` 新增 v1.1 执行批次，明确 `P0(sub+profile)`、`P1(permission broker+direct workspace)`、`P2(render adapter+MCP alias)` 的目标、依赖、回滚与风险。
+2. `TODO.md` 新增下一条可直接开工的 P0 实现任务，并给出可验证验收标准。
+3. 计划中明确“体验层与引擎层分离”，不直接修改 `mcp-subagent.result.v1` 契约。
+4. 本任务不改 runtime 运行语义，仅更新计划与任务编排文档。
+完成记录：
+
+- 已完成：
+  - `PLAN.md` 已新增 `Execution Strategy (v1.1 Experience Shell Current)`，拆分 `V1.1-P0/P1/P2` 三个批次，并明确依赖链 `T-166 -> T-167 -> T-168 -> T-169`。
+  - 已在本文件新增 `T-167` 作为下一条可执行的 P0 工程任务，验收标准覆盖 `sub` 入口、profile 映射与交互态默认流式策略。
+  - 已冻结分层原则：render 风格化放 adapter 层，不侵入主结果契约。
+  - 本轮仅更新计划与任务文档，未触及 runtime 执行路径。
+
+## T-167 V1.1-P0-SubEntryAndProfileDispatch (Completed 2026-03-31)
+
+任务：实现体验层最小闭环，新增 `sub <profile> <task>` 入口与 profile 映射，让日常调用可在不触碰底层命令面的前提下完成。  
+验收标准：
+
+1. CLI 新增 `sub` 子命令，支持 `sub <profile> <task>` 基础调用，并可透传常用开关（至少包含 `--stream`、`--json`）。
+2. 配置扩展到现有 `config.toml`，新增 `[profiles.<name>]` 映射（至少包含目标 agent/provider 与默认 stream 策略）；不新增第二套平行配置文件。
+3. `sub` 默认在交互态开启流式输出，非交互态保持可脚本化输出稳定（避免破坏 CI/脚本）。
+4. `sub` 内部复用现有 `run/spawn/submit` 执行链，不改 `mcp-subagent` 既有命令语义与 MCP 工具契约。
+5. 新增 CLI 解析与配置加载回归测试，`cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - `src/main.rs` 已新增 `sub` 子命令，支持 `sub <profile> <task>` 基础调用，并支持 `--stream/--no-stream`、`--json`、`--working-dir` 常用开关。
+  - `sub` 命令已新增 profile 分发逻辑：从 `RuntimeConfig.profiles` 读取目标 profile，映射到既有 `run_agent` 执行链，不改变 `run/spawn/submit/watch` 原有命令语义。
+  - `src/config.rs` 已扩展 `[profiles.<name>]` 配置解析，新增 `ProfileConfig` 与 `RuntimeConfig.profiles`，并保持配置入口继续收敛在现有 `config.toml`。
+  - 已落地交互态流式默认策略：`sub` 在显式 `--stream` 时强制流式，`--no-stream`/`--json`/非终端输出场景禁用流式，其余按 profile 默认值（未配置时默认开启）。
+  - 已补充回归测试：`sub` CLI 解析测试（positionals、stream/no-stream、working-dir）、`resolve_sub_stream_enabled` 决策测试、`[profiles.*]` 配置解析与加载测试。
+- 已验证：
+  - `cargo test --workspace` 通过。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
