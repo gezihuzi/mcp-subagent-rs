@@ -23,8 +23,9 @@ use mcp_subagent::{
     logging::{init_logging, LoggingGuard},
     mcp::{
         dto::{
-            ArtifactOutput, GetAgentStatsInput, GetAgentStatsOutput, HandleInput, OutcomeView,
-            ReadAgentArtifactInput, RunAgentInput, RunAgentSelectedFileInput, RunView,
+            ArtifactOutput, DenyPermissionInput, GetAgentStatsInput, GetAgentStatsOutput,
+            HandleInput, OutcomeView, ReadAgentArtifactInput, RunAgentInput,
+            RunAgentSelectedFileInput, RunView,
         },
         server::McpSubagentServer,
     },
@@ -308,6 +309,18 @@ enum Commands {
     },
     Cancel {
         handle_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Approve {
+        handle_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Deny {
+        handle_id: String,
+        #[arg(long)]
+        reason: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -960,6 +973,44 @@ async fn main() -> ExitCode {
             };
             info!("starting command: cancel");
             cancel_agent(cfg, handle_id, json).await
+        }
+        Commands::Approve { handle_id, json } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: approve");
+            approve_permission(cfg, handle_id, json).await
+        }
+        Commands::Deny {
+            handle_id,
+            reason,
+            json,
+        } => {
+            let (cfg, _guard) = match resolve_cli_config_with_logging(
+                config_path,
+                state_dir,
+                global_agents_dirs,
+                None,
+                cli_log_level,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(2);
+                }
+            };
+            info!("starting command: deny");
+            deny_permission(cfg, handle_id, reason, json).await
         }
         Commands::Artifact {
             handle_id,
@@ -4751,6 +4802,55 @@ async fn cancel_agent(cfg: RuntimeConfig, handle_id: String, json: bool) -> Exit
     }
 }
 
+async fn approve_permission(cfg: RuntimeConfig, handle_id: String, json: bool) -> ExitCode {
+    let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
+    match server
+        .approve_permission(Parameters(HandleInput { handle_id }))
+        .await
+    {
+        Ok(result) => {
+            if json {
+                print_json(&result.0);
+            } else {
+                println!("handle_id: {}", result.0.handle_id);
+                println!("status: {}", result.0.status);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("approve failed: {}", err.message);
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn deny_permission(
+    cfg: RuntimeConfig,
+    handle_id: String,
+    reason: Option<String>,
+    json: bool,
+) -> ExitCode {
+    let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
+    match server
+        .deny_permission(Parameters(DenyPermissionInput { handle_id, reason }))
+        .await
+    {
+        Ok(result) => {
+            if json {
+                print_json(&result.0);
+            } else {
+                println!("handle_id: {}", result.0.handle_id);
+                println!("status: {}", result.0.status);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("deny failed: {}", err.message);
+            ExitCode::from(1)
+        }
+    }
+}
+
 async fn read_artifact(
     cfg: RuntimeConfig,
     handle_id: String,
@@ -6886,6 +6986,42 @@ target/
         match cli.command {
             Commands::Stats { handle_id, json } => {
                 assert_eq!(handle_id, "handle-1");
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_approve_command_flags() {
+        let cli = Cli::parse_from(["mcp-subagent", "approve", "handle-1", "--json"]);
+        match cli.command {
+            Commands::Approve { handle_id, json } => {
+                assert_eq!(handle_id, "handle-1");
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_deny_command_flags() {
+        let cli = Cli::parse_from([
+            "mcp-subagent",
+            "deny",
+            "handle-1",
+            "--reason",
+            "owner denied",
+            "--json",
+        ]);
+        match cli.command {
+            Commands::Deny {
+                handle_id,
+                reason,
+                json,
+            } => {
+                assert_eq!(handle_id, "handle-1");
+                assert_eq!(reason.as_deref(), Some("owner denied"));
                 assert!(json);
             }
             other => panic!("unexpected command: {other:?}"),

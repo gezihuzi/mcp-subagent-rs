@@ -10,7 +10,7 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     tool, tool_router, ErrorData, Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -49,10 +49,10 @@ use crate::{
     runtime::{
         dispatcher::RunPhase,
         outcome::{FailureOutcome, RetryClassification, RetryInfo, RunOutcome, UsageStats},
-        permission::check_direct_workspace_permission,
+        permission::{check_direct_workspace_permission, PermissionDenied, PermissionOperation},
         workspace::resolve_source_path,
     },
-    spec::Provider,
+    spec::{runtime_policy::WorkingDirPolicy, Provider},
     types::RunMode,
 };
 
@@ -61,6 +61,98 @@ pub(crate) fn build_tool_router() -> ToolRouter<McpSubagentServer> {
 }
 
 const FIRST_OUTPUT_WARN_AFTER_SECS: u64 = 8;
+const ALLOWED_PATHS_ENV: &str = "MCP_SUBAGENT_ALLOWED_PATHS";
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PermissionRequestDetailKind {
+    DirectWorkspace,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PermissionRequestDetailStatus {
+    Requested,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PermissionDecisionTool {
+    ApprovePermission,
+    DenyPermission,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PermissionResumeMode {
+    SameHandle,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PermissionRequestDetail {
+    kind: PermissionRequestDetailKind,
+    status: PermissionRequestDetailStatus,
+    request: PermissionRequestPayload,
+    decision: PermissionDecisionPayload,
+    hints: PermissionRequestHints,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PermissionRequestPayload {
+    operation: PermissionOperation,
+    requested_path: String,
+    allowed_paths: Vec<String>,
+    reason: String,
+    working_dir_policy: WorkingDirPolicy,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PermissionDecisionPayload {
+    tools: Vec<PermissionDecisionTool>,
+    on_approve_status: RunPhase,
+    on_deny_status: RunPhase,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PermissionRequestHints {
+    env_var: &'static str,
+    resume_mode: PermissionResumeMode,
+}
+
+fn build_permission_requested_detail(permission_denied: &PermissionDenied) -> serde_json::Value {
+    serde_json::to_value(PermissionRequestDetail {
+        kind: PermissionRequestDetailKind::DirectWorkspace,
+        status: PermissionRequestDetailStatus::Requested,
+        request: PermissionRequestPayload {
+            operation: permission_denied.operation.clone(),
+            requested_path: permission_denied.requested_path.display().to_string(),
+            allowed_paths: permission_denied
+                .allowed_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>(),
+            reason: permission_denied.reason.clone(),
+            working_dir_policy: WorkingDirPolicy::Direct,
+        },
+        decision: PermissionDecisionPayload {
+            tools: vec![
+                PermissionDecisionTool::ApprovePermission,
+                PermissionDecisionTool::DenyPermission,
+            ],
+            on_approve_status: RunPhase::Running,
+            on_deny_status: RunPhase::Failed,
+        },
+        hints: PermissionRequestHints {
+            env_var: ALLOWED_PATHS_ENV,
+            resume_mode: PermissionResumeMode::SameHandle,
+        },
+    })
+    .unwrap_or_else(|_| json!({}))
+}
 
 fn is_terminal_status(status: &RunPhase) -> bool {
     matches!(
@@ -2036,16 +2128,7 @@ impl McpSubagentServer {
                         phase: "waiting_for_permission",
                         source: "permission",
                         message: "direct workspace permission required",
-                        detail: json!({
-                            "operation": permission_denied.operation.to_string(),
-                            "requested_path": permission_denied.requested_path.display().to_string(),
-                            "allowed_paths": permission_denied
-                                .allowed_paths
-                                .iter()
-                                .map(|path| path.display().to_string())
-                                .collect::<Vec<_>>(),
-                            "reason": permission_denied.reason,
-                        }),
+                        detail: build_permission_requested_detail(&permission_denied),
                     },
                 );
 
