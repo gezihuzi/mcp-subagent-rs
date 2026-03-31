@@ -1790,18 +1790,43 @@ enum PermissionPromptDecision {
     Skip,
 }
 
+fn render_permission_prompt(handle_id: &str) -> String {
+    let mut lines = Vec::new();
+    lines.push(String::new());
+    lines.push("permission required (direct workspace)".to_string());
+    lines.push(format!(
+        "run `{handle_id}` is blocked and waiting for your decision."
+    ));
+    lines.push("choose action:".to_string());
+    lines.push("  1) approve and resume this run now".to_string());
+    lines.push("  2) deny and fail this run now".to_string());
+    lines.push("  3) skip for now (exit and keep waiting)".to_string());
+    lines.push("commands:".to_string());
+    lines.push(format!("  mcp-subagent approve {handle_id}"));
+    lines.push(format!(
+        "  mcp-subagent deny {handle_id} --reason \"owner denied\""
+    ));
+    lines.join("\n")
+}
+
+fn parse_permission_prompt_decision(input: &str) -> PermissionPromptDecision {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "1" | "a" | "approve" | "y" | "yes" => PermissionPromptDecision::Approve,
+        "2" | "d" | "deny" | "n" | "no" => PermissionPromptDecision::Deny,
+        "3" | "s" | "skip" | "" => PermissionPromptDecision::Skip,
+        _ => PermissionPromptDecision::Skip,
+    }
+}
+
 fn prompt_permission_decision(handle_id: &str) -> PermissionPromptDecision {
-    print!("permission required for handle `{handle_id}`; approve now? [a]pprove/[d]eny/[s]kip: ");
+    println!("{}", render_permission_prompt(handle_id));
+    print!("select [1/2/3] (default: 3): ");
     let _ = std::io::stdout().flush();
     let mut buf = String::new();
     if std::io::stdin().read_line(&mut buf).is_err() {
         return PermissionPromptDecision::Skip;
     }
-    match buf.trim().to_ascii_lowercase().as_str() {
-        "a" | "approve" | "y" | "yes" => PermissionPromptDecision::Approve,
-        "d" | "deny" | "n" | "no" => PermissionPromptDecision::Deny,
-        _ => PermissionPromptDecision::Skip,
-    }
+    parse_permission_prompt_decision(&buf)
 }
 
 fn runs_root(state_dir: &Path) -> PathBuf {
@@ -6186,6 +6211,49 @@ target/
         let rendered = super::render_status_output_text(&output);
         assert!(rendered.contains("permission_approve_cmd: mcp-subagent approve handle-perm"));
         assert!(rendered.contains("permission_deny_cmd: mcp-subagent deny handle-perm"));
+    }
+
+    #[test]
+    fn parse_permission_prompt_decision_supports_numeric_and_alias_inputs() {
+        assert_eq!(
+            super::parse_permission_prompt_decision("1"),
+            super::PermissionPromptDecision::Approve
+        );
+        assert_eq!(
+            super::parse_permission_prompt_decision("approve"),
+            super::PermissionPromptDecision::Approve
+        );
+        assert_eq!(
+            super::parse_permission_prompt_decision("2"),
+            super::PermissionPromptDecision::Deny
+        );
+        assert_eq!(
+            super::parse_permission_prompt_decision("deny"),
+            super::PermissionPromptDecision::Deny
+        );
+        assert_eq!(
+            super::parse_permission_prompt_decision("3"),
+            super::PermissionPromptDecision::Skip
+        );
+        assert_eq!(
+            super::parse_permission_prompt_decision("skip"),
+            super::PermissionPromptDecision::Skip
+        );
+        assert_eq!(
+            super::parse_permission_prompt_decision(""),
+            super::PermissionPromptDecision::Skip
+        );
+    }
+
+    #[test]
+    fn render_permission_prompt_includes_handle_and_commands() {
+        let rendered = super::render_permission_prompt("handle-9");
+        assert!(rendered.contains("run `handle-9` is blocked"));
+        assert!(rendered.contains("1) approve and resume this run now"));
+        assert!(rendered.contains("2) deny and fail this run now"));
+        assert!(rendered.contains("3) skip for now (exit and keep waiting)"));
+        assert!(rendered.contains("mcp-subagent approve handle-9"));
+        assert!(rendered.contains("mcp-subagent deny handle-9 --reason \"owner denied\""));
     }
 
     #[test]

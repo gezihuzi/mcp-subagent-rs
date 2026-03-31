@@ -33,11 +33,14 @@ mcp-subagent events [<handle-id>] [--all] [--event ...] [--phase ...] [--follow]
 mcp-subagent watch <handle-id> [--phase ...] [--interval-ms ...] [--timeout-secs ...] [--phase-timeout-secs ...] [--json]
 mcp-subagent wait <handle-id> [--interval-ms ...] [--timeout-secs ...] [--json]
 mcp-subagent stats <handle-id> [--json]
+mcp-subagent sub <profile> <task> [--stream | --no-stream] [--working-dir ...] [--json]
 mcp-subagent run <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
 mcp-subagent spawn <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
 mcp-subagent submit <agent> --task <task> [--task-brief ...] [--parent-summary ...] [--stage ...] [--plan ...] [--selected-file ...] [--selected-file-inline ...] [--working-dir ...] [--json]
 mcp-subagent status <handle-id> [--json]
 mcp-subagent cancel <handle-id> [--json]
+mcp-subagent approve <handle-id> [--json]
+mcp-subagent deny <handle-id> [--reason ...] [--json]
 mcp-subagent artifact <handle-id> [--path ... | --kind summary|log|patch|json] [--json]
 ```
 
@@ -59,12 +62,38 @@ For generated-root template drift, use `bootstrap_catalog.refresh_commands`; for
 MCP tools:
 
 - `list_agents`, `run_agent`, `spawn_agent`, `get_agent_status`, `cancel_agent`, `read_agent_artifact`
+- `approve_permission`, `deny_permission`
 - `list_runs`, `get_run_result`, `read_run_logs`, `watch_run`
 - `watch_agent_events`, `get_agent_stats`
 
 `watch_agent_events` supports optional `phase` and `phase_timeout_secs`, and returns `current_phase`, `current_phase_age_ms`, `phase_timeout_hit`, `block_reason`, `advice`.
 `watch_run` also supports optional `phase` and `phase_timeout_secs`, and returns `current_phase`, `current_phase_age_ms`, `phase_timeout_hit`, `block_reason`, `advice`.
 `get_agent_status` and `get_agent_stats` also return `block_reason` + `advice` so polling-only hosts can surface actionable guidance without watch streams.
+
+## Permission Flow (Direct Workspace)
+
+When `working_dir_policy = "direct"` and target path is outside `MCP_SUBAGENT_ALLOWED_PATHS`, run enters `permission_required` instead of failing immediately.
+
+You can resolve it explicitly:
+
+```bash
+mcp-subagent approve <handle-id>
+mcp-subagent deny <handle-id> --reason "owner denied"
+```
+
+`status/watch/events` now print these executable command templates directly when blocked by permission.
+`approve` keeps the CLI alive by default until resumed run settles (set `MCP_SUBAGENT_CLI_SPAWN_ACCEPT_ONLY=1` for immediate return).
+
+For no-switch usage, `sub codex ...` stream mode supports in-command permission decision:
+
+- `approve`: resume same handle and continue stream
+- `deny`: fail same handle immediately
+- `skip`: exit with command hints so you can decide later
+
+Dual-mode behavior:
+
+- TTY + non-JSON (`sub codex ...`): terminal prompt offers `1/2/3` (`approve/deny/skip`).
+- `--json` or non-TTY (scripts/LLM hosts): no interactive prompt; decision stays explicit via `approve/deny` commands and status/event hints.
 
 Global flags:
 
@@ -115,6 +144,12 @@ Run one command for minimal local acceptance:
 
 ```bash
 ./scripts/smoke_v08.sh
+```
+
+Permission flow gate (direct workspace + approve/deny resume):
+
+```bash
+./scripts/smoke_v12_permission.sh
 ```
 
 ## Quick Onboarding (Happy Path)

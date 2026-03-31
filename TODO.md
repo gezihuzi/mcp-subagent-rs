@@ -4322,3 +4322,29 @@
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
   - `bash scripts/smoke_v12_permission.sh` 通过。
   - `bash scripts/smoke_v08.sh` 通过。
+
+## T-173 V1.2-P3-PermissionTuiAndDualModeDocs (Completed 2026-03-31)
+
+任务：完善第 2/3 步体验收口：README 明确权限链路与 dual-mode（TTY 交互、非 TTY/LLM 显式命令）策略；`sub codex` 遇到 `permission_required` 时给出更直观的终端交互提示，并支持更明确输入选项。
+验收标准：
+
+1. README 的命令面与权限章节覆盖 `sub/approve/deny`，并明确 `TTY` 下可交互、`--json`/非 `TTY` 路径保持显式命令流。
+2. `prompt_permission_decision` 升级为更清晰的 TUI 风格提示（包含 handle、可选动作、默认动作与可执行命令），输入支持 `1/2/3` 与语义别名（approve/deny/skip）。
+3. 非交互路径行为不变：`--json` 和非 TTY 不进入交互 prompt，继续通过 `status/watch/events` 与命令模板完成决策。
+4. 新增单测覆盖权限交互输入解析（数字与语义别名映射），避免回归。
+5. `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`bash scripts/smoke_v12_permission.sh`、`bash scripts/smoke_v08.sh` 通过。
+完成记录：
+
+- 已完成：
+  - `README.md` 已补齐权限链路说明，覆盖 `sub/approve/deny`，并新增 dual-mode 说明：`TTY + non-JSON` 走交互提示，`--json`/非 `TTY` 保持显式命令流。
+  - `src/main.rs` 的 `prompt_permission_decision` 已升级为更清晰的终端交互提示，展示 handle、三种动作与可执行命令，并新增 `1/2/3` 数字输入支持。
+  - 权限交互输入解析已收口为独立函数 `parse_permission_prompt_decision`，支持数字与语义别名（approve/deny/skip）。
+  - 非交互路径保持不变：仅在 TTY 条件进入交互 prompt，`--json`/非 TTY 继续依赖 `status/watch/events` 命令提示。
+  - 已新增回归测试：
+    - `parse_permission_prompt_decision_supports_numeric_and_alias_inputs`
+    - `render_permission_prompt_includes_handle_and_commands`
+- 已验证：
+  - `cargo test --workspace` 通过（lib 255 + bin 91 + e2e 3）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+  - `bash scripts/smoke_v12_permission.sh` 通过。
+  - `bash scripts/smoke_v08.sh` 通过。

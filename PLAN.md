@@ -48,6 +48,13 @@
 回滚策略：仅改 CLI 体验层和脚本/CI 编排，不修改 MCP/runtime 结果契约；若交互提示策略不理想，可单独回退 `sub codex` 权限提示与 CI 新 smoke 步骤。
 风险与控制：交互式阻塞处理若实现粗糙会造成 stream 噪音或死等；通过增量事件/日志游标输出、阻塞态单点提示、以及明确 `approve/deny` 命令模板控制可理解性与可恢复性。
 
+### Batch V1.2-P3 - Permission TUI UX + Dual-mode Docs（已完成）
+
+目标：在不改 runtime/MCP 契约的前提下，把 `sub codex` 的权限阻塞交互升级为更直观的 TUI 风格提示，并在 README 明确“终端交互模式 vs 非交互/LLM 显式命令模式”的双通道体验，降低误解与切换成本。
+依赖顺序：`T-172 -> T-173`。
+回滚策略：仅改 CLI 体验层提示与 README，不触碰 `mcp-subagent.result.v1`、run 持久化结构、MCP tool 输入输出；若交互提示不达预期可单独回退 prompt/render 代码与文档段落。
+风险与控制：交互提示若与自动化消费混用会引入脚本噪音；通过保持 `--json`/非 TTY 路径只输出显式命令提示、交互 prompt 仅在 TTY 下启用来控制兼容性。
+
 ## Execution Strategy (v0.10 Current)
 
 ### Batch V1.0-P11 - Release Branch Cut（已完成）
