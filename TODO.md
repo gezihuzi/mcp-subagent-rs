@@ -4219,13 +4219,24 @@
   - `cargo test --workspace` 通过（lib 244 + bin 85 + e2e 3）。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
 
-## T-169 V1.1-P2-RescueRenderAndMcpAlias (Planned)
+## T-169 V1.1-P2-RescueRenderAndMcpAlias (Completed 2026-03-31)
 
-任务：在不破坏 `mcp-subagent.result.v1` 主契约的前提下，新增 rescue 风格渲染 adapter，并提供 `codex-rescue` MCP 体验入口，收口“官方插件级无感输出”。
+任务：在不破坏 `mcp-subagent.result.v1` 主契约的前提下，新增 rescue 风格渲染 adapter，并提供 `codex` MCP 体验入口，收口“官方插件级无感输出”。
 验收标准：
 
 1. 新增独立 render adapter（如 `src/render/rescue.rs`），支持将 RunResult 映射为 P1/P2 + `Update(path)` + apply 提示。
 2. 渲染 adapter 仅作为展示层开关，不修改现有 summary/result contract 结构字段。
-3. MCP 层新增 `codex-rescue` 入口（alias/tool），与通用 `run_agent/spawn_agent` 保持兼容并可并存。
+3. MCP 层新增 `codex` 入口（tool），与通用 `run_agent/spawn_agent` 并存且无兼容别名包袱。
 4. `sub` 与 MCP 调用在开启 rescue 模式时输出风格一致；关闭时回退默认输出。
 5. 新增回归测试覆盖渲染开关、alias 路由与 contract 不变性，`cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - 新增独立展示层模块 `src/render/`，引入 `RenderStyle` 枚举与 `codex` 风格渲染函数；输出包含 `P1/P2` 分级、`Update(path)` 列表与 apply 提示，不改 `mcp-subagent.result.v1` 主契约。
+  - `sub` 命令已接入 profile 级 `render_style` 开关：`[profiles.<name>].render_style = "codex"` 时，CLI 输出走同一 `codex` 渲染；未开启时保持原默认输出。
+  - MCP 新增 `codex` tool（无兼容别名），支持直接任务调用并返回 `run + rendered + render_style`，内部复用既有 `run_agent` 执行链。
+  - `working_dir_policy_override` 与 `profiles.*.working_dir_policy` 已从字符串收敛为 `WorkingDirPolicy` 枚举，MCP/配置层非法值在反序列化阶段直接拒绝。
+  - 命名统一为 `codex`（不再使用 `codex-rescue`）。
+- 已验证：
+  - `cargo test --workspace` 通过（lib 249 + bin 85 + e2e 3）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。

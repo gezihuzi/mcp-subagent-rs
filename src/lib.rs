@@ -7,6 +7,7 @@ pub mod init;
 pub mod logging;
 pub mod mcp;
 pub mod probe;
+pub mod render;
 pub mod runtime;
 pub mod spec;
 pub mod types;

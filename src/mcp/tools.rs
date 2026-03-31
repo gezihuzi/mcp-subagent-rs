@@ -22,12 +22,12 @@ use crate::{
             sanitize_relative_artifact_path,
         },
         dto::{
-            AgentListing, CancelAgentOutput, GetAgentStatsInput, GetAgentStatsOutput,
-            GetRunResultInput, HandleInput, ListAgentsOutput, ListRunsInput, ListRunsOutput,
-            OutcomeView, ReadAgentArtifactInput, ReadAgentArtifactOutput, ReadRunLogsInput,
-            ReadRunLogsOutput, RunAgentInput, RunEventOutput, RunUsageOutput, RunView,
-            RuntimePolicySummary, WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput,
-            WatchRunOutput,
+            AgentListing, CancelAgentOutput, CodexInput, CodexOutput, GetAgentStatsInput,
+            GetAgentStatsOutput, GetRunResultInput, HandleInput, ListAgentsOutput, ListRunsInput,
+            ListRunsOutput, OutcomeView, ReadAgentArtifactInput, ReadAgentArtifactOutput,
+            ReadRunLogsInput, ReadRunLogsOutput, RunAgentInput, RunEventOutput, RunUsageOutput,
+            RunView, RuntimePolicySummary, WatchAgentEventsInput, WatchAgentEventsOutput,
+            WatchRunInput, WatchRunOutput,
         },
         helpers::{build_capability_notes, format_time},
         persistence::{
@@ -43,12 +43,14 @@ use crate::{
             build_run_spec_snapshot, RunRecord,
         },
     },
+    render::{codex::render_codex_outcome, RenderStyle},
     runtime::{
         dispatcher::RunPhase,
         outcome::{FailureOutcome, RetryClassification, RetryInfo, RunOutcome, UsageStats},
         permission::check_direct_workspace_permission,
         workspace::resolve_source_path,
     },
+    spec::Provider,
     types::RunMode,
 };
 
@@ -247,6 +249,26 @@ fn map_record_outcome(record: &RunRecord, usage: RunUsageOutput) -> Option<Outco
             elapsed_secs: *elapsed_secs,
         }),
         None => None,
+    }
+}
+
+fn render_default_outcome(outcome: Option<&OutcomeView>) -> String {
+    match outcome {
+        Some(OutcomeView::Succeeded {
+            summary,
+            key_findings,
+            ..
+        }) => {
+            if key_findings.is_empty() {
+                summary.clone()
+            } else {
+                format!("{summary}\n{}", key_findings.join("\n"))
+            }
+        }
+        Some(OutcomeView::Failed { error, .. }) => error.clone(),
+        Some(OutcomeView::Cancelled { reason }) => reason.clone(),
+        Some(OutcomeView::TimedOut { elapsed_secs }) => format!("timed out after {elapsed_secs}s"),
+        None => "no outcome available".to_string(),
     }
 }
 
@@ -955,6 +977,68 @@ fn build_agent_stats_output(
 
 #[tool_router]
 impl McpSubagentServer {
+    fn resolve_codex_agent_name(
+        &self,
+        requested_agent_name: Option<String>,
+    ) -> std::result::Result<String, ErrorData> {
+        if let Some(agent_name) = requested_agent_name {
+            return Ok(agent_name);
+        }
+
+        let loaded = self.load_specs()?;
+        if loaded.iter().any(|item| item.spec.core.name == "codex") {
+            return Ok("codex".to_string());
+        }
+
+        let mut codex_agents = loaded
+            .iter()
+            .filter(|item| matches!(item.spec.core.provider, Provider::Codex))
+            .map(|item| item.spec.core.name.clone())
+            .collect::<Vec<_>>();
+        codex_agents.sort();
+        if let Some(agent_name) = codex_agents.into_iter().next() {
+            return Ok(agent_name);
+        }
+
+        Err(ErrorData::invalid_params(
+            "codex tool requires either an `agent_name` override or at least one codex provider agent",
+            None,
+        ))
+    }
+
+    #[tool(description = "Run codex-style workflow and return rendered P1/P2 + Update output.")]
+    pub async fn codex(
+        &self,
+        Parameters(input): Parameters<CodexInput>,
+    ) -> std::result::Result<Json<CodexOutput>, ErrorData> {
+        let render_style = input.render_style.unwrap_or(RenderStyle::Codex);
+        let run = self
+            .run_agent(Parameters(RunAgentInput {
+                agent_name: self.resolve_codex_agent_name(input.agent_name)?,
+                task: input.task,
+                task_brief: input.task_brief,
+                parent_summary: input.parent_summary,
+                selected_files: input.selected_files,
+                stage: input.stage,
+                plan_ref: input.plan_ref,
+                working_dir: input.working_dir,
+                working_dir_policy_override: input.working_dir_policy_override,
+            }))
+            .await?
+            .0;
+
+        let rendered = match render_style {
+            RenderStyle::Default => render_default_outcome(run.outcome.as_ref()),
+            RenderStyle::Codex => render_codex_outcome(run.outcome.as_ref()),
+        };
+
+        Ok(Json(CodexOutput {
+            run,
+            rendered,
+            render_style,
+        }))
+    }
+
     #[tool(description = "List all available mcp-subagent agent specs.")]
     pub async fn list_agents(&self) -> std::result::Result<Json<ListAgentsOutput>, ErrorData> {
         let loaded = self.load_specs()?;

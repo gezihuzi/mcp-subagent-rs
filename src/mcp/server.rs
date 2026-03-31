@@ -20,18 +20,18 @@ use crate::{
     runtime::workspace::resolve_source_path,
     spec::{
         registry::{load_agent_specs_from_dirs, LoadedAgentSpec},
-        runtime_policy::{FileConflictPolicy, SandboxPolicy, WorkingDirPolicy},
+        runtime_policy::{FileConflictPolicy, SandboxPolicy},
         Provider,
     },
     types::{RunMode, SelectedFile, TaskSpec, WorkflowHints},
 };
 
 pub use crate::mcp::dto::{
-    AgentListing, ArtifactOutput, CancelAgentOutput, GetAgentStatsInput, GetAgentStatsOutput,
-    GetRunResultInput, HandleInput, ListAgentsOutput, ListRunsInput, ListRunsOutput, OutcomeView,
-    ReadAgentArtifactInput, ReadAgentArtifactOutput, ReadRunLogsInput, ReadRunLogsOutput,
-    RunAgentInput, RunAgentSelectedFileInput, RunEventOutput, RunUsageOutput, RunView,
-    RuntimePolicySummary, WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput,
+    AgentListing, ArtifactOutput, CancelAgentOutput, CodexInput, CodexOutput, GetAgentStatsInput,
+    GetAgentStatsOutput, GetRunResultInput, HandleInput, ListAgentsOutput, ListRunsInput,
+    ListRunsOutput, OutcomeView, ReadAgentArtifactInput, ReadAgentArtifactOutput, ReadRunLogsInput,
+    ReadRunLogsOutput, RunAgentInput, RunAgentSelectedFileInput, RunEventOutput, RunUsageOutput,
+    RunView, RuntimePolicySummary, WatchAgentEventsInput, WatchAgentEventsOutput, WatchRunInput,
     WatchRunOutput,
 };
 
@@ -113,8 +113,7 @@ impl McpSubagentServer {
                 )
             })?;
 
-        if let Some(policy_raw) = input.working_dir_policy_override.as_deref() {
-            let policy = parse_working_dir_policy_override(policy_raw)?;
+        if let Some(policy) = input.working_dir_policy_override.clone() {
             loaded.spec.runtime.working_dir_policy = policy;
         }
         let (preferred_run_mode, preferred_run_mode_source) =
@@ -326,28 +325,6 @@ pub(crate) fn provider_unavailable_message(provider: &Provider, details: &[Strin
     )
 }
 
-fn parse_working_dir_policy_override(
-    raw: &str,
-) -> std::result::Result<WorkingDirPolicy, ErrorData> {
-    let normalized = raw.trim().to_ascii_lowercase();
-    let policy = match normalized.as_str() {
-        "auto" => WorkingDirPolicy::Auto,
-        "direct" => WorkingDirPolicy::Direct,
-        "in_place" => WorkingDirPolicy::InPlace,
-        "temp_copy" => WorkingDirPolicy::TempCopy,
-        "git_worktree" => WorkingDirPolicy::GitWorktree,
-        _ => {
-            return Err(ErrorData::invalid_params(
-                format!(
-                    "unsupported working_dir_policy override `{raw}`; supported: auto|direct|in_place|temp_copy|git_worktree"
-                ),
-                None,
-            ));
-        }
-    };
-    Ok(policy)
-}
-
 pub(crate) async fn acquire_serialize_locks_from_state(
     state: &Arc<Mutex<RuntimeState>>,
     mut lock_keys: Vec<String>,
@@ -403,7 +380,7 @@ mod tests {
         probe::{ProbeStatus, ProviderCapabilities, ProviderProbe, ProviderProber},
         runtime::outcome::{RunOutcome, SuccessOutcome, UsageStats},
         runtime::summary::{ArtifactKind, ArtifactRef, SummaryParseStatus, VerificationStatus},
-        spec::Provider,
+        spec::{runtime_policy::WorkingDirPolicy, Provider},
     };
 
     use super::{
@@ -756,7 +733,7 @@ sandbox = "read_only"
                 stage: None,
                 plan_ref: None,
                 working_dir: None,
-                working_dir_policy_override: Some("direct".to_string()),
+                working_dir_policy_override: Some(WorkingDirPolicy::Direct),
             }))
             .await
             .expect("run")
@@ -768,38 +745,6 @@ sandbox = "read_only"
                 .expect("read run json");
         let run_obj: serde_json::Value = serde_json::from_str(&run_json).expect("parse run json");
         assert_eq!(run_obj["spec_snapshot"]["working_dir_policy"], "direct");
-    }
-
-    #[tokio::test]
-    async fn run_agent_rejects_invalid_working_dir_policy_override() {
-        let temp = tempdir().expect("temp");
-        let agents_dir = temp.path().join("agents");
-        let state_dir = temp.path().join("state");
-        fs::create_dir_all(&agents_dir).expect("create agents");
-        write_agent_spec(&agents_dir);
-        let server = make_server(agents_dir, state_dir);
-
-        let err = match server
-            .run_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
-                agent_name: "reviewer".to_string(),
-                task: "invalid override".to_string(),
-                task_brief: None,
-                parent_summary: None,
-                selected_files: Vec::new(),
-                stage: None,
-                plan_ref: None,
-                working_dir: None,
-                working_dir_policy_override: Some("bad-policy".to_string()),
-            }))
-            .await
-        {
-            Ok(_) => panic!("run should fail for invalid override"),
-            Err(err) => err,
-        };
-        assert!(err
-            .message
-            .as_ref()
-            .contains("unsupported working_dir_policy override"));
     }
 
     #[tokio::test]
@@ -1327,6 +1272,7 @@ exit 0
         for expected in [
             "list_agents",
             "list_runs",
+            "codex",
             "run_agent",
             "spawn_agent",
             "get_agent_status",
@@ -1340,6 +1286,42 @@ exit 0
         ] {
             assert!(tools.iter().any(|tool| tool.name == expected));
         }
+
+        let codex_res = client
+            .call_tool(
+                CallToolRequestParams::new("codex").with_arguments(
+                    json!({
+                        "agent_name": "reviewer",
+                        "task": "codex-style review parser",
+                    })
+                    .as_object()
+                    .expect("object")
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("codex run");
+        let codex_json = codex_res
+            .structured_content
+            .expect("codex has structured content");
+        assert_eq!(
+            codex_json
+                .get("render_style")
+                .and_then(|value| value.as_str()),
+            Some("codex")
+        );
+        let codex_run = codex_json.get("run").expect("run output");
+        assert_eq!(
+            codex_run
+                .get("outcome")
+                .and_then(|value| value.get("status"))
+                .and_then(|value| value.as_str()),
+            Some("succeeded")
+        );
+        assert!(codex_json
+            .get("rendered")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value.contains("P1")));
 
         let spawn_res = client
             .call_tool(

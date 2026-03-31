@@ -20,9 +20,9 @@
 回滚策略：`direct` 作为显式 opt-in 策略，不改变现有 `auto/git_worktree/temp_copy` 默认行为；权限 broker 先以事件和状态扩展接入，不改现有成功路径。
 风险与控制：直接写源目录会提高误改风险；通过 profile 显式启用、保留 `serialize` 冲突策略、并在 `permission.requested` 阶段强制用户确认控制风险。
 
-### Batch V1.1-P2 - Rescue Render Adapter + MCP Alias（待开始）
+### Batch V1.1-P2 - Rescue Render Adapter + MCP Alias（已完成）
 
-目标：将 Codex-rescue 风格输出（P1/P2、`Update(path)`、apply 提示）放到独立 render adapter，并补 `codex-rescue` MCP alias，做到“体验接近官方、契约保持稳定”。
+目标：将 Codex 风格输出（P1/P2、`Update(path)`、apply 提示）放到独立 render adapter，并补 `codex` MCP 入口，做到“体验接近官方、契约保持稳定”。
 依赖顺序：`T-168 -> T-169`。
 回滚策略：仅新增 adapter/render 与 alias，不修改 `mcp-subagent.result.v1` 主契约；若渲染效果不稳定，可关闭 profile 级渲染开关回退到默认 summary。
 风险与控制：若把渲染逻辑侵入 summary contract 会污染通用 runtime；通过严格分层在 adapter 层完成格式化，确保多 provider 兼容性。

@@ -9,6 +9,8 @@ use serde::Deserialize;
 use crate::{
     cwd::resolve_cli_cwd,
     error::{McpSubagentError, Result},
+    render::RenderStyle,
+    spec::runtime_policy::WorkingDirPolicy,
 };
 
 const DEFAULT_AGENTS_DIR: &str = "./agents";
@@ -35,7 +37,8 @@ pub struct ProfileConfig {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub stream: Option<bool>,
-    pub working_dir_policy: Option<String>,
+    pub working_dir_policy: Option<WorkingDirPolicy>,
+    pub render_style: Option<RenderStyle>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -302,6 +305,7 @@ fn merge_layers(
 mod tests {
     use std::{fs, path::PathBuf};
 
+    use crate::{render::RenderStyle, spec::runtime_policy::WorkingDirPolicy};
     use tempfile::tempdir;
 
     use super::{
@@ -455,26 +459,25 @@ agents_dirs = ["agents"]
     fn file_config_profiles_deserialize_without_extra_sections() {
         let cfg: FileConfig = toml::from_str(
             r#"
-[profiles.codex-rescue]
+[profiles.codex]
 agent = "backend-coder"
 provider = "codex"
 model = "gpt-5.3-codex"
 stream = true
 working_dir_policy = "direct"
+render_style = "codex"
 "#,
         )
         .expect("file config should parse profiles");
 
         assert_eq!(cfg.profiles.len(), 1);
-        let profile = cfg
-            .profiles
-            .get("codex-rescue")
-            .expect("profile should exist");
+        let profile = cfg.profiles.get("codex").expect("profile should exist");
         assert_eq!(profile.agent, "backend-coder");
         assert_eq!(profile.provider.as_deref(), Some("codex"));
         assert_eq!(profile.model.as_deref(), Some("gpt-5.3-codex"));
         assert_eq!(profile.stream, Some(true));
-        assert_eq!(profile.working_dir_policy.as_deref(), Some("direct"));
+        assert_eq!(profile.working_dir_policy, Some(WorkingDirPolicy::Direct));
+        assert_eq!(profile.render_style, Some(RenderStyle::Codex));
     }
 
     #[test]
@@ -493,6 +496,7 @@ agent = "backend-coder"
 provider = "codex"
 stream = true
 working_dir_policy = "direct"
+render_style = "codex"
 "#,
         )
         .expect("write config");
@@ -507,7 +511,8 @@ working_dir_policy = "direct"
         assert_eq!(profile.agent, "backend-coder");
         assert_eq!(profile.provider.as_deref(), Some("codex"));
         assert_eq!(profile.stream, Some(true));
-        assert_eq!(profile.working_dir_policy.as_deref(), Some("direct"));
+        assert_eq!(profile.working_dir_policy, Some(WorkingDirPolicy::Direct));
+        assert_eq!(profile.render_style, Some(RenderStyle::Codex));
     }
 
     #[test]

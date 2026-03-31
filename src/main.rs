@@ -29,8 +29,10 @@ use mcp_subagent::{
         server::McpSubagentServer,
     },
     probe::SystemProviderProber,
+    render::{codex::render_codex_outcome, RenderStyle},
     runtime::context::validate_default_summary_contract_template,
     spec::registry::load_agent_specs_from_dirs,
+    spec::runtime_policy::WorkingDirPolicy,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde::{Deserialize, Serialize};
@@ -824,6 +826,7 @@ async fn main() -> ExitCode {
                     selected_files_inline,
                     working_dir,
                     working_dir_policy_override: None,
+                    render_style: None,
                     stream,
                     json,
                 },
@@ -870,6 +873,7 @@ async fn main() -> ExitCode {
                     selected_files_inline,
                     working_dir,
                     working_dir_policy_override: None,
+                    render_style: None,
                     stream,
                     json,
                 },
@@ -916,6 +920,7 @@ async fn main() -> ExitCode {
                     selected_files_inline,
                     working_dir,
                     working_dir_policy_override: None,
+                    render_style: None,
                     stream,
                     json,
                 },
@@ -4324,7 +4329,8 @@ struct AgentRunCommand {
     selected_files: Vec<PathBuf>,
     selected_files_inline: Vec<PathBuf>,
     working_dir: Option<PathBuf>,
-    working_dir_policy_override: Option<String>,
+    working_dir_policy_override: Option<WorkingDirPolicy>,
+    render_style: Option<RenderStyle>,
     stream: bool,
     json: bool,
 }
@@ -4371,6 +4377,7 @@ async fn run_profile_sub_command(
             selected_files_inline: Vec::new(),
             working_dir,
             working_dir_policy_override: profile.working_dir_policy,
+            render_style: profile.render_style,
             stream,
             json,
         },
@@ -4411,6 +4418,7 @@ async fn run_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
         selected_files_inline,
         working_dir,
         working_dir_policy_override,
+        render_style,
         stream,
         json,
     } = options;
@@ -4438,7 +4446,8 @@ async fn run_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
     };
 
     if stream {
-        return spawn_and_optionally_stream(cfg, input, json, true, false, "run").await;
+        return spawn_and_optionally_stream(cfg, input, json, true, false, "run", render_style)
+            .await;
     }
 
     let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
@@ -4452,7 +4461,9 @@ async fn run_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
                 println!("handle_id: {}", out.handle_id);
                 println!("phase: {}", out.phase);
                 println!("terminal: {}", if out.terminal { "yes" } else { "no" });
-                if let Some(OutcomeView::Succeeded {
+                if matches!(render_style, Some(RenderStyle::Codex)) {
+                    println!("{}", render_codex_outcome(out.outcome.as_ref()));
+                } else if let Some(OutcomeView::Succeeded {
                     summary,
                     key_findings,
                     ..
@@ -4488,6 +4499,7 @@ async fn spawn_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
         selected_files_inline,
         working_dir,
         working_dir_policy_override,
+        render_style,
         stream,
         json,
     } = options;
@@ -4513,7 +4525,7 @@ async fn spawn_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
         working_dir: working_dir.map(|path| path.display().to_string()),
         working_dir_policy_override,
     };
-    spawn_and_optionally_stream(cfg, input, json, stream, true, "spawn").await
+    spawn_and_optionally_stream(cfg, input, json, stream, true, "spawn", render_style).await
 }
 
 async fn submit_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
@@ -4528,6 +4540,7 @@ async fn submit_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode 
         selected_files_inline,
         working_dir,
         working_dir_policy_override,
+        render_style,
         stream,
         json,
     } = options;
@@ -4553,7 +4566,7 @@ async fn submit_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode 
         working_dir: working_dir.map(|path| path.display().to_string()),
         working_dir_policy_override,
     };
-    spawn_and_optionally_stream(cfg, input, json, stream, true, "submit").await
+    spawn_and_optionally_stream(cfg, input, json, stream, true, "submit", render_style).await
 }
 
 fn cli_spawn_waits_for_completion() -> bool {
@@ -4597,6 +4610,7 @@ fn print_stream_accepted_output(output: &RunView, json: bool) -> std::result::Re
 fn print_stream_terminal_output(
     output: &RunStatusOutput,
     json: bool,
+    render_style: Option<RenderStyle>,
 ) -> std::result::Result<(), String> {
     if json {
         return print_json_line(&serde_json::json!({
@@ -4604,7 +4618,13 @@ fn print_stream_terminal_output(
             "run": output,
         }));
     }
-    println!("{}", render_status_output_text(output));
+    if matches!(render_style, Some(RenderStyle::Codex)) {
+        println!("handle_id: {}", output.handle_id);
+        println!("status: {}", output.status);
+        println!("{}", render_codex_outcome(output.outcome.as_ref()));
+    } else {
+        println!("{}", render_status_output_text(output));
+    }
     Ok(())
 }
 
@@ -4633,6 +4653,7 @@ async fn spawn_and_optionally_stream(
     stream: bool,
     announce_keepalive: bool,
     error_label: &str,
+    render_style: Option<RenderStyle>,
 ) -> ExitCode {
     let server =
         McpSubagentServer::new_with_state_dir(cfg.agents_dirs.clone(), cfg.state_dir.clone());
@@ -4652,7 +4673,8 @@ async fn spawn_and_optionally_stream(
                 }
                 match fetch_status_output(&server, output.handle_id.clone()).await {
                     Ok(status) => {
-                        if let Err(err) = print_stream_terminal_output(&status, json) {
+                        if let Err(err) = print_stream_terminal_output(&status, json, render_style)
+                        {
                             eprintln!("stream failed: {err}");
                             return ExitCode::from(1);
                         }
@@ -5072,12 +5094,7 @@ mod tests {
 
     #[test]
     fn parses_sub_command_with_required_positionals() {
-        let cli = Cli::parse_from([
-            "mcp-subagent",
-            "sub",
-            "codex-rescue",
-            "optimize website copy",
-        ]);
+        let cli = Cli::parse_from(["mcp-subagent", "sub", "codex", "optimize website copy"]);
         match cli.command {
             Commands::Sub {
                 profile,
@@ -5086,7 +5103,7 @@ mod tests {
                 no_stream,
                 ..
             } => {
-                assert_eq!(profile, "codex-rescue");
+                assert_eq!(profile, "codex");
                 assert_eq!(task, "optimize website copy");
                 assert!(!stream);
                 assert!(!no_stream);
@@ -5153,6 +5170,7 @@ mod tests {
             model: Some("gpt-5.3-codex".to_string()),
             stream: Some(false),
             working_dir_policy: None,
+            render_style: None,
         };
         assert!(super::resolve_sub_stream_enabled(
             &profile, true, false, false

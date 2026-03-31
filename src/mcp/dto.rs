@@ -1,3 +1,4 @@
+use crate::{render::RenderStyle, spec::runtime_policy::WorkingDirPolicy};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -40,7 +41,29 @@ pub struct RunAgentInput {
     pub stage: Option<String>,
     pub plan_ref: Option<String>,
     pub working_dir: Option<String>,
-    pub working_dir_policy_override: Option<String>,
+    pub working_dir_policy_override: Option<WorkingDirPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct CodexInput {
+    pub task: String,
+    pub task_brief: Option<String>,
+    pub parent_summary: Option<String>,
+    #[serde(default)]
+    pub selected_files: Vec<RunAgentSelectedFileInput>,
+    pub stage: Option<String>,
+    pub plan_ref: Option<String>,
+    pub working_dir: Option<String>,
+    pub working_dir_policy_override: Option<WorkingDirPolicy>,
+    pub agent_name: Option<String>,
+    pub render_style: Option<RenderStyle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct CodexOutput {
+    pub run: RunView,
+    pub rendered: String,
+    pub render_style: RenderStyle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -240,4 +263,70 @@ pub struct ReadAgentArtifactOutput {
     pub handle_id: String,
     pub path: String,
     pub content: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{render::RenderStyle, spec::runtime_policy::WorkingDirPolicy};
+
+    use super::{CodexInput, RunAgentInput};
+
+    #[test]
+    fn run_agent_input_deserializes_working_dir_policy_override_enum() {
+        let raw = serde_json::json!({
+            "agent_name": "reviewer",
+            "task": "review parser",
+            "task_brief": null,
+            "parent_summary": null,
+            "selected_files": [],
+            "stage": null,
+            "plan_ref": null,
+            "working_dir": null,
+            "working_dir_policy_override": "direct"
+        });
+        let parsed: RunAgentInput = serde_json::from_value(raw).expect("deserialize input");
+        assert_eq!(
+            parsed.working_dir_policy_override,
+            Some(WorkingDirPolicy::Direct)
+        );
+    }
+
+    #[test]
+    fn run_agent_input_rejects_unknown_working_dir_policy_override() {
+        let raw = serde_json::json!({
+            "agent_name": "reviewer",
+            "task": "review parser",
+            "task_brief": null,
+            "parent_summary": null,
+            "selected_files": [],
+            "stage": null,
+            "plan_ref": null,
+            "working_dir": null,
+            "working_dir_policy_override": "bad-policy"
+        });
+        let err = serde_json::from_value::<RunAgentInput>(raw).expect_err("must reject override");
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn codex_input_defaults_selected_files() {
+        let raw = serde_json::json!({
+            "task": "review parser"
+        });
+        let parsed: CodexInput = serde_json::from_value(raw).expect("deserialize codex input");
+        assert!(parsed.selected_files.is_empty());
+    }
+
+    #[test]
+    fn codex_input_deserializes_render_style_enum() {
+        let raw = serde_json::json!({
+            "task": "review parser",
+            "render_style": "codex"
+        });
+        let parsed: CodexInput = serde_json::from_value(raw).expect("deserialize codex input");
+        assert_eq!(parsed.render_style, Some(RenderStyle::Codex));
+    }
 }
