@@ -70,6 +70,7 @@ pub enum ParsePolicy {
 #[serde(rename_all = "snake_case")]
 pub enum WorkingDirPolicy {
     Auto,
+    Direct,
     InPlace,
     TempCopy,
     GitWorktree,
@@ -79,6 +80,7 @@ impl std::fmt::Display for WorkingDirPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Self::Auto => "auto",
+            Self::Direct => "direct",
             Self::InPlace => "in_place",
             Self::TempCopy => "temp_copy",
             Self::GitWorktree => "git_worktree",

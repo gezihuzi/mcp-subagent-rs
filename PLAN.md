@@ -13,7 +13,7 @@
 回滚策略：仅新增体验层入口与配置读取，不改动现有 `run/spawn/submit/watch` 主路径；若入口设计不达预期，可单独回退 `sub` 与 profile 映射，不影响 runtime 核心能力。
 风险与控制：若引入第二套配置会导致配置分裂；通过扩展现有 `config.toml` 的 `[profiles.*]` 命名空间收口，避免新增平行配置文件。
 
-### Batch V1.1-P1 - Unified Permission Broker + Direct Workspace（待开始）
+### Batch V1.1-P1 - Unified Permission Broker + Direct Workspace（已完成）
 
 目标：补齐统一权限模型，让跨目录读写行为具备“可申请、可批准、可恢复”的一致语义，同时新增 `working_dir_policy=direct` 以支持实时写回源目录。
 依赖顺序：`T-167 -> T-168`。

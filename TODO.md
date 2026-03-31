@@ -4194,3 +4194,38 @@
 - 已验证：
   - `cargo test --workspace` 通过。
   - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-168 V1.1-P1-DirectWorkspaceAndPermissionBroker (Completed 2026-03-31)
+
+任务：落地 `working_dir_policy=direct` 与最小权限 broker，解决“修改落到隔离目录、无法实时写回源目录”的体验问题，同时保持现有 `in_place/temp_copy/git_worktree` 语义兼容。  
+验收标准：
+
+1. `WorkingDirPolicy` 新增 `direct`，runtime workspace 准备阶段支持 direct 原地工作目录，并在 run metadata 中可观测。
+2. 新增最小权限 broker：`direct` 模式下按 `MCP_SUBAGENT_ALLOWED_PATHS` 校验目标路径，越界时返回清晰错误。
+3. 异步执行路径在权限不足时写入 `permission.requested` 事件，并将 run 标记为失败且可解释。
+4. `sub` profile 支持 `working_dir_policy` 覆盖（通过现有 `config.toml [profiles.*]`），无需新增第二套配置文件。
+5. `watch/status/stats` 的 block reason 能识别权限等待/拒绝信号，并给出对应建议。
+6. 新增单测覆盖 `direct` workspace、permission broker、override 解析与事件分类，`cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+完成记录：
+
+- 已完成：
+  - `WorkingDirPolicy` 已新增 `direct`，并在 workspace 层落地为原地路径执行；run metadata 现在会记录 `working_dir_policy=direct` 与 `workspace.mode=direct`。
+  - 新增最小权限 broker（`src/runtime/permission.rs`）：`direct` 模式按 `MCP_SUBAGENT_ALLOWED_PATHS` 校验目录前缀，越界时返回结构化拒绝信息与可执行修复提示。
+  - 异步路径在权限不足时会写入 `permission.requested` 事件并终止 run，状态与错误信息可追踪（含 operation/requested_path/allowed_paths）。
+  - `RunAgentInput` 已新增 `working_dir_policy_override`；`sub` profile 可通过 `config.toml` 的 `working_dir_policy` 覆盖 agent 默认策略，无需新配置文件。
+  - `watch/status/stats` block reason 已扩展 `permission_required`，并给出 `MCP_SUBAGENT_ALLOWED_PATHS` 的修复建议。
+  - 已补充回归测试：permission broker 单测、`direct` workspace 与 cleanup 单测、override 解析与生效单测、事件分类/建议单测。
+- 已验证：
+  - `cargo test --workspace` 通过（lib 244 + bin 85 + e2e 3）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+## T-169 V1.1-P2-RescueRenderAndMcpAlias (Planned)
+
+任务：在不破坏 `mcp-subagent.result.v1` 主契约的前提下，新增 rescue 风格渲染 adapter，并提供 `codex-rescue` MCP 体验入口，收口“官方插件级无感输出”。
+验收标准：
+
+1. 新增独立 render adapter（如 `src/render/rescue.rs`），支持将 RunResult 映射为 P1/P2 + `Update(path)` + apply 提示。
+2. 渲染 adapter 仅作为展示层开关，不修改现有 summary/result contract 结构字段。
+3. MCP 层新增 `codex-rescue` 入口（alias/tool），与通用 `run_agent/spawn_agent` 保持兼容并可并存。
+4. `sub` 与 MCP 调用在开启 rescue 模式时输出风格一致；关闭时回退默认输出。
+5. 新增回归测试覆盖渲染开关、alias 路由与 contract 不变性，`cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。

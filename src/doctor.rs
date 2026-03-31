@@ -1076,6 +1076,7 @@ fn build_workspace_policy_hints(loaded_specs: &[LoadedAgentSpec]) -> Vec<Workspa
 
     [
         WorkingDirPolicy::Auto,
+        WorkingDirPolicy::Direct,
         WorkingDirPolicy::InPlace,
         WorkingDirPolicy::GitWorktree,
         WorkingDirPolicy::TempCopy,
@@ -1096,6 +1097,7 @@ fn build_workspace_policy_hints(loaded_specs: &[LoadedAgentSpec]) -> Vec<Workspa
 fn workspace_policy_cost_hint(policy: &WorkingDirPolicy) -> &'static str {
     match policy {
         WorkingDirPolicy::Auto => "balanced: read tasks stay in-place, write tasks prefer worktree",
+        WorkingDirPolicy::Direct => "lowest setup cost, direct write-back with allowlist checks",
         WorkingDirPolicy::InPlace => "lowest setup cost, highest repo pollution risk",
         WorkingDirPolicy::GitWorktree => "moderate setup cost, strong isolation for write tasks",
         WorkingDirPolicy::TempCopy => "highest I/O and disk cost, strongest isolation",
@@ -1105,6 +1107,9 @@ fn workspace_policy_cost_hint(policy: &WorkingDirPolicy) -> &'static str {
 fn workspace_policy_recommendation(policy: &WorkingDirPolicy) -> &'static str {
     match policy {
         WorkingDirPolicy::Auto => "recommended default for mixed read/write workloads",
+        WorkingDirPolicy::Direct => {
+            "use when edits must land in source dir and permission allowlist is configured"
+        }
         WorkingDirPolicy::InPlace => "use for read-only or very small safe edits",
         WorkingDirPolicy::GitWorktree => "use for parallel write-heavy task isolation",
         WorkingDirPolicy::TempCopy => "use when worktree is unavailable or full clone is required",

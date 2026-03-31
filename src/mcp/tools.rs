@@ -46,6 +46,8 @@ use crate::{
     runtime::{
         dispatcher::RunPhase,
         outcome::{FailureOutcome, RetryClassification, RetryInfo, RunOutcome, UsageStats},
+        permission::check_direct_workspace_permission,
+        workspace::resolve_source_path,
     },
     types::RunMode,
 };
@@ -558,6 +560,17 @@ fn classify_block_reason_from_text(text: &str) -> Option<&'static str> {
     if contains_any(
         &lowered,
         &[
+            "permission required",
+            "mcp_subagent_allowed_paths",
+            "outside allowed paths",
+            "waiting_for_permission",
+        ],
+    ) {
+        return Some("permission_required");
+    }
+    if contains_any(
+        &lowered,
+        &[
             "tool approval",
             "approval required",
             "permission denied",
@@ -634,6 +647,7 @@ fn classify_block_reason_from_events(
 ) -> Option<&'static str> {
     for event in events.iter().rev() {
         match event.event.as_str() {
+            "permission.requested" => return Some("permission_required"),
             "provider.waiting_for_trust" => return Some("trust_required"),
             "provider.waiting_for_auth" => return Some("auth_required"),
             "provider.waiting_for_tool_approval" => return Some("tool_approval_required"),
@@ -731,6 +745,10 @@ fn build_watch_advice(
                 &mut advice,
                 "provider is waiting for approval; adjust approval mode or confirm prompt",
             ),
+            "permission_required" => push_advice(
+                &mut advice,
+                "direct workspace permission is required; include target directory in MCP_SUBAGENT_ALLOWED_PATHS or switch working_dir_policy",
+            ),
             "skill_discovery" => push_advice(
                 &mut advice,
                 "skill discovery is noisy; prefer isolated scratch workspace for simple research tasks",
@@ -783,6 +801,7 @@ fn build_watch_advice(
 
 fn wait_reason_from_event_name(name: &str) -> Option<&'static str> {
     match name {
+        "permission.requested" => Some("permission_required"),
         "provider.waiting_for_trust" => Some("trust_required"),
         "provider.waiting_for_auth" => Some("auth_required"),
         "provider.waiting_for_tool_approval" => Some("tool_approval_required"),
@@ -1283,6 +1302,11 @@ impl McpSubagentServer {
     ) -> std::result::Result<Json<RunView>, ErrorData> {
         let (loaded, task_spec, hints, execution_policy) =
             self.prepare_run(input, RunMode::Sync)?;
+        let source_path = resolve_source_path(&task_spec.working_dir)
+            .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
+        if let Some(denied) = check_direct_workspace_permission(&loaded.spec, &source_path) {
+            return Err(ErrorData::invalid_params(denied.to_error_message(), None));
+        }
         let probe_result = self.ensure_provider_ready(&loaded.spec.core.provider)?;
         let spec_snapshot = build_run_spec_snapshot(&loaded.spec);
         let probe_snapshot = build_probe_result_snapshot(&probe_result);
@@ -1506,6 +1530,142 @@ impl McpSubagentServer {
                         phase: "provider_probe",
                         source: "runtime",
                         message: "provider unavailable",
+                        detail: json!({
+                            "error": record.error_message.clone(),
+                        }),
+                    },
+                );
+                if let Err(err) = persist_run_record(&state_dir, &task_handle_id, record) {
+                    record.error_message = Some(format!("failed to persist run state: {err}"));
+                }
+                return;
+            }
+
+            let source_path = match resolve_source_path(&task_spec.working_dir) {
+                Ok(path) => path,
+                Err(err) => {
+                    let error_message = err.to_string();
+                    let failure_outcome = RunOutcome::Failed(FailureOutcome {
+                        error: error_message.clone(),
+                        retry: RetryInfo {
+                            classification: RetryClassification::Unknown,
+                            reason: Some("invalid working directory".to_string()),
+                            attempts_used: 0,
+                        },
+                        partial_summary: Some(error_message.clone()),
+                        usage: UsageStats::ZERO,
+                    });
+                    let (artifact_index, artifacts) =
+                        build_runtime_artifacts(&failure_outcome, "", "", None);
+
+                    let mut guard = state.lock().await;
+                    guard.tasks.remove(&task_handle_id);
+                    let Some(record) = guard.runs.get_mut(&task_handle_id) else {
+                        return;
+                    };
+                    if matches!(record.status, RunPhase::Cancelled) {
+                        return;
+                    }
+                    record.status = RunPhase::Failed;
+                    record.updated_at = OffsetDateTime::now_utc();
+                    append_status_if_terminal(&mut record.status_history, RunPhase::Failed);
+                    record.error_message = Some(error_message);
+                    record.outcome = Some(failure_outcome);
+                    record.artifact_index = artifact_index;
+                    record.artifacts = artifacts;
+                    record.probe_result = Some(probe_snapshot.clone());
+                    record.memory_resolution = None;
+                    record.workspace = None;
+                    record.compiled_context_markdown = None;
+                    record.usage = None;
+                    let _ = append_run_event(
+                        &state_dir,
+                        &task_handle_id,
+                        RuntimeEventInput {
+                            event: "run.failed",
+                            state: "failed",
+                            phase: "workspace_prepare",
+                            source: "runtime",
+                            message: "invalid working directory",
+                            detail: json!({
+                                "error": record.error_message.clone(),
+                            }),
+                        },
+                    );
+                    if let Err(err) = persist_run_record(&state_dir, &task_handle_id, record) {
+                        record.error_message = Some(format!("failed to persist run state: {err}"));
+                    }
+                    return;
+                }
+            };
+            if let Some(permission_denied) =
+                check_direct_workspace_permission(&loaded.spec, &source_path)
+            {
+                let error_message = permission_denied.to_error_message();
+                let failure_outcome = RunOutcome::Failed(FailureOutcome {
+                    error: error_message.clone(),
+                    retry: RetryInfo {
+                        classification: RetryClassification::Unknown,
+                        reason: Some("permission required for direct workspace".to_string()),
+                        attempts_used: 0,
+                    },
+                    partial_summary: Some(error_message.clone()),
+                    usage: UsageStats::ZERO,
+                });
+                let (artifact_index, artifacts) =
+                    build_runtime_artifacts(&failure_outcome, "", "", None);
+
+                let _ = append_run_event(
+                    &state_dir,
+                    &task_handle_id,
+                    RuntimeEventInput {
+                        event: "permission.requested",
+                        state: "blocked",
+                        phase: "waiting_for_permission",
+                        source: "permission",
+                        message: "direct workspace permission required",
+                        detail: json!({
+                            "operation": permission_denied.operation.to_string(),
+                            "requested_path": permission_denied.requested_path.display().to_string(),
+                            "allowed_paths": permission_denied
+                                .allowed_paths
+                                .iter()
+                                .map(|path| path.display().to_string())
+                                .collect::<Vec<_>>(),
+                            "reason": permission_denied.reason,
+                        }),
+                    },
+                );
+
+                let mut guard = state.lock().await;
+                guard.tasks.remove(&task_handle_id);
+                let Some(record) = guard.runs.get_mut(&task_handle_id) else {
+                    return;
+                };
+                if matches!(record.status, RunPhase::Cancelled) {
+                    return;
+                }
+                record.status = RunPhase::Failed;
+                record.updated_at = OffsetDateTime::now_utc();
+                append_status_if_terminal(&mut record.status_history, RunPhase::Failed);
+                record.error_message = Some(error_message);
+                record.outcome = Some(failure_outcome);
+                record.artifact_index = artifact_index;
+                record.artifacts = artifacts;
+                record.probe_result = Some(probe_snapshot.clone());
+                record.memory_resolution = None;
+                record.workspace = None;
+                record.compiled_context_markdown = None;
+                record.usage = None;
+                let _ = append_run_event(
+                    &state_dir,
+                    &task_handle_id,
+                    RuntimeEventInput {
+                        event: "run.failed",
+                        state: "failed",
+                        phase: "waiting_for_permission",
+                        source: "runtime",
+                        message: "permission denied",
                         detail: json!({
                             "error": record.error_message.clone(),
                         }),
@@ -2061,6 +2221,22 @@ mod tests {
     }
 
     #[test]
+    fn classify_block_reason_from_events_detects_permission_requested() {
+        let events = vec![RunEventOutput {
+            seq: Some(1),
+            event: "permission.requested".to_string(),
+            timestamp: "2026-03-25T00:00:00Z".to_string(),
+            state: Some("blocked".to_string()),
+            phase: Some("waiting_for_permission".to_string()),
+            source: Some("permission".to_string()),
+            message: Some("direct workspace permission required".to_string()),
+            detail: serde_json::json!({}),
+        }];
+        let reason = classify_block_reason_from_events(&events, true);
+        assert_eq!(reason, Some("permission_required"));
+    }
+
+    #[test]
     fn collect_wait_reasons_deduplicates_and_tracks_latest() {
         let events = vec![
             RunEventOutput {
@@ -2093,13 +2269,27 @@ mod tests {
                 message: None,
                 detail: serde_json::json!({}),
             },
+            RunEventOutput {
+                seq: Some(4),
+                event: "permission.requested".to_string(),
+                timestamp: "2026-03-25T00:00:03Z".to_string(),
+                state: None,
+                phase: None,
+                source: None,
+                message: None,
+                detail: serde_json::json!({}),
+            },
         ];
         let (reasons, current) = collect_wait_reasons(&events);
         assert_eq!(
             reasons,
-            vec!["auth_required".to_string(), "trust_required".to_string()]
+            vec![
+                "auth_required".to_string(),
+                "trust_required".to_string(),
+                "permission_required".to_string()
+            ]
         );
-        assert_eq!(current.as_deref(), Some("trust_required"));
+        assert_eq!(current.as_deref(), Some("permission_required"));
     }
 
     #[test]
@@ -2157,6 +2347,22 @@ mod tests {
         let advice = build_watch_advice(&RunPhase::Succeeded, Some("completed"), None, false);
         assert!(
             advice.iter().any(|item| item.contains("get_run_result")),
+            "{advice:?}"
+        );
+    }
+
+    #[test]
+    fn build_watch_advice_includes_permission_guidance() {
+        let advice = build_watch_advice(
+            &RunPhase::Running,
+            Some("waiting_for_permission"),
+            Some("permission_required"),
+            false,
+        );
+        assert!(
+            advice
+                .iter()
+                .any(|item| item.contains("MCP_SUBAGENT_ALLOWED_PATHS")),
             "{advice:?}"
         );
     }

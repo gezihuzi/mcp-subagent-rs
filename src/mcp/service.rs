@@ -283,6 +283,7 @@ fn to_workspace_record(prepared: &PreparedWorkspace, lock_keys: Vec<String>) -> 
     let lock_key = lock_keys.first().cloned();
     WorkspaceRecord {
         mode: match prepared.mode {
+            WorkspaceMode::Direct => "direct",
             WorkspaceMode::InPlace => "in_place",
             WorkspaceMode::StableScratch => "stable_scratch",
             WorkspaceMode::TempCopy => "temp_copy",

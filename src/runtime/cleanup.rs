@@ -16,7 +16,7 @@ pub(crate) struct WorkspaceCleanupGuard {
 impl WorkspaceCleanupGuard {
     pub(crate) fn for_workspace(prepared: &PreparedWorkspace) -> Option<Self> {
         match prepared.mode {
-            WorkspaceMode::InPlace | WorkspaceMode::StableScratch => None,
+            WorkspaceMode::Direct | WorkspaceMode::InPlace | WorkspaceMode::StableScratch => None,
             _ => Some(Self {
                 mode: prepared.mode.clone(),
                 source_path: prepared.source_path.clone(),
@@ -27,7 +27,7 @@ impl WorkspaceCleanupGuard {
 
     fn cleanup(&self) -> std::result::Result<(), String> {
         match self.mode {
-            WorkspaceMode::InPlace | WorkspaceMode::StableScratch => Ok(()),
+            WorkspaceMode::Direct | WorkspaceMode::InPlace | WorkspaceMode::StableScratch => Ok(()),
             WorkspaceMode::TempCopy | WorkspaceMode::GitWorktreeFallbackTempCopy => {
                 remove_workspace_dir_if_exists(&self.workspace_path)
             }
@@ -123,6 +123,20 @@ mod tests {
             source_path: temp.path().to_path_buf(),
             workspace_path: temp.path().to_path_buf(),
             mode: WorkspaceMode::InPlace,
+            notes: Vec::new(),
+        };
+
+        let guard = WorkspaceCleanupGuard::for_workspace(&prepared);
+        assert!(guard.is_none());
+    }
+
+    #[test]
+    fn direct_workspace_has_no_cleanup_guard() {
+        let temp = tempdir().expect("tempdir");
+        let prepared = PreparedWorkspace {
+            source_path: temp.path().to_path_buf(),
+            workspace_path: temp.path().to_path_buf(),
+            mode: WorkspaceMode::Direct,
             notes: Vec::new(),
         };
 

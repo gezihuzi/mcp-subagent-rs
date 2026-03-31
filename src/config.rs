@@ -35,6 +35,7 @@ pub struct ProfileConfig {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub stream: Option<bool>,
+    pub working_dir_policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -459,6 +460,7 @@ agent = "backend-coder"
 provider = "codex"
 model = "gpt-5.3-codex"
 stream = true
+working_dir_policy = "direct"
 "#,
         )
         .expect("file config should parse profiles");
@@ -472,6 +474,7 @@ stream = true
         assert_eq!(profile.provider.as_deref(), Some("codex"));
         assert_eq!(profile.model.as_deref(), Some("gpt-5.3-codex"));
         assert_eq!(profile.stream, Some(true));
+        assert_eq!(profile.working_dir_policy.as_deref(), Some("direct"));
     }
 
     #[test]
@@ -489,6 +492,7 @@ state_dir = ".mcp-subagent/state"
 agent = "backend-coder"
 provider = "codex"
 stream = true
+working_dir_policy = "direct"
 "#,
         )
         .expect("write config");
@@ -503,6 +507,7 @@ stream = true
         assert_eq!(profile.agent, "backend-coder");
         assert_eq!(profile.provider.as_deref(), Some("codex"));
         assert_eq!(profile.stream, Some(true));
+        assert_eq!(profile.working_dir_policy.as_deref(), Some("direct"));
     }
 
     #[test]

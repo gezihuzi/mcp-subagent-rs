@@ -40,6 +40,7 @@ pub struct RunAgentInput {
     pub stage: Option<String>,
     pub plan_ref: Option<String>,
     pub working_dir: Option<String>,
+    pub working_dir_policy_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]

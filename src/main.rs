@@ -823,6 +823,7 @@ async fn main() -> ExitCode {
                     selected_files,
                     selected_files_inline,
                     working_dir,
+                    working_dir_policy_override: None,
                     stream,
                     json,
                 },
@@ -868,6 +869,7 @@ async fn main() -> ExitCode {
                     selected_files,
                     selected_files_inline,
                     working_dir,
+                    working_dir_policy_override: None,
                     stream,
                     json,
                 },
@@ -913,6 +915,7 @@ async fn main() -> ExitCode {
                     selected_files,
                     selected_files_inline,
                     working_dir,
+                    working_dir_policy_override: None,
                     stream,
                     json,
                 },
@@ -1974,6 +1977,17 @@ fn classify_block_reason_from_text(text: &str) -> Option<&'static str> {
     if contains_any(
         &lowered,
         &[
+            "permission required",
+            "mcp_subagent_allowed_paths",
+            "outside allowed paths",
+            "waiting_for_permission",
+        ],
+    ) {
+        return Some("permission_required");
+    }
+    if contains_any(
+        &lowered,
+        &[
             "tool approval",
             "approval required",
             "permission denied",
@@ -2050,6 +2064,7 @@ fn classify_block_reason_from_events(
 ) -> Option<&'static str> {
     for event in events.iter().rev() {
         match event.event.as_str() {
+            "permission.requested" => return Some("permission_required"),
             "provider.waiting_for_trust" => return Some("trust_required"),
             "provider.waiting_for_auth" => return Some("auth_required"),
             "provider.waiting_for_tool_approval" => return Some("tool_approval_required"),
@@ -2112,6 +2127,7 @@ fn classify_block_reason(
 
 fn wait_reason_from_event_name(name: &str) -> Option<&'static str> {
     match name {
+        "permission.requested" => Some("permission_required"),
         "provider.waiting_for_trust" => Some("trust_required"),
         "provider.waiting_for_auth" => Some("auth_required"),
         "provider.waiting_for_tool_approval" => Some("tool_approval_required"),
@@ -4308,6 +4324,7 @@ struct AgentRunCommand {
     selected_files: Vec<PathBuf>,
     selected_files_inline: Vec<PathBuf>,
     working_dir: Option<PathBuf>,
+    working_dir_policy_override: Option<String>,
     stream: bool,
     json: bool,
 }
@@ -4353,6 +4370,7 @@ async fn run_profile_sub_command(
             selected_files: Vec::new(),
             selected_files_inline: Vec::new(),
             working_dir,
+            working_dir_policy_override: profile.working_dir_policy,
             stream,
             json,
         },
@@ -4392,6 +4410,7 @@ async fn run_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
         selected_files,
         selected_files_inline,
         working_dir,
+        working_dir_policy_override,
         stream,
         json,
     } = options;
@@ -4415,6 +4434,7 @@ async fn run_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
         stage,
         plan_ref,
         working_dir: working_dir.map(|path| path.display().to_string()),
+        working_dir_policy_override,
     };
 
     if stream {
@@ -4467,6 +4487,7 @@ async fn spawn_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
         selected_files,
         selected_files_inline,
         working_dir,
+        working_dir_policy_override,
         stream,
         json,
     } = options;
@@ -4490,6 +4511,7 @@ async fn spawn_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
         stage,
         plan_ref,
         working_dir: working_dir.map(|path| path.display().to_string()),
+        working_dir_policy_override,
     };
     spawn_and_optionally_stream(cfg, input, json, stream, true, "spawn").await
 }
@@ -4505,6 +4527,7 @@ async fn submit_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode 
         selected_files,
         selected_files_inline,
         working_dir,
+        working_dir_policy_override,
         stream,
         json,
     } = options;
@@ -4528,6 +4551,7 @@ async fn submit_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode 
         stage,
         plan_ref,
         working_dir: working_dir.map(|path| path.display().to_string()),
+        working_dir_policy_override,
     };
     spawn_and_optionally_stream(cfg, input, json, stream, true, "submit").await
 }
@@ -5128,6 +5152,7 @@ mod tests {
             provider: Some("codex".to_string()),
             model: Some("gpt-5.3-codex".to_string()),
             stream: Some(false),
+            working_dir_policy: None,
         };
         assert!(super::resolve_sub_stream_enabled(
             &profile, true, false, false
@@ -6566,6 +6591,29 @@ target/
         }];
         let reason = super::classify_block_reason("running", Some("running"), true, &events, None);
         assert_eq!(reason.as_deref(), Some("auth_required"));
+    }
+
+    #[test]
+    fn classify_block_reason_detects_permission_requested_event() {
+        let events = vec![super::RunTimelineEvent {
+            event: "permission.requested".to_string(),
+            timestamp: "2026-03-25T00:00:00Z".to_string(),
+            detail: serde_json::json!({}),
+            seq: Some(1),
+            level: None,
+            state: Some("blocked".to_string()),
+            phase: Some("waiting_for_permission".to_string()),
+            source: Some("permission".to_string()),
+            message: Some("direct workspace permission required".to_string()),
+        }];
+        let reason = super::classify_block_reason(
+            "running",
+            Some("waiting_for_permission"),
+            true,
+            &events,
+            None,
+        );
+        assert_eq!(reason.as_deref(), Some("permission_required"));
     }
 
     #[test]

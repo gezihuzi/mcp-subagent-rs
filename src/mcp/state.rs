@@ -367,6 +367,7 @@ fn delegation_context_policy_to_str(
 fn working_dir_policy_to_str(policy: &WorkingDirPolicy) -> String {
     match policy {
         WorkingDirPolicy::Auto => "auto".to_string(),
+        WorkingDirPolicy::Direct => "direct".to_string(),
         WorkingDirPolicy::InPlace => "in_place".to_string(),
         WorkingDirPolicy::TempCopy => "temp_copy".to_string(),
         WorkingDirPolicy::GitWorktree => "git_worktree".to_string(),

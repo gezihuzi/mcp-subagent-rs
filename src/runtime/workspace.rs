@@ -20,6 +20,7 @@ const GEMINI_RESEARCH_SCRATCH_ENV: &str = "MCP_SUBAGENT_GEMINI_RESEARCH_SCRATCH_
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum WorkspaceMode {
+    Direct,
     InPlace,
     StableScratch,
     TempCopy,
@@ -48,6 +49,12 @@ pub fn prepare_workspace(
         WorkingDirPolicy::Auto => {
             prepare_auto_workspace(spec, task_spec, hints, source_path, state_dir, handle_id)
         }
+        WorkingDirPolicy::Direct => Ok(PreparedWorkspace {
+            source_path: source_path.clone(),
+            workspace_path: source_path,
+            mode: WorkspaceMode::Direct,
+            notes: vec!["direct policy selected source workspace".to_string()],
+        }),
         WorkingDirPolicy::InPlace => Ok(PreparedWorkspace {
             source_path: source_path.clone(),
             workspace_path: source_path,
@@ -492,6 +499,31 @@ mod tests {
             prepared.workspace_path,
             temp.path().canonicalize().expect("canon")
         );
+    }
+
+    #[test]
+    fn direct_uses_source_directory_with_note() {
+        let temp = tempdir().expect("tempdir");
+        let task_spec = sample_task_spec(temp.path().to_path_buf());
+        let hints = sample_hints(None);
+
+        let prepared = prepare_workspace(
+            &sample_spec(WorkingDirPolicy::Direct),
+            &task_spec,
+            &hints,
+            temp.path(),
+            "h1d",
+        )
+        .expect("prepare");
+        assert_eq!(prepared.mode, WorkspaceMode::Direct);
+        assert_eq!(
+            prepared.workspace_path,
+            temp.path().canonicalize().expect("canon")
+        );
+        assert!(prepared
+            .notes
+            .iter()
+            .any(|note| note.contains("direct policy selected")));
     }
 
     #[test]

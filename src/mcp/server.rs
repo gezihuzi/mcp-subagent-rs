@@ -20,7 +20,7 @@ use crate::{
     runtime::workspace::resolve_source_path,
     spec::{
         registry::{load_agent_specs_from_dirs, LoadedAgentSpec},
-        runtime_policy::{FileConflictPolicy, SandboxPolicy},
+        runtime_policy::{FileConflictPolicy, SandboxPolicy, WorkingDirPolicy},
         Provider,
     },
     types::{RunMode, SelectedFile, TaskSpec, WorkflowHints},
@@ -103,7 +103,7 @@ impl McpSubagentServer {
     ) -> std::result::Result<(LoadedAgentSpec, TaskSpec, WorkflowHints, PolicySnapshot), ErrorData>
     {
         let specs = self.load_specs()?;
-        let loaded = specs
+        let mut loaded = specs
             .into_iter()
             .find(|item| item.spec.core.name == input.agent_name)
             .ok_or_else(|| {
@@ -112,6 +112,11 @@ impl McpSubagentServer {
                     None,
                 )
             })?;
+
+        if let Some(policy_raw) = input.working_dir_policy_override.as_deref() {
+            let policy = parse_working_dir_policy_override(policy_raw)?;
+            loaded.spec.runtime.working_dir_policy = policy;
+        }
         let (preferred_run_mode, preferred_run_mode_source) =
             resolve_preferred_run_mode(&loaded.spec);
         let (effective_run_mode, run_mode_source, should_reject_mode_mismatch) =
@@ -319,6 +324,28 @@ pub(crate) fn provider_unavailable_message(provider: &Provider, details: &[Strin
         provider.as_str(),
         details.join("; ")
     )
+}
+
+fn parse_working_dir_policy_override(
+    raw: &str,
+) -> std::result::Result<WorkingDirPolicy, ErrorData> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    let policy = match normalized.as_str() {
+        "auto" => WorkingDirPolicy::Auto,
+        "direct" => WorkingDirPolicy::Direct,
+        "in_place" => WorkingDirPolicy::InPlace,
+        "temp_copy" => WorkingDirPolicy::TempCopy,
+        "git_worktree" => WorkingDirPolicy::GitWorktree,
+        _ => {
+            return Err(ErrorData::invalid_params(
+                format!(
+                    "unsupported working_dir_policy override `{raw}`; supported: auto|direct|in_place|temp_copy|git_worktree"
+                ),
+                None,
+            ));
+        }
+    };
+    Ok(policy)
 }
 
 pub(crate) async fn acquire_serialize_locks_from_state(
@@ -692,6 +719,7 @@ sandbox = "read_only"
             stage: None,
             plan_ref: None,
             working_dir: None,
+            working_dir_policy_override: None,
         };
         let out = server
             .run_agent(rmcp::handler::server::wrapper::Parameters(input))
@@ -707,6 +735,71 @@ sandbox = "read_only"
             }
             other => panic!("expected succeeded outcome, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn run_agent_applies_working_dir_policy_override() {
+        let temp = tempdir().expect("temp");
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        write_agent_spec(&agents_dir);
+        let server = make_server(agents_dir, state_dir.clone());
+
+        let out = server
+            .run_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
+                agent_name: "reviewer".to_string(),
+                task: "override workspace policy".to_string(),
+                task_brief: None,
+                parent_summary: None,
+                selected_files: Vec::new(),
+                stage: None,
+                plan_ref: None,
+                working_dir: None,
+                working_dir_policy_override: Some("direct".to_string()),
+            }))
+            .await
+            .expect("run")
+            .0;
+        assert!(out.terminal);
+
+        let run_json =
+            fs::read_to_string(state_dir.join("runs").join(&out.handle_id).join("run.json"))
+                .expect("read run json");
+        let run_obj: serde_json::Value = serde_json::from_str(&run_json).expect("parse run json");
+        assert_eq!(run_obj["spec_snapshot"]["working_dir_policy"], "direct");
+    }
+
+    #[tokio::test]
+    async fn run_agent_rejects_invalid_working_dir_policy_override() {
+        let temp = tempdir().expect("temp");
+        let agents_dir = temp.path().join("agents");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&agents_dir).expect("create agents");
+        write_agent_spec(&agents_dir);
+        let server = make_server(agents_dir, state_dir);
+
+        let err = match server
+            .run_agent(rmcp::handler::server::wrapper::Parameters(RunAgentInput {
+                agent_name: "reviewer".to_string(),
+                task: "invalid override".to_string(),
+                task_brief: None,
+                parent_summary: None,
+                selected_files: Vec::new(),
+                stage: None,
+                plan_ref: None,
+                working_dir: None,
+                working_dir_policy_override: Some("bad-policy".to_string()),
+            }))
+            .await
+        {
+            Ok(_) => panic!("run should fail for invalid override"),
+            Err(err) => err,
+        };
+        assert!(err
+            .message
+            .as_ref()
+            .contains("unsupported working_dir_policy override"));
     }
 
     #[tokio::test]
@@ -737,6 +830,7 @@ sandbox = "read_only"
                 stage: None,
                 plan_ref: None,
                 working_dir: None,
+                working_dir_policy_override: None,
             }))
             .await
         {
@@ -776,6 +870,7 @@ sandbox = "read_only"
                 stage: None,
                 plan_ref: None,
                 working_dir: None,
+                working_dir_policy_override: None,
             }))
             .await
             .expect("spawn")
@@ -843,6 +938,7 @@ sandbox = "read_only"
                 stage: None,
                 plan_ref: None,
                 working_dir: None,
+                working_dir_policy_override: None,
             }))
             .await
             .expect("spawn")
@@ -935,6 +1031,7 @@ exit 0
                     stage: None,
                     plan_ref: None,
                     working_dir: Some(workspace_dir.display().to_string()),
+                    working_dir_policy_override: None,
                 }))
                 .await
                 .expect("spawn")
@@ -1065,6 +1162,7 @@ exit 0
                 stage: None,
                 plan_ref: None,
                 working_dir: None,
+                working_dir_policy_override: None,
             }))
             .await
         {
@@ -1102,6 +1200,7 @@ exit 0
                 stage: None,
                 plan_ref: None,
                 working_dir: None,
+                working_dir_policy_override: None,
             }))
             .await
         {
@@ -1143,6 +1242,7 @@ exit 0
                 stage: None,
                 plan_ref: None,
                 working_dir: None,
+                working_dir_policy_override: None,
             }))
             .await
         {
@@ -1682,6 +1782,7 @@ exit 0
                 stage: None,
                 plan_ref: None,
                 working_dir: None,
+                working_dir_policy_override: None,
             }))
             .await
             .expect("run")
@@ -1765,6 +1866,7 @@ sandbox = "workspace_write"
                 stage: None,
                 plan_ref: None,
                 working_dir: Some(project_dir.display().to_string()),
+                working_dir_policy_override: None,
             }))
             .await
             .expect("run")

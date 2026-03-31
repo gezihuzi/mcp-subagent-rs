@@ -41,6 +41,7 @@ async fn example_workflow_build_stage_with_plan_ref_succeeds() {
             stage: Some("Build".to_string()),
             plan_ref: Some("PLAN.md".to_string()),
             working_dir: Some(workflow_workspace_dir().display().to_string()),
+            working_dir_policy_override: None,
         }))
         .await
         .expect("run should succeed")
@@ -76,6 +77,7 @@ async fn example_workflow_build_stage_without_plan_fails_gate() {
             stage: Some("Build".to_string()),
             plan_ref: None,
             working_dir: Some(workspace.display().to_string()),
+            working_dir_policy_override: None,
         }))
         .await
     {
@@ -111,6 +113,7 @@ async fn example_workflow_depth_limit_rejects_nested_runtime_run() {
             stage: Some("Build".to_string()),
             plan_ref: Some("PLAN.md".to_string()),
             working_dir: Some(workflow_workspace_dir().display().to_string()),
+            working_dir_policy_override: None,
         }))
         .await
     {
