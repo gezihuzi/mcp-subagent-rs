@@ -32,3 +32,6 @@ jobs:
 
       - name: v0.8 Release Smoke
         run: ./scripts/smoke_v08.sh
+
+      - name: v1.2 Permission Smoke
+        run: ./scripts/smoke_v12_permission.sh

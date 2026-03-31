@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
-    io::{IsTerminal, Read, Seek, SeekFrom},
+    io::{IsTerminal, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     time::Instant,
@@ -840,6 +840,7 @@ async fn main() -> ExitCode {
                     working_dir,
                     working_dir_policy_override: None,
                     render_style: None,
+                    permission_interactive: false,
                     stream,
                     json,
                 },
@@ -887,6 +888,7 @@ async fn main() -> ExitCode {
                     working_dir,
                     working_dir_policy_override: None,
                     render_style: None,
+                    permission_interactive: false,
                     stream,
                     json,
                 },
@@ -934,6 +936,7 @@ async fn main() -> ExitCode {
                     working_dir,
                     working_dir_policy_override: None,
                     render_style: None,
+                    permission_interactive: false,
                     stream,
                     json,
                 },
@@ -1747,6 +1750,9 @@ fn render_status_output_text(output: &RunStatusOutput) -> String {
             output.wait_reasons.join(",")
         }
     ));
+    if output.block_reason.as_deref() == Some("permission_required") {
+        lines.extend(permission_hint_lines(&output.handle_id));
+    }
     if !output.advice.is_empty() {
         lines.push(format!("advice: {}", output.advice.join(" | ")));
     }
@@ -1761,6 +1767,41 @@ fn render_status_output_text(output: &RunStatusOutput) -> String {
         }
     }
     lines.join("\n")
+}
+
+fn permission_hint_lines(handle_id: &str) -> Vec<String> {
+    vec![
+        format!("permission_approve_cmd: mcp-subagent approve {handle_id}"),
+        format!("permission_deny_cmd: mcp-subagent deny {handle_id} --reason \"owner denied\""),
+        "permission_allowlist_env: MCP_SUBAGENT_ALLOWED_PATHS".to_string(),
+    ]
+}
+
+fn print_permission_hints(handle_id: &str) {
+    for line in permission_hint_lines(handle_id) {
+        println!("{line}");
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionPromptDecision {
+    Approve,
+    Deny,
+    Skip,
+}
+
+fn prompt_permission_decision(handle_id: &str) -> PermissionPromptDecision {
+    print!("permission required for handle `{handle_id}`; approve now? [a]pprove/[d]eny/[s]kip: ");
+    let _ = std::io::stdout().flush();
+    let mut buf = String::new();
+    if std::io::stdin().read_line(&mut buf).is_err() {
+        return PermissionPromptDecision::Skip;
+    }
+    match buf.trim().to_ascii_lowercase().as_str() {
+        "a" | "approve" | "y" | "yes" => PermissionPromptDecision::Approve,
+        "d" | "deny" | "n" | "no" => PermissionPromptDecision::Deny,
+        _ => PermissionPromptDecision::Skip,
+    }
 }
 
 fn runs_root(state_dir: &Path) -> PathBuf {
@@ -2197,6 +2238,13 @@ fn wait_reason_from_event_name(name: &str) -> Option<&'static str> {
 fn collect_wait_reasons(events: &[RunTimelineEvent]) -> (Vec<String>, Option<String>) {
     let mut reasons = Vec::new();
     for event in events {
+        match event.event.as_str() {
+            "permission.approved" | "permission.denied" => {
+                reasons.retain(|existing| existing != "permission_required");
+                continue;
+            }
+            _ => {}
+        }
         let Some(reason) = wait_reason_from_event_name(&event.event) else {
             continue;
         };
@@ -3320,10 +3368,17 @@ fn read_timeline(
         println!("no events found");
         return ExitCode::SUCCESS;
     }
+    let (wait_reasons, _) = collect_wait_reasons(&events);
 
     for item in events {
         let detail = serde_json::to_string(&item.detail).unwrap_or_else(|_| "null".to_string());
         println!("{} [{}] {}", item.display_timestamp(), item.event, detail);
+    }
+    if wait_reasons
+        .iter()
+        .any(|reason| reason.as_str() == "permission_required")
+    {
+        print_permission_hints(&handle_id);
     }
     ExitCode::SUCCESS
 }
@@ -3386,6 +3441,7 @@ async fn read_events(cfg: RuntimeConfig, options: ReadEventsOptions) -> ExitCode
     let mut last_phase_progress = String::new();
     let mut observed_phase: Option<String> = None;
     let mut observed_phase_started_at = Instant::now();
+    let mut permission_hint_printed = false;
     let sleep_ms = interval_ms.max(50);
     loop {
         let record = match load_run_record(&cfg.state_dir, &handle_id) {
@@ -3460,6 +3516,18 @@ async fn read_events(cfg: RuntimeConfig, options: ReadEventsOptions) -> ExitCode
                     println!("{line}");
                     last_phase_progress = line;
                 }
+            }
+        }
+        if !json && !permission_hint_printed {
+            let stats = build_run_stats_output(
+                &cfg.state_dir,
+                &handle_id,
+                &record,
+                OffsetDateTime::now_utc(),
+            );
+            if stats.block_reason.as_deref() == Some("permission_required") {
+                print_permission_hints(&handle_id);
+                permission_hint_printed = true;
             }
         }
 
@@ -3769,6 +3837,7 @@ async fn watch_run(
     let mut last_phase_progress = String::new();
     let mut observed_phase: Option<String> = None;
     let mut observed_phase_started_at = Instant::now();
+    let mut permission_hint_printed = false;
     loop {
         let record = match load_run_record(&cfg.state_dir, &handle_id) {
             Ok(record) => record,
@@ -3826,6 +3895,18 @@ async fn watch_run(
             if record.status() != last_status {
                 println!("{} {}", record.status(), record.updated_at());
                 last_status = record.status().to_string();
+            }
+            if !permission_hint_printed {
+                let stats = build_run_stats_output(
+                    &cfg.state_dir,
+                    &handle_id,
+                    &record,
+                    OffsetDateTime::now_utc(),
+                );
+                if stats.block_reason.as_deref() == Some("permission_required") {
+                    print_permission_hints(&handle_id);
+                    permission_hint_printed = true;
+                }
             }
         }
 
@@ -4382,6 +4463,7 @@ struct AgentRunCommand {
     working_dir: Option<PathBuf>,
     working_dir_policy_override: Option<WorkingDirPolicy>,
     render_style: Option<RenderStyle>,
+    permission_interactive: bool,
     stream: bool,
     json: bool,
 }
@@ -4415,6 +4497,9 @@ async fn run_profile_sub_command(
     };
 
     let stream = resolve_sub_stream_enabled(&profile, stream, no_stream, json);
+    let permission_interactive = !json
+        && profile_name == "codex"
+        && matches!(profile.render_style, Some(RenderStyle::Codex));
     run_agent(
         cfg,
         AgentRunCommand {
@@ -4429,6 +4514,7 @@ async fn run_profile_sub_command(
             working_dir,
             working_dir_policy_override: profile.working_dir_policy,
             render_style: profile.render_style,
+            permission_interactive,
             stream,
             json,
         },
@@ -4470,6 +4556,7 @@ async fn run_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
         working_dir,
         working_dir_policy_override,
         render_style,
+        permission_interactive,
         stream,
         json,
     } = options;
@@ -4497,8 +4584,19 @@ async fn run_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
     };
 
     if stream {
-        return spawn_and_optionally_stream(cfg, input, json, true, false, "run", render_style)
-            .await;
+        return spawn_and_optionally_stream(
+            cfg,
+            input,
+            SpawnAndStreamOptions {
+                json,
+                stream: true,
+                announce_keepalive: false,
+                error_label: "run",
+                render_style,
+                permission_interactive,
+            },
+        )
+        .await;
     }
 
     let server = McpSubagentServer::new_with_state_dir(cfg.agents_dirs, cfg.state_dir);
@@ -4551,6 +4649,7 @@ async fn spawn_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
         working_dir,
         working_dir_policy_override,
         render_style,
+        permission_interactive: _,
         stream,
         json,
     } = options;
@@ -4576,7 +4675,19 @@ async fn spawn_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
         working_dir: working_dir.map(|path| path.display().to_string()),
         working_dir_policy_override,
     };
-    spawn_and_optionally_stream(cfg, input, json, stream, true, "spawn", render_style).await
+    spawn_and_optionally_stream(
+        cfg,
+        input,
+        SpawnAndStreamOptions {
+            json,
+            stream,
+            announce_keepalive: true,
+            error_label: "spawn",
+            render_style,
+            permission_interactive: false,
+        },
+    )
+    .await
 }
 
 async fn submit_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode {
@@ -4592,6 +4703,7 @@ async fn submit_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode 
         working_dir,
         working_dir_policy_override,
         render_style,
+        permission_interactive: _,
         stream,
         json,
     } = options;
@@ -4617,7 +4729,19 @@ async fn submit_agent(cfg: RuntimeConfig, options: AgentRunCommand) -> ExitCode 
         working_dir: working_dir.map(|path| path.display().to_string()),
         working_dir_policy_override,
     };
-    spawn_and_optionally_stream(cfg, input, json, stream, true, "submit", render_style).await
+    spawn_and_optionally_stream(
+        cfg,
+        input,
+        SpawnAndStreamOptions {
+            json,
+            stream,
+            announce_keepalive: true,
+            error_label: "submit",
+            render_style,
+            permission_interactive: false,
+        },
+    )
+    .await
 }
 
 fn cli_spawn_waits_for_completion() -> bool {
@@ -4697,15 +4821,99 @@ async fn follow_streamed_run(cfg: RuntimeConfig, handle_id: String, json: bool) 
     .await
 }
 
-async fn spawn_and_optionally_stream(
-    cfg: RuntimeConfig,
-    input: RunAgentInput,
+#[derive(Default)]
+struct InteractiveStreamState {
+    event_cursor: EventStreamCursor,
+    all_events: Vec<RunTimelineEvent>,
+    seen_stdout_bytes: usize,
+    seen_stderr_bytes: usize,
+    last_phase_progress: String,
+}
+
+fn follow_streamed_run_tick(
+    cfg: &RuntimeConfig,
+    handle_id: &str,
+    record: &StoredRunRecord,
+    json: bool,
+    state: &mut InteractiveStreamState,
+) -> std::result::Result<(), String> {
+    let new_events = collect_watch_events_incremental(
+        &cfg.state_dir,
+        handle_id,
+        &mut state.event_cursor,
+        &mut state.all_events,
+    )?;
+    for event in &new_events {
+        print_event_follow_line(handle_id, event, json)?;
+    }
+    if !json {
+        if let Some(line) = build_phase_progress_line(
+            &state.all_events,
+            is_terminal_status(record.status()),
+            OffsetDateTime::now_utc(),
+            None,
+        ) {
+            if line != state.last_phase_progress {
+                println!("{line}");
+                state.last_phase_progress = line;
+            }
+        }
+    }
+
+    if let Some(stdout) = read_artifact_from_disk(&cfg.state_dir, handle_id, "stdout.txt")? {
+        if state.seen_stdout_bytes > stdout.len() {
+            state.seen_stdout_bytes = 0;
+        }
+        let delta = &stdout[state.seen_stdout_bytes..];
+        if !delta.is_empty() {
+            if json {
+                print_stream_delta_json(handle_id, "stdout", delta)?;
+            } else {
+                print_stream_delta_text("stdout", delta);
+            }
+            state.seen_stdout_bytes = stdout.len();
+        }
+    }
+
+    if let Some(stderr) = read_artifact_from_disk(&cfg.state_dir, handle_id, "stderr.txt")? {
+        if state.seen_stderr_bytes > stderr.len() {
+            state.seen_stderr_bytes = 0;
+        }
+        let delta = &stderr[state.seen_stderr_bytes..];
+        if !delta.is_empty() {
+            if json {
+                print_stream_delta_json(handle_id, "stderr", delta)?;
+            } else {
+                print_stream_delta_text("stderr", delta);
+            }
+            state.seen_stderr_bytes = stderr.len();
+        }
+    }
+    Ok(())
+}
+
+struct SpawnAndStreamOptions<'a> {
     json: bool,
     stream: bool,
     announce_keepalive: bool,
-    error_label: &str,
+    error_label: &'a str,
     render_style: Option<RenderStyle>,
+    permission_interactive: bool,
+}
+
+async fn spawn_and_optionally_stream(
+    cfg: RuntimeConfig,
+    input: RunAgentInput,
+    options: SpawnAndStreamOptions<'_>,
 ) -> ExitCode {
+    let SpawnAndStreamOptions {
+        json,
+        stream,
+        announce_keepalive,
+        error_label,
+        render_style,
+        permission_interactive,
+    } = options;
     let server =
         McpSubagentServer::new_with_state_dir(cfg.agents_dirs.clone(), cfg.state_dir.clone());
     match server.spawn_agent(Parameters(input)).await {
@@ -4715,6 +4923,127 @@ async fn spawn_and_optionally_stream(
                 if let Err(err) = print_stream_accepted_output(&output, json) {
                     eprintln!("stream failed: {err}");
                     return ExitCode::from(1);
+                }
+                if permission_interactive
+                    && !json
+                    && std::io::stdout().is_terminal()
+                    && std::io::stderr().is_terminal()
+                {
+                    let mut follow_state = InteractiveStreamState::default();
+                    loop {
+                        let record = match load_run_record(&cfg.state_dir, &output.handle_id) {
+                            Ok(record) => record,
+                            Err(err) => {
+                                eprintln!("stream failed: {err}");
+                                return ExitCode::from(1);
+                            }
+                        };
+                        if let Err(err) = follow_streamed_run_tick(
+                            &cfg,
+                            &output.handle_id,
+                            &record,
+                            json,
+                            &mut follow_state,
+                        ) {
+                            eprintln!("stream failed: {err}");
+                            return ExitCode::from(1);
+                        }
+                        let stats = build_run_stats_output(
+                            &cfg.state_dir,
+                            &output.handle_id,
+                            &record,
+                            OffsetDateTime::now_utc(),
+                        );
+                        if stats.block_reason.as_deref() == Some("permission_required") {
+                            print_permission_hints(&output.handle_id);
+                            match prompt_permission_decision(&output.handle_id) {
+                                PermissionPromptDecision::Approve => {
+                                    match server
+                                        .approve_permission(Parameters(HandleInput {
+                                            handle_id: output.handle_id.clone(),
+                                        }))
+                                        .await
+                                    {
+                                        Ok(_) => {
+                                            println!(
+                                                "permission approved; resumed `{}`",
+                                                output.handle_id
+                                            );
+                                        }
+                                        Err(err) => {
+                                            eprintln!("approve failed: {}", err.message);
+                                            return ExitCode::from(1);
+                                        }
+                                    }
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(200))
+                                        .await;
+                                    continue;
+                                }
+                                PermissionPromptDecision::Deny => {
+                                    if let Err(err) = server
+                                        .deny_permission(Parameters(DenyPermissionInput {
+                                            handle_id: output.handle_id.clone(),
+                                            reason: Some(
+                                                "denied via sub interactive prompt".to_string(),
+                                            ),
+                                        }))
+                                        .await
+                                    {
+                                        eprintln!("deny failed: {}", err.message);
+                                        return ExitCode::from(1);
+                                    }
+                                    match fetch_status_output(&server, output.handle_id.clone())
+                                        .await
+                                    {
+                                        Ok(status) => {
+                                            if let Err(err) = print_stream_terminal_output(
+                                                &status,
+                                                json,
+                                                render_style,
+                                            ) {
+                                                eprintln!("stream failed: {err}");
+                                                return ExitCode::from(1);
+                                            }
+                                            return wait_exit_code(status.status.as_str());
+                                        }
+                                        Err(err) => {
+                                            eprintln!("stream failed: {err}");
+                                            return ExitCode::from(1);
+                                        }
+                                    }
+                                }
+                                PermissionPromptDecision::Skip => {
+                                    eprintln!(
+                                        "stream paused: run `{}` is waiting for permission decision",
+                                        output.handle_id
+                                    );
+                                    print_permission_hints(&output.handle_id);
+                                    return ExitCode::from(1);
+                                }
+                            }
+                        }
+                        if is_terminal_status(record.status()) {
+                            match fetch_status_output(&server, output.handle_id.clone()).await {
+                                Ok(status) => {
+                                    if let Err(err) =
+                                        print_stream_terminal_output(&status, json, render_style)
+                                    {
+                                        eprintln!("stream failed: {err}");
+                                        return ExitCode::from(1);
+                                    }
+                                    return wait_exit_code(status.status.as_str());
+                                }
+                                Err(err) => {
+                                    eprintln!("stream failed: {err}");
+                                    return ExitCode::from(1);
+                                }
+                            }
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            STREAM_FOLLOW_INTERVAL_MS,
+                        ))
+                        .await;
+                    }
                 }
                 let follow_code =
                     follow_streamed_run(cfg.clone(), output.handle_id.clone(), json).await;
@@ -5833,6 +6162,33 @@ target/
     }
 
     #[test]
+    fn render_status_output_includes_permission_commands_when_blocked() {
+        let output = super::RunStatusOutput {
+            handle_id: "handle-perm".to_string(),
+            agent_name: "codex".to_string(),
+            task_brief: None,
+            status: "running".to_string(),
+            state: Some("blocked".to_string()),
+            phase: "waiting_for_permission".to_string(),
+            terminal: false,
+            created_at: "2026-03-31T00:00:00Z".to_string(),
+            updated_at: "2026-03-31T00:00:10Z".to_string(),
+            stalled: true,
+            block_reason: Some("permission_required".to_string()),
+            last_event_at: Some("2026-03-31T00:00:10Z".to_string()),
+            last_event_age_ms: Some(1_000),
+            current_wait_reason: Some("permission_required".to_string()),
+            wait_reasons: vec!["permission_required".to_string()],
+            advice: Vec::new(),
+            outcome: None,
+        };
+
+        let rendered = super::render_status_output_text(&output);
+        assert!(rendered.contains("permission_approve_cmd: mcp-subagent approve handle-perm"));
+        assert!(rendered.contains("permission_deny_cmd: mcp-subagent deny handle-perm"));
+    }
+
+    #[test]
     fn show_renderer_emits_color_badge_when_enabled() {
         let view = RunShowOutput {
             handle_id: "run-1".to_string(),
@@ -6739,6 +7095,37 @@ target/
             None,
         );
         assert_eq!(reason.as_deref(), Some("permission_required"));
+    }
+
+    #[test]
+    fn collect_wait_reasons_clears_permission_after_decision_event() {
+        let events = vec![
+            super::RunTimelineEvent {
+                event: "permission.requested".to_string(),
+                timestamp: "2026-03-25T00:00:00Z".to_string(),
+                detail: serde_json::json!({}),
+                seq: Some(1),
+                level: None,
+                state: Some("blocked".to_string()),
+                phase: Some("waiting_for_permission".to_string()),
+                source: Some("permission".to_string()),
+                message: None,
+            },
+            super::RunTimelineEvent {
+                event: "permission.approved".to_string(),
+                timestamp: "2026-03-25T00:00:01Z".to_string(),
+                detail: serde_json::json!({}),
+                seq: Some(2),
+                level: None,
+                state: Some("running".to_string()),
+                phase: Some("waiting_for_permission".to_string()),
+                source: Some("permission".to_string()),
+                message: None,
+            },
+        ];
+        let (reasons, current) = super::collect_wait_reasons(&events);
+        assert!(reasons.is_empty(), "{reasons:?}");
+        assert!(current.is_none());
     }
 
     #[test]

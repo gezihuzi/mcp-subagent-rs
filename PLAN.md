@@ -41,6 +41,13 @@
 回滚策略：仅扩展 CLI 子命令、权限事件 detail 构造与增量 smoke，不修改 `mcp-subagent.result.v1` 契约；若 CLI 决策入口体验不达预期，可单独回退 `approve/deny` 命令与 smoke 脚本，不影响既有 MCP 工具链。
 风险与控制：CLI 进程边界可能导致 pending context 丢失和续跑中断；通过 `approve/deny` 先加载持久化 run、缺失 pending 时按 run snapshot 重建上下文、以及 CLI 默认 keepalive 到任务落盘，确保跨进程也能稳定续跑。
 
+### Batch V1.2-P2 - Permission UX Polish + Gate Integration（已完成）
+
+目标：把权限链路纳入发布与 CI 质量门槛，同时降低人工决策成本：在 `status/watch/events` 中直接输出可执行 `approve/deny` 命令，并在 `sub codex` 阻塞时提供同命令内交互式批准/拒绝，做到最小切换。
+依赖顺序：`T-171 -> T-172`。
+回滚策略：仅改 CLI 体验层和脚本/CI 编排，不修改 MCP/runtime 结果契约；若交互提示策略不理想，可单独回退 `sub codex` 权限提示与 CI 新 smoke 步骤。
+风险与控制：交互式阻塞处理若实现粗糙会造成 stream 噪音或死等；通过增量事件/日志游标输出、阻塞态单点提示、以及明确 `approve/deny` 命令模板控制可理解性与可恢复性。
+
 ## Execution Strategy (v0.10 Current)
 
 ### Batch V1.0-P11 - Release Branch Cut（已完成）

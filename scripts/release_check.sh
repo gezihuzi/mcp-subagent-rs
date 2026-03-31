@@ -74,4 +74,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 echo "[release-check] bash scripts/smoke_v08.sh"
 bash scripts/smoke_v08.sh
 
+echo "[release-check] bash scripts/smoke_v12_permission.sh"
+bash scripts/smoke_v12_permission.sh
+
 echo "[release-check] ok (${version})"
